@@ -81,11 +81,13 @@ def get_queue(name: str = "default"):
     return _rq_default
 
 
-def enqueue(fn: Callable[..., Any], *args: Any, queue: str = "default", **kwargs: Any) -> str:
+def enqueue(fn: Callable[..., Any], *args: Any, queue: str = "default", job_timeout: int | None = None, **kwargs: Any) -> str:
     """Enqueue a callable. Returns a job id (real RQ id or synthetic 'bg-<n>')."""
     if _rq_default is not None:
         q = _rq_high if queue == "high" else _rq_default
-        job = q.enqueue(fn, *args, **kwargs)
+        # job_timeout=None → дефолт RQ (180 c). Для долгих сканов вызывающий
+        # передаёт явное значение (см. app/api/scan.py).
+        job = q.enqueue(fn, *args, job_timeout=job_timeout, **kwargs)
         return job.get_id()
     if _executor is None:
         init_redis()

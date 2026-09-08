@@ -132,12 +132,37 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
 
             async def _do_fetch():
                 artists_cnt = albums_cnt = tracks_cnt = 0
-                async with SubsonicClient(url, auth) as client:
+                # getArtists на большой библиотеке может отвечать дольше дефолтных
+                # 30 секунд httpx — ставим 120 и даём понятную ошибку при таймауте.
+                async with SubsonicClient(url, auth, timeout=120.0) as client:
                     ok = await client.ping()
                     if not ok:
                         raise RuntimeError("ping failed — проверьте URL/логин/пароль")
-                    _append_log(run_id, "info", "ping ok, получаю список артистов…")
-                    artists = await client.get_artists()
+                    _append_log(run_id, "info", "ping ok, проверяю папки и статус Navidrome…")
+                    try:
+                        folders = await client.get_music_folders()
+                        names = [f.get("name") or f.get("id") for f in folders] or ["(папок нет)"]
+                        _append_log(run_id, "info", f"Папки музыки в Navidrome: {', '.join(str(n) for n in names)}")
+                    except Exception as e:
+                        _append_log(run_id, "warn", f"getMusicFolders failed: {e}")
+                    try:
+                        scan_status = await client.get_scan_status()
+                        if scan_status and str(scan_status.get("scanning")).lower() == "true":
+                            _append_log(run_id, "warn", "Navidrome сейчас сам сканирует папки — его ответы могут быть медленными. Дождитесь конца его сканирования и повторите.")
+                    except Exception:
+                        pass  # старые версии Navidrome не знают getScanStatus
+                    _append_log(run_id, "info", "получаю список артистов…")
+                    try:
+                        artists = await client.get_artists()
+                    except Exception as e:
+                        if "timeout" in type(e).__name__.lower() or "timeout" in str(e).lower():
+                            raise RuntimeError(
+                                "Navidrome не отдал список артистов за 120 секунд. "
+                                "Обычно это значит: библиотека очень большая или Navidrome "
+                                "занят собственным сканированием папок — дождитесь его "
+                                "завершения в интерфейсе Navidrome и запустите скан ещё раз."
+                            ) from e
+                        raise
                     total_artists = len(artists)
                     # для первого прогона берём только 100 артистов чтобы быстро показать результат
                     # повторный запуск догрузит следующих 100 (инкрементально)
