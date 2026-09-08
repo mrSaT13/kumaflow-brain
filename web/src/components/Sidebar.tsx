@@ -34,7 +34,7 @@ export function Sidebar() {
   return (
     <aside className="w-[240px] border-r border-border bg-bg sticky top-0 h-screen hidden md:flex md:flex-col">
       <div className="px-6 py-6 flex items-center gap-2">
-        <img src="/favicon.svg" alt="" className="w-6 h-6" />
+        <img src="/app-icon.png" alt="KumaFlow" className="w-6 h-6 rounded-full" />
         <div>
           <div className="font-semibold tracking-tight">KumaFlow</div>
           <div className="text-[11px] text-muted">brain · v0.1.0</div>

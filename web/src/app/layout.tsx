@@ -6,7 +6,7 @@ import { Topbar } from "@/components/Topbar";
 export const metadata: Metadata = {
   title: "KumaFlow Brain",
   description: "Самохостинг ИИ для вашей музыкальной библиотеки",
-  icons: { icon: "/favicon.svg" },
+  icons: { icon: "/app-icon.png", apple: "/app-icon.png" },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
