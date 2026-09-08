@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import random
+import re
 import time
 import uuid
 from datetime import datetime, date
@@ -50,6 +52,179 @@ def noop(*args, **kwargs):
     return {"ok": True}
 
 
+def _disk_external_id(prefix: str, *parts: str) -> str:
+    """Стабильный external_id для сущностей с диска (влезает в String(128))."""
+    h = hashlib.sha1("\x00".join(parts).encode("utf-8", "ignore")).hexdigest()
+    return f"{prefix}{h[:40]}"
+
+
+def _split_disc_no(v: str | None) -> int | None:
+    if not v:
+        return None
+    return _to_int(str(v).split("/")[0].strip())
+
+
+def _year_from_tag(v: str | None) -> int | None:
+    if not v:
+        return None
+    s = str(v).strip()[:4]
+    return int(s) if s.isdigit() else None
+
+
+def _read_disk_tags(path: Path) -> dict:
+    """Теги файла через mutagen. Без тегов — пустые поля (дополнит парсинг имени)."""
+    meta = {"title": None, "artist": None, "album": None, "genre": None,
+            "year": None, "track_no": None, "disc_no": None,
+            "duration_sec": None, "bitrate": None}
+    try:
+        from mutagen import File as _MutagenFile
+        audio = _MutagenFile(str(path), easy=True)
+    except Exception:
+        return meta
+    if audio is None:
+        return meta
+
+    def first(key: str) -> str | None:
+        try:
+            vals = audio.get(key)
+        except Exception:
+            return None
+        if not vals:
+            return None
+        s = str(vals[0]).strip()
+        return s or None
+
+    meta["title"] = first("title")
+    meta["artist"] = first("artist")
+    meta["album"] = first("album")
+    meta["genre"] = first("genre")
+    meta["year"] = _year_from_tag(first("date"))
+    meta["track_no"] = _split_disc_no(first("tracknumber"))
+    meta["disc_no"] = _split_disc_no(first("discnumber"))
+    try:
+        if getattr(audio.info, "length", None):
+            meta["duration_sec"] = int(float(audio.info.length))
+        br = getattr(audio.info, "bitrate", None)
+        if br:
+            meta["bitrate"] = int(br // 1000)
+    except Exception:
+        pass
+    return meta
+
+
+def _fallback_from_filename(path: Path, rel_parts: list[str]) -> tuple[str, str, str]:
+    """Artist/Album/Title когда тегов нет: папки + имя файла без номера."""
+    stem = path.stem.strip()
+    m = re.match(r"^\d{1,3}\s*[-._\s]+\s*(.+)$", stem)
+    title = (m.group(1).strip() if m else stem) or stem
+    artist = album = None
+    if len(rel_parts) >= 2:
+        artist, album = rel_parts[0], rel_parts[1]
+    elif len(rel_parts) == 1:
+        album = rel_parts[0]
+    return artist or "Unknown Artist", album or "Unknown Album", title
+
+
+_CONTENT_BY_SUFFIX = {
+    "mp3": "audio/mpeg", "flac": "audio/flac", "ogg": "audio/ogg",
+    "oga": "audio/ogg", "opus": "audio/ogg", "m4a": "audio/mp4",
+    "wav": "audio/wav", "wma": "audio/x-ms-wma", "aac": "audio/aac",
+}
+
+
+def _scan_disk_music(run_id: str, server_id: str) -> dict:
+    """Сканирование примонтированного тома MUSIC_DIR (вариант А из compose).
+
+    Navidrome про эту папку ничего не знает — читаем теги напрямую через
+    mutagen и кладём в те же таблицы (external_id с префиксом disk-,
+    с данными Navidrome не пересекаются). Если папка не задана/пуста —
+    возвращает нули без ошибок.
+    """
+    from app.core.config import get_settings
+    from app.services import audio_analysis as aa
+
+    try:
+        music_dir = (get_settings().music_dir or os.getenv("MUSIC_DIR", "")).strip()
+    except Exception:
+        music_dir = os.getenv("MUSIC_DIR", "").strip()
+    empty = {"files": 0, "tracks": 0, "artists": 0, "albums": 0, "music_dir": music_dir}
+    if not music_dir:
+        return empty
+    base = Path(music_dir)
+    if not base.is_dir():
+        _append_log(run_id, "warn", f"MUSIC_DIR={music_dir} не виден внутри worker-контейнера — проверьте volumes (пример в docker-compose.yml: /путь/к/музыке:/music:ro и MUSIC_DIR=/music)")
+        return empty
+    suffixes = {s.lower() for s in (getattr(aa, "AUDIO_SUFFIXES", None) or {".mp3", ".flac", ".ogg", ".m4a", ".wav"})}
+    files: list[Path] = []
+    for p in sorted(base.rglob("*")):
+        try:
+            if p.is_file() and p.suffix.lower() in suffixes:
+                files.append(p)
+        except OSError:
+            continue
+    if not files:
+        _append_log(run_id, "info", f"В {music_dir} аудиофайлов не найдено (ищу {sorted(suffixes)})")
+        return dict(empty)
+    _append_log(run_id, "info", f"На диске ({music_dir}) файлов: {len(files)} — читаю теги…")
+
+    from app.db.models import Artist, Album
+
+    artists_new = albums_new = tracks_cnt = 0
+    with session_scope() as db:
+        for idx, path in enumerate(files):
+            try:
+                rel = path.relative_to(base).as_posix()
+            except ValueError:
+                rel = path.name
+            rel_parts = rel.split("/")[:-1]
+            tags = _read_disk_tags(path)
+            fb_artist, fb_album, fb_title = _fallback_from_filename(path, rel_parts)
+            artist_name = (tags["artist"] or fb_artist).strip() or "Unknown Artist"
+            album_name = (tags["album"] or fb_album).strip() or "Unknown Album"
+            title = (tags["title"] or fb_title).strip() or path.stem
+            a_ext = _disk_external_id("dartist:", artist_name.lower())
+            b_ext = _disk_external_id("dalbum:", artist_name.lower(), album_name.lower())
+            t_ext = _disk_external_id("disk:", rel)
+            if not db.query(Artist).filter_by(server_id=server_id, external_id=a_ext).first():
+                db.add(Artist(server_id=server_id, external_id=a_ext, name=artist_name[:512]))
+                artists_new += 1
+            ex_b = db.query(Album).filter_by(server_id=server_id, external_id=b_ext).first()
+            if not ex_b:
+                db.add(Album(server_id=server_id, external_id=b_ext, title=album_name[:512],
+                             artist_external_id=a_ext, artist_name=artist_name[:512],
+                             year=tags["year"], genre=(tags["genre"] or "")[:256] or None))
+                albums_new += 1
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            suffix = path.suffix.lower().lstrip(".")[:16] or None
+            vals = dict(title=title[:1024], artist_external_id=a_ext, artist_name=artist_name[:512],
+                        album_external_id=b_ext, album_name=album_name[:512],
+                        genre=(tags["genre"] or "")[:256] or None,
+                        duration_sec=tags["duration_sec"], year=tags["year"],
+                        track_no=tags["track_no"], disc_no=tags["disc_no"],
+                        bitrate=tags["bitrate"], suffix=suffix, size_bytes=size,
+                        content_type=_CONTENT_BY_SUFFIX.get(suffix or ""),
+                        path=str(path), play_count=0)
+            ex_t = db.query(Track).filter_by(server_id=server_id, external_id=t_ext).first()
+            if not ex_t:
+                db.add(Track(id=str(uuid.uuid4()), server_id=server_id, external_id=t_ext, **vals))
+            else:
+                for k, v in vals.items():
+                    if v is not None:
+                        setattr(ex_t, k, v)
+                ex_t.path = str(path)
+            tracks_cnt += 1
+            if (idx + 1) % 200 == 0:
+                db.commit()
+            if (idx + 1) % 500 == 0:
+                _append_log(run_id, "info", f"С диска обработано файлов: {idx + 1}/{len(files)}")
+    _append_log(run_id, "info", f"С диска загружено: треков {tracks_cnt}, новых альбомов {albums_new}, новых артистов {artists_new}")
+    return {"files": len(files), "tracks": tracks_cnt, "artists": artists_new,
+            "albums": albums_new, "music_dir": music_dir}
+
+
 def _to_int(v, default=None):
     try:
         if v is None or v == "":
@@ -95,8 +270,20 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                 _finish_run(run_id, "failure", "server not found")
                 return {"status": "failure", "error": "server not found"}
 
-            # если это демо-сервер — просто считаем
+            # если это демо-сервер — сначала пробуем локальный диск, и только
+            # если там пусто — считаем демо-треки
             if server_row.type == "demo" or server_row.url in ("http://localhost", "https://localhost"):
+                disk = _scan_disk_music(run_id, run.server_id)
+                if disk["tracks"] > 0:
+                    with session_scope() as db2:
+                        r2 = db2.get(ScanRun, run_id)
+                        if r2:
+                            r2.total_items = disk["files"]
+                            r2.processed_items = disk["files"]
+                    _finish_run(run_id, "success")
+                    return {"status": "success", "tracks": disk["tracks"],
+                            "artists": disk["artists"], "albums": disk["albums"],
+                            "mode": "disk"}
                 total = db.query(Track).filter_by(server_id=run.server_id).count()
                 run.total_items = total
                 run.processed_items = 0
@@ -107,6 +294,11 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                 _append_log(run_id, "info", "Сканирование библиотеки завершено (демо)")
                 _finish_run(run_id, "success")
                 return {"status": "success", "tracks": total, "mode": "demo"}
+
+            # 0) Локальный диск (примонтированный том MUSIC_DIR): Navidrome про
+            # него ничего не знает, поэтому читаем теги сами. Дополняет данные
+            # из Navidrome (external_id с префиксом disk- не пересекаются).
+            disk = _scan_disk_music(run_id, server_row.id)
 
             # реальный Navidrome — тянем через Subsonic API
             from app.db.models import Artist, Album
@@ -310,9 +502,32 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                         r2.processed_items = display_total
                 return {"artists": len(artists), "albums": albums_cnt, "tracks": tracks_cnt}
 
-            result = asyncio.run(_do_fetch())
+            try:
+                result = asyncio.run(_do_fetch())
+            except Exception as e_navi:
+                # Navidrome лёг (таймаут getArtists и т.п.), но с диска уже
+                # что-то загружено — не валим весь прогон, отдаём диск.
+                logger.warning("navidrome fetch failed (disk tracks: {})", disk["tracks"])
+                if disk["tracks"] > 0:
+                    _append_log(run_id, "warn", f"Navidrome недоступен ({e_navi}), но с диска загружено треков: {disk['tracks']}")
+                    with session_scope() as db2:
+                        r2 = db2.get(ScanRun, run_id)
+                        if r2:
+                            r2.total_items = (r2.total_items or 0) + disk["files"]
+                            r2.processed_items = (r2.processed_items or 0) + disk["files"]
+                    _finish_run(run_id, "success")
+                    return {"status": "success", "tracks": disk["tracks"],
+                            "artists": disk["artists"], "albums": disk["albums"],
+                            "mode": "disk", "navidrome_error": str(e_navi)}
+                raise
+            if disk["tracks"] > 0:
+                _append_log(run_id, "info", f"Дополнительно с диска: треков {disk['tracks']}, альбомов {disk['albums']}")
             _finish_run(run_id, "success")
-            return {"status": "success", **result, "mode": "navidrome"}
+            combined = dict(result)
+            combined["disk_tracks"] = disk["tracks"]
+            if disk["tracks"] > 0:
+                combined["mode"] = "navidrome+disk"
+            return {"status": "success", **combined}
     except Exception as e:  # noqa: BLE001
         logger.exception("library_scan failed: {}", e)
         _append_log(run_id, "error", str(e))
