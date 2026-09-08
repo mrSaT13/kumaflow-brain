@@ -52,9 +52,21 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
+    # CORS_ORIGINS из env — для явных адресов (см. docker-compose.yml).
+    # Плюс автоматически разрешаем origins из частных подсетей (RFC 1918),
+    # чтобы веб, открытый по LAN-IP сервера (http://192.168.x.x:3000),
+    # мог ходить в backend напрямую без правок конфига.
+    _LAN_ORIGIN_REGEX = (
+        r"https?://(localhost|127\.0\.0\.1"
+        r"|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+        r"|host\.docker\.internal)(:\d+)?"
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
+        allow_origin_regex=_LAN_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

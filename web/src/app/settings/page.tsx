@@ -170,7 +170,9 @@ export default function SettingsPage() {
             </div>
           )}
           <div className="text-xs text-muted mt-3">
-            URL можно указывать как <code className="kuma-pill">https://navidrome.example.com</code> или <code className="kuma-pill">navidrome.example.com</code> — префикс добавится автоматически. Для Navidrome достаточно логина и пароля; поле «токен» нужно только если вы используете готовый Subsonic-t.
+            URL можно указывать как <code className="kuma-pill">https://navidrome.example.com</code>, <code className="kuma-pill">navidrome.example.com</code> или LAN-адрес <code className="kuma-pill">http://192.168.1.10:4533</code> — префикс добавится автоматически. Для Navidrome достаточно логина и пароля; поле «токен» нужно только если вы используете готовый Subsonic-t.
+            <br />
+            Важно: проверка и сканирование выполняются из backend-контейнера в Docker, где <code className="kuma-pill">localhost</code> — это сам контейнер. Если Navidrome стоит на том же хосте, укажите LAN-IP машины (например <code className="kuma-pill">http://192.168.1.10:4533</code>), а не <code className="kuma-pill">localhost:4533</code>. Сохранение — только здесь, в веб-интерфейсе; править compose-файл не нужно.
           </div>
         </Card>
       </Section>

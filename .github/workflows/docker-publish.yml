@@ -83,6 +83,9 @@ jobs:
           context: .
           file: deploy/Dockerfile.web
           push: ${{ github.event_name != 'pull_request' }}
+          # Дефолт для rewrites-прокси внутри docker-сети (см. deploy/Dockerfile.web).
+          build-args: |
+            KUMAFLOW_API_URL=http://backend:8000
           tags: |
             ${{ steps.image.outputs.name }}:latest
             ${{ steps.image.outputs.name }}:sha-${{ github.sha }}

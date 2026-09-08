@@ -6,6 +6,10 @@ RUN npm ci --no-audit --no-fund
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
+# Адрес backend для серверного rewrites-прокси. Дефолт — имя сервиса
+# в docker-сети; при сборке можно переопределить через --build-arg.
+ARG KUMAFLOW_API_URL=http://backend:8000
+ENV KUMAFLOW_API_URL=${KUMAFLOW_API_URL}
 COPY web/package.json web/package-lock.json ./
 COPY web/next.config.js web/tsconfig.json web/tailwind.config.ts ./
 COPY web/postcss.config.js web/.eslintrc.json ./
@@ -19,6 +23,9 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+# Runtime-дефолт для rewrites (next start перечитывает next.config.js,
+# но если переменная не задана — должен использоваться backend, а не localhost).
+ENV KUMAFLOW_API_URL=http://backend:8000
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
 COPY --from=build /app/node_modules ./node_modules

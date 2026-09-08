@@ -67,6 +67,10 @@ services:
       # Логин/пароль можно вписать сюда ИЛИ позже в веб-UI (Настройки → Медиа-сервер)
       # NAVIDROME_USER: admin
       # NAVIDROME_PASSWORD: CHANGE_ME_navidrome_password
+      # CORS для прямых обращений к backend из браузера. Через веб-прокси
+      # (http://<ip-сервера>:3000/api) CORS не нужен — там same-origin.
+      # Адреса из локальной сети (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+      # backend разрешает сам; ниже — только для внешних имён/доменов.
       CORS_ORIGINS: '["http://localhost:3000","http://CHANGE_ME_server_ip:3000"]'
     extra_hosts:
       - "host.docker.internal:host-gateway"

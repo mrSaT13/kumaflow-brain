@@ -56,6 +56,31 @@ def shutdown_redis() -> None:
     _executor = None
 
 
+def get_redis():
+    """Общий Redis-клиент (нужен воркеру). Подключается при первом вызове."""
+    global _redis_client
+    if _redis_client is None:
+        init_redis()
+    if _redis_client is None:
+        raise RuntimeError("Redis недоступен (проверьте REDIS_HOST/REDIS_PORT)")
+    return _redis_client
+
+
+def get_queue(name: str = "default"):
+    """RQ-очередь на общем Redis-клиенте (нужна воркеру)."""
+    global _rq_default, _rq_high
+    if not _HAS_RQ:
+        raise RuntimeError("RQ не установлен")
+    conn = get_redis()
+    if name == "high":
+        if _rq_high is None:
+            _rq_high = _RQQueue("high", connection=conn)
+        return _rq_high
+    if _rq_default is None:
+        _rq_default = _RQQueue("default", connection=conn)
+    return _rq_default
+
+
 def enqueue(fn: Callable[..., Any], *args: Any, queue: str = "default", **kwargs: Any) -> str:
     """Enqueue a callable. Returns a job id (real RQ id or synthetic 'bg-<n>')."""
     if _rq_default is not None:
