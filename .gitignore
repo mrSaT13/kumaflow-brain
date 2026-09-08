@@ -1,0 +1,37 @@
+# --- секреты ---
+.env
+!.env.example
+server/.env
+web/.env.local
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# --- node / next ---
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+
+# --- данные и логи (не едут в git и в docker-контекст) ---
+*.db
+*.db-journal
+*.sqlite*
+*.log
+server/data/
+server/ml/models/
+deploy/navidrome_data/
+deploy/music/
+pgdata/
+
+# --- редакторы/ОС ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

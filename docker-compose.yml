@@ -1,0 +1,117 @@
+# Продакшн/тестовый сервер: готовые образы из GHCR, сборки нет.
+# Образы публикует CI (.github/workflows/docker-publish.yml) при пуше в main.
+#
+# Деплой на сервере (3 команды):
+#   1. git clone <твой-репо> kumaflow && cd kumaflow
+#   2. cp .env.example .env   # + вписать секреты и адрес GHCR (см. BACKEND_IMAGE/WEB_IMAGE)
+#   3. docker compose pull && docker compose up -d
+#
+# Обновление после нового пуша в main:
+#   docker compose pull && docker compose up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kumaflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kumaflow}
+      POSTGRES_DB: ${POSTGRES_DB:-kumaflow}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kumaflow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-backend:latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  worker:
+    image: ${BACKEND_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-backend:latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    command: ["python", "-m", "app.workers.rq_worker"]
+
+  web:
+    image: ${WEB_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-web:latest}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      KUMAFLOW_API_URL: http://backend:8000
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+  # Опционально: свой Navidrome рядом. Включается профилем:
+  #   docker compose --profile media up -d
+  navidrome:
+    image: deluan/navidrome:latest
+    restart: unless-stopped
+    profiles: [media]
+    ports:
+      - "${NAVIDROME_PORT:-4533}:4533"
+    environment:
+      ND_SCANSCHEDULE: 1m
+      ND_LOGLEVEL: info
+      ND_BASEURL: ""
+    volumes:
+      - ./deploy/navidrome_data:/data
+      - ${MUSIC_DIR:-./deploy/music}:/music:ro
+
+  # Опционально: мост метаданных (MusicBrainz / Last.fm). Включается профилем:
+  #   docker compose --profile bridge up -d
+  # Адрес моста затем указывается в веб-UI: Настройки → Мост → http://bridge:8001
+  bridge:
+    image: ${BRIDGE_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-bridge:latest}
+    restart: unless-stopped
+    profiles: [bridge]
+    env_file: [.env]
+    environment:
+      LASTFM_API_KEY: ${LASTFM_API_KEY:-}
+      BRIDGE_USER_AGENT: ${BRIDGE_USER_AGENT:-KumaFlowBridge/0.1}
+      BRIDGE_CACHE_TTL_HOURS: ${BRIDGE_CACHE_TTL_HOURS:-24}
+    ports:
+      - "${BRIDGE_PORT:-8001}:8001"
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,0 +1,33 @@
+# Корневой .dockerignore — контекст сборки для обоих образов это корень репо.
+# Dockerfile.server явно копирует только app/ + alembic.ini, Dockerfile.web —
+# только нужные файлы web/, но этот игнор страхует от раздувания контекста.
+
+.git
+.github
+.vscode
+.idea
+
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+**/node_modules
+**/.next
+**/out
+**/.turbo
+
+**/*.db
+**/*.db-journal
+**/*.sqlite*
+**/*.log
+**/.env
+**/.env.local
+**/.env.*.local
+
+server/data
+server/ml/models
+deploy/navidrome_data
+deploy/music
+pgdata

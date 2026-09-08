@@ -1,0 +1,33 @@
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY web/package.json web/package-lock.json ./
+COPY web/next.config.js web/tsconfig.json web/tailwind.config.ts ./
+COPY web/postcss.config.js web/.eslintrc.json ./
+COPY web/public ./public
+COPY web/src ./src
+# NEXT_PUBLIC_* переменные запекаются на этом шаге.
+# Для серверного деплоя ничего передавать не нужно: фронт ходит
+# через относительный /api, который проксируется rewrites на backend.
+RUN npm run build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/.next ./.next
+COPY --from=build /app/public ./public
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/next.config.js ./next.config.js
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:3000/ > /dev/null || exit 1
+
+CMD ["npm", "start"]

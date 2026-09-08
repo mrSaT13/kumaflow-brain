@@ -1,0 +1,116 @@
+# Локальная разработка: сборка образов из исходников.
+# Запуск из папки deploy:  docker compose up -d --build
+# server/.env должен существовать (скопируй из server/.env.example).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kumaflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kumaflow}
+      POSTGRES_DB: ${POSTGRES_DB:-kumaflow}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kumaflow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  navidrome:
+    image: deluan/navidrome:latest
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      ND_SCANSCHEDULE: 1m
+      ND_LOGLEVEL: info
+      ND_BASEURL: ""
+    volumes:
+      - ./navidrome_data:/data
+      - ./music:/music:ro
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: ../server/.env
+    environment:
+      # Принудительно Postgres в compose: без этого backend/worker
+      # взяли бы DB_URL_OVERRIDE=sqlite из server/.env и разъехались
+      # по двум разным локальным файлам.
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      NAVIDROME_URL: http://navidrome:4533
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    env_file: ../server/.env
+    environment:
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      NAVIDROME_URL: http://navidrome:4533
+    command: ["python", "-m", "app.workers.rq_worker"]
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      KUMAFLOW_API_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+
+  # Опционально: мост метаданных. Включается профилем:
+  #   docker compose --profile bridge up -d --build
+  bridge:
+    build:
+      context: ..
+      dockerfile: bridge/Dockerfile
+    restart: unless-stopped
+    profiles: [bridge]
+    environment:
+      LASTFM_API_KEY: ${LASTFM_API_KEY:-}
+      BRIDGE_CACHE_TTL_HOURS: ${BRIDGE_CACHE_TTL_HOURS:-24}
+    ports:
+      - "8001:8001"
+
+volumes:
+  pgdata:
+  redisdata:
