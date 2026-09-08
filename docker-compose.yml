@@ -1,27 +1,32 @@
-# Продакшн/тестовый сервер: готовые образы из GHCR, сборки нет.
-# Образы публикует CI (.github/workflows/docker-publish.yml) при пуше в main.
+# KumaFlow Brain — тестовый сервер. Всё в одном файле, отдельного .env не нужно.
 #
-# Деплой на сервере (3 команды):
-#   1. git clone <твой-репо> kumaflow && cd kumaflow
-#   2. cp .env.example .env   # + вписать секреты и адрес GHCR (см. BACKEND_IMAGE/WEB_IMAGE)
+# Твой Navidrome крутится ОТДЕЛЬНО — поэтому его здесь нет, backend ходит
+# к нему по HTTP. Папку с музыкой монтировать НЕ надо: аудиофайлы бэкенд
+# с диска не читает, всё (метаданные, обложки, сканирование) идёт через
+# Subsonic API твоего Navidrome.
+#
+# Деплой на сервере:
+#   1. git clone https://github.com/mrSaT13/kumaflow-brain.git kumaflow && cd kumaflow
+#   2. Отредактируй СЕКРЕТЫ ниже (пароли + адрес Navidrome)
 #   3. docker compose pull && docker compose up -d
 #
 # Обновление после нового пуша в main:
-#   docker compose pull && docker compose up -d
+#   git pull && docker compose pull && docker compose up -d
+# ВНИМАНИЕ: репозиторий публичный. Реальные пароли — только в копии на
+# сервере, никогда не делай git push с сервера.
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    env_file: [.env]
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-kumaflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kumaflow}
-      POSTGRES_DB: ${POSTGRES_DB:-kumaflow}
+      POSTGRES_USER: kumaflow
+      POSTGRES_PASSWORD: CHANGE_ME_postgres_password
+      POSTGRES_DB: kumaflow
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kumaflow}"]
+      test: ["CMD-SHELL", "pg_isready -U kumaflow"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -38,23 +43,38 @@ services:
       retries: 10
 
   backend:
-    image: ${BACKEND_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-backend:latest}
+    image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    env_file: [.env]
     environment:
+      ENV: prod
+      LOG_LEVEL: INFO
       DB_URL_OVERRIDE: ""
       POSTGRES_HOST: postgres
+      POSTGRES_USER: kumaflow
+      POSTGRES_PASSWORD: CHANGE_ME_postgres_password
+      POSTGRES_DB: kumaflow
       REDIS_HOST: redis
+      # Твой внешний Navidrome. host.docker.internal = сам хост-сервер
+      # (работает на Linux Docker 20.10+). Если Navidrome на другой машине —
+      # впиши её IP: http://192.168.x.x:4533
+      MEDIA_SERVER_TYPE: navidrome
+      NAVIDROME_URL: http://host.docker.internal:4533
+      # Логин/пароль можно вписать сюда ИЛИ позже в веб-UI (Настройки → Медиа-сервер)
+      # NAVIDROME_USER: admin
+      # NAVIDROME_PASSWORD: CHANGE_ME_navidrome_password
+      CORS_ORIGINS: '["http://localhost:3000","http://CHANGE_ME_server_ip:3000"]'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "8000:8000"
 
   worker:
-    image: ${BACKEND_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-backend:latest}
+    image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
     restart: unless-stopped
     depends_on:
       postgres:
@@ -63,15 +83,34 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
-    env_file: [.env]
     environment:
+      ENV: prod
+      LOG_LEVEL: INFO
       DB_URL_OVERRIDE: ""
       POSTGRES_HOST: postgres
+      POSTGRES_USER: kumaflow
+      POSTGRES_PASSWORD: CHANGE_ME_postgres_password
+      POSTGRES_DB: kumaflow
       REDIS_HOST: redis
+      MEDIA_SERVER_TYPE: navidrome
+      NAVIDROME_URL: http://host.docker.internal:4533
+      # --- Настоящий sonic-анализ читает реальные mp3 ---
+      # Вариант А (быстрее): та же папка музыки, что у Navidrome, только чтение.
+      # Раскомментируй и укажи путь на хосте; путь внутри worker (/music)
+      # должен совпадать с путём внутри Navidrome.
+      # MUSIC_DIR: /music
+      # Вариант Б (ничего не монтировать): оставь как есть — worker будет
+      # тянуть каждый трек стримом из Navidrome через Subsonic API.
+      ANALYSIS_SAMPLE_SECONDS: 90
+      ANALYSIS_MAX_TRACKS_PER_RUN: 200
+    # volumes:
+    #   - /путь/к/музыке/на/хосте:/music:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.workers.rq_worker"]
 
   web:
-    image: ${WEB_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-web:latest}
+    image: ghcr.io/mrsat13/kumaflow-brain-web:latest
     restart: unless-stopped
     depends_on:
       backend:
@@ -79,38 +118,22 @@ services:
     environment:
       KUMAFLOW_API_URL: http://backend:8000
     ports:
-      - "${WEB_PORT:-3000}:3000"
-
-  # Опционально: свой Navidrome рядом. Включается профилем:
-  #   docker compose --profile media up -d
-  navidrome:
-    image: deluan/navidrome:latest
-    restart: unless-stopped
-    profiles: [media]
-    ports:
-      - "${NAVIDROME_PORT:-4533}:4533"
-    environment:
-      ND_SCANSCHEDULE: 1m
-      ND_LOGLEVEL: info
-      ND_BASEURL: ""
-    volumes:
-      - ./deploy/navidrome_data:/data
-      - ${MUSIC_DIR:-./deploy/music}:/music:ro
+      - "3000:3000"
 
   # Опционально: мост метаданных (MusicBrainz / Last.fm). Включается профилем:
   #   docker compose --profile bridge up -d
   # Адрес моста затем указывается в веб-UI: Настройки → Мост → http://bridge:8001
   bridge:
-    image: ${BRIDGE_IMAGE:-ghcr.io/mrsat13/kumaflow-brain-bridge:latest}
+    image: ghcr.io/mrsat13/kumaflow-brain-bridge:latest
     restart: unless-stopped
     profiles: [bridge]
-    env_file: [.env]
     environment:
-      LASTFM_API_KEY: ${LASTFM_API_KEY:-}
-      BRIDGE_USER_AGENT: ${BRIDGE_USER_AGENT:-KumaFlowBridge/0.1}
-      BRIDGE_CACHE_TTL_HOURS: ${BRIDGE_CACHE_TTL_HOURS:-24}
+      # Ключ: https://www.last.fm/api/account/create (без него — только MusicBrainz)
+      LASTFM_API_KEY: ""
+      BRIDGE_USER_AGENT: KumaFlowBridge/0.1
+      BRIDGE_CACHE_TTL_HOURS: 24
     ports:
-      - "${BRIDGE_PORT:-8001}:8001"
+      - "8001:8001"
 
 volumes:
   pgdata:

@@ -40,7 +40,7 @@ def _run_to_dict(r: ScanRun) -> dict:
     }
 
 
-def _start_run(phase: str, fn, db: Session, *, total: int = 0) -> ScanRun:
+def _start_run(phase: str, fn, db: Session, *, total: int = 0, job_kwargs: dict | None = None) -> ScanRun:
     # защита от дублей: если уже есть running для этой фазы — не создаём новый
     existing = (
         db.query(ScanRun)
@@ -67,7 +67,7 @@ def _start_run(phase: str, fn, db: Session, *, total: int = 0) -> ScanRun:
     )
     db.add(run)
     db.flush()
-    job_id = enqueue(fn, str(run.id))
+    job_id = enqueue(fn, str(run.id), **(job_kwargs or {}))
     db.add(
         ScanLog(
             id=str(uuid.uuid4()),
@@ -95,9 +95,11 @@ async def start_library_scan(db: Session = Depends(get_db)):
 
 
 @router.post("/analysis")
-async def start_analysis(db: Session = Depends(get_db)):
+async def start_analysis(force: bool = False, limit: int = 0, db: Session = Depends(get_db)):
+    """Реальный sonic-анализ. force=1 — пересчитать всё, limit=N — взять N треков."""
     total = db.query(models.Track).count()
-    run = _start_run("analysis", sonic_analysis, db, total=total)
+    run = _start_run("analysis", sonic_analysis, db, total=total,
+                     job_kwargs={"force": force, "limit": limit})
     return {"queued": True, "run_id": str(run.id)}
 
 

@@ -2,9 +2,10 @@
 
 Self-hosted music intelligence layer for your media server (Navidrome, Jellyfin, Emby, Lyrion).
 
-Индексирует библиотеку, делает sonic-анализ (темп, тональность, настроение, CLAP-эмбеддинги),
-группирует треки в кластеры, подтягивает тексты из открытых источников, обогащает метаданные
-через Yandex.Music, строит коллаборативные профили и генерирует ежедневные плейлисты.
+Индексирует библиотеку, делает настоящий sonic-анализ реальных аудиофайлов
+(темп, тональность, энергия, танцевальность, настроение — движок librosa,
+файлы берутся с диска worker'а или стримом из Navidrome),
+подтягивает тексты из открытых источников и генерирует ежедневные плейлисты.
 
 ## Структура
 
@@ -53,28 +54,49 @@ git push -u origin main
 > Если пакеты не видны — в настройках репозитория `Settings → Actions → General → Workflow permissions`
 > должно быть `Read and write permissions` (иначе CI не сможет опубликовать пакеты).
 
-### 2. На сервере: установка
+### 2. На сервере: установка (всё в одном `docker-compose.yml`, без `.env`)
 
 ```bash
 git clone https://github.com/mrSaT13/kumaflow-brain.git kumaflow && cd kumaflow
-cp .env.example .env
-nano .env   # вписать BACKEND_IMAGE, WEB_IMAGE, POSTGRES_PASSWORD, CORS_ORIGINS
+nano docker-compose.yml   # вписать 3 вещи (см. ниже)
 docker compose pull
 docker compose up -d
 docker compose ps
 curl -s http://localhost:8000/api/health   # {"status":"ok"}
 ```
 
-Что вписать в `.env`:
+Что поменять в `docker-compose.yml` (всё помечено `CHANGE_ME`):
 
-| Переменная | Значение |
+| Место | Значение |
 |---|---|
-| `BACKEND_IMAGE` | `ghcr.io/<owner>/<repo>-backend:latest` из вкладки Packages |
-| `WEB_IMAGE` | `ghcr.io/<owner>/<repo>-web:latest` из вкладки Packages |
-| `BRIDGE_IMAGE` | `ghcr.io/<owner>/<repo>-bridge:latest` (только если нужен профиль `bridge`) |
-| `POSTGRES_PASSWORD` | длинный случайный пароль |
-| `CORS_ORIGINS` | `["http://localhost:3000"]` + origin, с которого открываешь фронт (IP/домен сервера) |
-| `NAVIDROME_URL/USER/PASSWORD` | доступ к медиа-серверу |
+| `POSTGRES_PASSWORD` (2 места: postgres + backend + worker) | длинный случайный пароль, один и тот же везде |
+| `NAVIDROME_URL` | адрес твоего внешнего Navidrome. Если он на том же сервере — оставить `http://host.docker.internal:4533`; если на другой машине — `http://<ip>:4533` |
+| `CORS_ORIGINS` | добавить origin, с которого открываешь фронт: `http://<ip-или-домен-сервера>:3000` |
+
+Логин/пароль Navidrome в файл можно не писать — они задаются в веб-UI
+(Настройки → Медиа-сервер) и хранятся в базе.
+
+### Sonic-анализ: как worker добирается до mp3
+
+По умолчанию ничего монтировать не нужно: worker тянет каждый трек стримом
+из твоего Navidrome через Subsonic API (`download`) во временный файл,
+считает признаки через librosa и удаляет временный файл. Медленнее, но
+работает из коробки.
+
+Быстрый вариант — примонтировать в `worker` ту же папку музыки, что у
+Navidrome (только чтение), в тот же путь (`/music`):
+
+```yaml
+# в секции worker файла docker-compose.yml:
+    environment:
+      MUSIC_DIR: /music
+    volumes:
+      - /путь/к/музыке/на/хосте:/music:ro
+```
+
+Анализ идёт пачками по 200 треков за прогон (`ANALYSIS_MAX_TRACKS_PER_RUN`) —
+повторные запуски «Sonic» продолжают с места остановки. Прогресс и ошибки
+по каждому треку видны в логах задачи (Задачи и логи → логи).
 
 Открыть: веб — `http://<сервер>:3000`, API — `http://<сервер>:8000/api/health`,
 доки — `http://<сервер>:8000/api/docs`.
@@ -84,17 +106,13 @@ curl -s http://localhost:8000/api/health   # {"status":"ok"}
 CI пересоберёт образы сам. На сервере:
 
 ```bash
-docker compose pull && docker compose up -d
+git pull && docker compose pull && docker compose up -d
 ```
 
-### 4. Опционально: Navidrome рядом в том же compose
+> Репозиторий публичный: реальные пароли живут только в копии
+> `docker-compose.yml` на сервере. Никогда не делай `git push` с сервера.
 
-```bash
-mkdir -p deploy/music   # положить сюда музыку
-docker compose --profile media up -d
-```
-
-### 5. Опционально: мост метаданных (MusicBrainz / Last.fm)
+### 4. Опционально: мост метаданных (MusicBrainz / Last.fm)
 
 ```bash
 docker compose --profile bridge up -d
@@ -104,7 +122,7 @@ docker compose --profile bridge up -d
 
 1. Открой `http://<сервер>:3000/settings`.
 2. Раздел «Мост метаданных»: URL `http://bridge:8001` → «Проверить мост» → «Сохранить».
-3. Ключ Last.fm (`LASTFM_API_KEY`) — единственное, что задаётся в `.env` на стороне моста; без него мост работает только через MusicBrainz.
+3. Ключ Last.fm (`LASTFM_API_KEY`) — единственное, что задаётся прямо в секции `bridge` в `docker-compose.yml` на сервере; без него мост работает только через MusicBrainz.
 
 Проверка из консоли: `curl -s http://localhost:8001/api/bridge/health`.
 

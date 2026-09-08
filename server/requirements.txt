@@ -14,12 +14,13 @@ loguru==0.7.2
 tenacity==9.0.0
 cryptography==43.0.3
 
-# ML (опционально — раскомментировать при prod)
-# numpy==1.26.4
-# scipy==1.13.1
-# scikit-learn==1.5.2
-# librosa==0.10.2
-# soundfile==0.12.1
+# ML — движок настоящего sonic-анализа (librosa). Нужны в backend-образе.
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.2
+librosa==0.10.2
+soundfile==0.12.1
+mutagen==1.47.0
 # onnxruntime==1.19.2
 # voyager==2.0.1
 

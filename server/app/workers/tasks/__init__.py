@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import random
 import time
 import uuid
 from datetime import datetime, date
+from pathlib import Path
 
 from app.core.logging import get_logger
 from app.db.database import session_scope
@@ -294,65 +296,147 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
 
 
 def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
-    _append_log(run_id, "info", "Sonic-анализ запущен (демо: синтетические признаки)")
+    """Настоящий sonic-анализ: читает реальные аудиофайлы и считает признаки.
+
+    Источник: локальный файл (``track.path`` / ``MUSIC_DIR``) либо стрим
+    из Navidrome через Subsonic ``download``. Движок — librosa; если её нет,
+    задача честно падает с объяснением, а не пишет случайные числа.
+    По умолчанию обрабатывает до ``analysis_max_tracks_per_run``
+    непроанализированных треков (повторные запуски продолжают).
+    Kwargs: ``force=True`` — пересчитать всё, ``limit=N`` — взять N треков.
+    """
+    from app.core.config import get_settings
+    from app.services import audio_analysis as aa
+
+    force = bool(kwargs.get("force", False))
+    try:
+        settings = get_settings()
+        sample_seconds = int(settings.analysis_sample_seconds or 90)
+        default_limit = int(settings.analysis_max_tracks_per_run or 0)
+        music_dir = settings.music_dir or os.getenv("MUSIC_DIR", "")
+    except Exception:
+        sample_seconds, default_limit, music_dir = 90, 200, os.getenv("MUSIC_DIR", "")
+    batch_limit = kwargs.get("limit", None)
+    if batch_limit is None or int(batch_limit or 0) <= 0:
+        batch_limit = default_limit
+
+    try:
+        import librosa  # noqa: F401
+    except Exception:
+        msg = (
+            "librosa не установлена — sonic-анализ невозможен. "
+            "Docker-образ backend уже включает ML-зависимости; "
+            "для локального запуска: pip install -r requirements.txt"
+        )
+        _append_log(run_id, "error", msg)
+        _finish_run(run_id, "failure", msg)
+        return {"status": "failure", "error": msg}
+
+    _append_log(
+        run_id, "info",
+        f"Sonic-анализ запущен (движок {aa.ANALYZER_VERSION}, "
+        f"фрагмент {sample_seconds}с{', force' if force else ''})",
+    )
     try:
         with session_scope() as db:
             run = db.get(ScanRun, run_id)
-            tracks = db.query(Track).filter_by(server_id=run.server_id).all()
-            run.total_items = len(tracks)
+            if not run:
+                return {"status": "no run"}
+            server_id = run.server_id
+            q = (
+                db.query(Track)
+                .outerjoin(TrackFeatures, TrackFeatures.track_id == Track.id)
+                .filter(Track.server_id == server_id)
+            )
+            if not force:
+                q = q.filter(TrackFeatures.track_id.is_(None))
+            q = q.order_by(Track.created_at.asc())
+            total_pending = q.count()
+            batch = q.limit(batch_limit).all() if batch_limit and batch_limit > 0 else q.all()
+            todo_data = [
+                (t.id, t.external_id, t.path, t.suffix, t.duration_sec, t.title, t.artist_name)
+                for t in batch
+            ]
+            run.total_items = len(todo_data)
             run.processed_items = 0
 
-        keys = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-        scales = ["major", "minor"]
-        moods_pool = ["энергичный", "меланхоличный", "спокойный", "агрессивный", "мечтательный", "тёплый", "тёмный", "лёгкий"]
-
         with session_scope() as db:
-            run = db.get(ScanRun, run_id)
-            for i, t in enumerate(tracks):
-                f = db.get(TrackFeatures, t.id)
-                if f is None:
-                    f = TrackFeatures(track_id=t.id)
-                    db.add(f)
-                rnd = random.Random(t.id)
-                f.tempo_bpm = round(rnd.uniform(70, 160), 1)
-                f.key_name = rnd.choice(keys)
-                f.scale = rnd.choice(scales)
-                f.energy = round(rnd.uniform(0.1, 0.95), 3)
-                f.danceability = round(rnd.uniform(0.1, 0.95), 3)
-                f.valence = round(rnd.uniform(0.1, 0.95), 3)
-                f.arousal = round(rnd.uniform(0.1, 0.95), 3)
-                f.loudness_db = round(rnd.uniform(-30, -6), 2)
-                f.spectral_centroid = round(rnd.uniform(500, 4000), 1)
-                f.spectral_rolloff = round(rnd.uniform(1500, 7000), 1)
-                f.zero_crossing_rate = round(rnd.uniform(0.01, 0.15), 4)
-                f.mood_vector = {
-                    "energetic": f.energy,
-                    "valence": f.valence,
-                    "arousal": f.arousal,
-                    "calm": 1.0 - f.energy,
-                }
-                f.mood_labels = rnd.sample(moods_pool, k=3)
-                f.analyzed_at = datetime.utcnow()
+            try:
+                from app.services.media_server import get_media_server_config
 
-                cluster_id = (hash(t.id) & 0x7) + 1
-                existing = db.query(TrackCluster).filter_by(track_id=t.id, algorithm="kmeans-demo").first()
-                if existing:
-                    existing.cluster_id = cluster_id
-                    existing.distance_to_center = rnd.uniform(0.1, 1.0)
+                cfg: dict = dict(get_media_server_config(db))
+            except Exception as e:
+                logger.warning("get_media_server_config failed: {}", e)
+                cfg = {}
+
+        ok = fail = n_local = n_stream = 0
+        for i, (tid, ext_id, tpath, suffix, dur, title, artist) in enumerate(todo_data):
+            tmp_to_clean: Path | None = None
+            try:
+                local_path = aa.resolve_local_file(tpath, music_dir)
+                if local_path is not None:
+                    src = local_path
+                    n_local += 1
                 else:
-                    db.add(
-                        TrackCluster(
-                            track_id=t.id,
-                            algorithm="kmeans-demo",
-                            cluster_id=cluster_id,
-                            distance_to_center=rnd.uniform(0.1, 1.0),
-                        )
-                    )
-                run.processed_items = i + 1
-                time.sleep(0.05)
-        _append_log(run_id, "info", f"Проанализировано треков: {len(tracks)}")
+                    if not ext_id:
+                        raise RuntimeError("нет external_id и нет локального файла")
+                    src = aa.download_from_navidrome(ext_id, cfg)
+                    tmp_to_clean = Path(src)
+                    n_stream += 1
+                feats = aa.analyze_file(src, sample_seconds=sample_seconds, track_duration_sec=dur)
+                with session_scope() as db:
+                    f = db.get(TrackFeatures, tid)
+                    if f is None:
+                        f = TrackFeatures(track_id=tid)
+                        db.add(f)
+                    f.tempo_bpm = feats["tempo_bpm"]
+                    f.key_name = feats["key_name"]
+                    f.scale = feats["scale"]
+                    f.energy = feats["energy"]
+                    f.danceability = feats["danceability"]
+                    f.valence = feats["valence"]
+                    f.arousal = feats["arousal"]
+                    f.loudness_db = feats["loudness_db"]
+                    f.spectral_centroid = feats["spectral_centroid"]
+                    f.spectral_rolloff = feats["spectral_rolloff"]
+                    f.zero_crossing_rate = feats["zero_crossing_rate"]
+                    f.mfcc_summary = feats["mfcc_summary"]
+                    f.chroma_summary = feats["chroma_summary"]
+                    f.mood_vector = feats["mood_vector"]
+                    f.mood_labels = feats["mood_labels"]
+                    f.analyzed_at = datetime.utcnow()
+                    if feats.get("duration_sec") and not dur:
+                        t = db.get(Track, tid)
+                        if t is not None:
+                            t.duration_sec = feats["duration_sec"]
+                    run = db.get(ScanRun, run_id)
+                    if run:
+                        run.processed_items = i + 1
+                ok += 1
+            except Exception as e:  # noqa: BLE001 — один битый трек не валит весь прогон
+                fail += 1
+                _append_log(run_id, "warn", f"Не проанализирован: {artist} — {title}: {e}")
+            finally:
+                if tmp_to_clean is not None:
+                    try:
+                        tmp_to_clean.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            if (i + 1) % 25 == 0:
+                _append_log(run_id, "info", f"Обработано {i + 1}/{len(todo_data)} (ок: {ok}, ошибок: {fail})")
+
+        remaining = total_pending - len(todo_data)
+        summary = (
+            f"Готово — ок: {ok}, ошибок: {fail} "
+            f"(локальные файлы: {n_local}, стрим из Navidrome: {n_stream})."
+        )
+        if remaining > 0:
+            summary += f" Осталось без анализа: {remaining} — запустите Sonic ещё раз."
+        else:
+            summary += " Все треки проанализированы."
+        _append_log(run_id, "info", summary)
         _finish_run(run_id, "success")
-        return {"status": "success", "tracks": len(tracks)}
+        return {"status": "success", "ok": ok, "failed": fail, "remaining": remaining}
     except Exception as e:  # noqa: BLE001
         logger.exception("sonic_analysis failed: {}", e)
         _append_log(run_id, "error", str(e))
@@ -567,12 +651,27 @@ def daily_playlist(playlist_id: str, *args, **kwargs) -> dict:
 
 
 def cluster_build(*args, **kwargs):
-    return {"status": "stub"}
+    run_id = args[0] if args else None
+    msg = "Кластеризация ещё не реализована (следующий шаг после sonic-анализа)"
+    if run_id:
+        _append_log(run_id, "error", msg)
+        _finish_run(run_id, "failure", msg)
+    return {"status": "not_implemented", "error": msg}
 
 
 def yandex_enrich(*args, **kwargs):
-    return {"status": "stub"}
+    run_id = args[0] if args else None
+    msg = "Yandex-обогащение ещё не реализовано"
+    if run_id:
+        _append_log(run_id, "error", msg)
+        _finish_run(run_id, "failure", msg)
+    return {"status": "not_implemented", "error": msg}
 
 
 def collab_build(*args, **kwargs):
-    return {"status": "stub"}
+    run_id = args[0] if args else None
+    msg = "Коллаборативная фильтрация ещё не реализована"
+    if run_id:
+        _append_log(run_id, "error", msg)
+        _finish_run(run_id, "failure", msg)
+    return {"status": "not_implemented", "error": msg}

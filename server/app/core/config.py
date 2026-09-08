@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     bridge_url: str = ""
     bridge_enabled: bool = False
 
+    # Настоящий аудио-анализ (worker): где лежат файлы и сколько брать за прогон.
+    # MUSIC_DIR — та же папка музыки, что у Navidrome (только чтение).
+    # Если не задан — worker тянет аудио стримом из Navidrome через Subsonic API.
+    music_dir: str = ""
+    analysis_sample_seconds: int = 90
+    analysis_max_tracks_per_run: int = 200
+
     lyrics_providers: list[str] = Field(default_factory=lambda: ["lyrics.ovh", "musixmatch"])
     lyrics_user_agent: str = "Mozilla/5.0 (compatible; KumaFlowBrain/0.1)"
 
