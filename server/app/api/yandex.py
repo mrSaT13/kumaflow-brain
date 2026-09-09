@@ -11,5 +11,5 @@ router = APIRouter()
 
 
 @router.post("/enrich")
-async def enrich(db: Session = Depends(get_db)):
+def enrich(db: Session = Depends(get_db)):
     return {"queued": True, "job_id": enqueue(_placeholder)}

@@ -144,11 +144,19 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
 # ---------- 2. 3-шаговый cold-start с идеальными сочетаниями ----------
 
 def _step1_signal(server_id: str) -> dict[str, float]:
-    """Собирает веса по artist/genre/mood с учётом прослушиваний, избранного, оценок, давности."""
+    """Собирает веса по artist/genre/mood с учётом прослушиваний, избранного, оценок, давности.
+
+    Фичи грузятся одним запросом (иначе на большой библиотеке — N+1).
+    """
     weights: dict[str, float] = {}
     now = datetime.utcnow()
     with session_scope() as db:
         tracks = db.query(Track).filter_by(server_id=server_id).all()
+        ids = [t.id for t in tracks]
+        feat_map: dict[str, TrackFeatures] = {}
+        if ids:
+            for f in db.query(TrackFeatures).filter(TrackFeatures.track_id.in_(ids)).all():
+                feat_map[str(f.track_id)] = f
         for t in tracks:
             base = 0.0
             base += (t.play_count or 0) * 0.45
@@ -177,7 +185,7 @@ def _step1_signal(server_id: str) -> dict[str, float]:
                 key = f"genre::{t.genre}"
                 weights[key] = weights.get(key, 0.0) + base * 0.85 + 0.7
             # муд-сигнал из фичей
-            f = db.get(TrackFeatures, t.id)
+            f = feat_map.get(str(t.id))
             if f and f.mood_labels:
                 for m in f.mood_labels[:2]:
                     key = f"mood::{str(m).lower()}"
@@ -198,9 +206,10 @@ def _step2_candidates(server_id: str, signal: dict[str, float]) -> list[tuple[Tr
         tracks = db.query(Track).filter_by(server_id=server_id).all()
         if not tracks:
             return []
-        # заранее соберём кластеры и фичи для быстрого доступа
-        cluster_map = {c.track_id: c for c in db.query(TrackCluster).all()}
-        feat_map = {f.track_id: f for f in db.query(TrackFeatures).all()}
+        # заранее соберём кластеры и фичи для быстрого доступа (bulk, не N+1)
+        ids = [t.id for t in tracks]
+        cluster_map = {str(c.track_id): c for c in db.query(TrackCluster).filter(TrackCluster.track_id.in_(ids)).all()}
+        feat_map = {str(f.track_id): f for f in db.query(TrackFeatures).filter(TrackFeatures.track_id.in_(ids)).all()}
         # топ-сигналы для центроида (для sonic расширения)
         top_signals = sorted(signal.items(), key=lambda kv: kv[1], reverse=True)[:6]
         top_artist = {k[8:] for k,v in top_signals if k.startswith("artist::")}
@@ -212,7 +221,7 @@ def _step2_candidates(server_id: str, signal: dict[str, float]) -> list[tuple[Tr
             vecs = []
             for t in tracks:
                 if t.artist_name in top_artist or t.genre in top_genre:
-                    f = feat_map.get(t.id)
+                    f = feat_map.get(str(t.id))
                     v = _feature_vector(t, f)
                     if v is not None:
                         vecs.append(v)
@@ -223,7 +232,7 @@ def _step2_candidates(server_id: str, signal: dict[str, float]) -> list[tuple[Tr
         cluster_pop = Counter()
         for t in tracks:
             if t.artist_name in top_artist or t.genre in top_genre:
-                c = cluster_map.get(t.id)
+                c = cluster_map.get(str(t.id))
                 if c:
                     cluster_pop[c.cluster_id] += 1
         popular_clusters = {cid for cid,_ in cluster_pop.most_common(3)}
@@ -238,14 +247,14 @@ def _step2_candidates(server_id: str, signal: dict[str, float]) -> list[tuple[Tr
                 w = signal[f"genre::{t.genre}"]
                 score += w * 0.33 + 0.7
             # муд совпадение
-            f = feat_map.get(t.id)
+            f = feat_map.get(str(t.id))
             if f and f.mood_labels:
                 for m in f.mood_labels:
                     if f"mood::{str(m).lower()}" in signal:
                         score += signal[f"mood::{str(m).lower()}"] * 0.18
                         break
             # кластер-соседи: если кластер популярный — добавим даже без прямого сигнала
-            c = cluster_map.get(t.id)
+            c = cluster_map.get(str(t.id))
             if c and c.cluster_id in popular_clusters and score < 0.1:
                 score += 0.9
             elif c and score == 0:
@@ -279,10 +288,22 @@ def _step2_candidates(server_id: str, signal: dict[str, float]) -> list[tuple[Tr
 
 
 def _step3_diversify(items: list[tuple[Track, float, TrackFeatures | None, TrackCluster | None]], n: int = 30) -> list[Track]:
-    """MMR + идеальные сочетания: штраф за похожесть, ограничение на артистов/жанры, энергетическая кривая."""
+    """MMR + идеальные сочетания: штраф за похожесть, ограничение на артистов/жанры, энергетическая кривая.
+
+    На большой библиотеке MMR по всем трекам — O(n²): сначала урезаем пул
+    до топ-2000 по скору (качество не страдает, скорость — в разы).
+    """
     if not items:
         return []
     pool = sorted(items, key=lambda x: x[1], reverse=True)
+    if len(pool) > 2000:
+        # держим топ по скору + небольшую случайную примесь для разнообразия
+        import random as _rnd
+
+        head, tail = pool[:1500], pool[1500:]
+        _rnd.Random(42).shuffle(tail)
+        pool = head + tail[:500]
+        pool.sort(key=lambda x: x[1], reverse=True)
     chosen: list[Track] = []
     chosen_vecs: list[Any] = []
     chosen_features: list[TrackFeatures | None] = []
@@ -391,11 +412,13 @@ def cold_start_playlist(server_id: str, n: int = 30) -> dict[str, Any]:
     signal = _step1_signal(server_id)
     candidates = _step2_candidates(server_id, signal)
     with session_scope() as db:
+        # bulk-загрузка фичей/кластеров одним запросом (не N+1)
+        ids = [t.id for t, _ in candidates]
+        feat_map = {str(f.track_id): f for f in db.query(TrackFeatures).filter(TrackFeatures.track_id.in_(ids)).all()} if ids else {}
+        cluster_map = {str(c.track_id): c for c in db.query(TrackCluster).filter(TrackCluster.track_id.in_(ids)).all()} if ids else {}
         items: list[tuple[Track, float, TrackFeatures | None, TrackCluster | None]] = []
         for t, s in candidates:
-            f = db.get(TrackFeatures, t.id)
-            cluster = db.query(TrackCluster).filter(TrackCluster.track_id == t.id).first()
-            items.append((t, s, f, cluster))
+            items.append((t, s, feat_map.get(str(t.id)), cluster_map.get(str(t.id))))
     tracks = _step3_diversify(items, n=n)
     # статистика для UI: распределение по жанрам/артистам в идеальном плейлисте
     genre_dist = Counter(t.genre or "unknown" for t in tracks)

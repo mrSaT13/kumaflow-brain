@@ -81,7 +81,7 @@ def _start_run(phase: str, fn, db: Session, *, total: int = 0, job_kwargs: dict 
 
 
 @router.post("/library")
-async def start_library_scan(db: Session = Depends(get_db)):
+def start_library_scan(db: Session = Depends(get_db)):
     cfg = get_media_server_config(db)
     is_real = bool(cfg.get("url") and cfg["url"] not in ("http://localhost", "https://localhost"))
     # демо сидим только если реального сервера нет и база пуста
@@ -95,7 +95,7 @@ async def start_library_scan(db: Session = Depends(get_db)):
 
 
 @router.post("/analysis")
-async def start_analysis(force: bool = False, limit: int = 0, db: Session = Depends(get_db)):
+def start_analysis(force: bool = False, limit: int = 0, db: Session = Depends(get_db)):
     """Реальный sonic-анализ. force=1 — пересчитать всё, limit=N — взять N треков."""
     total = db.query(models.Track).count()
     run = _start_run("analysis", sonic_analysis, db, total=total,
@@ -104,32 +104,32 @@ async def start_analysis(force: bool = False, limit: int = 0, db: Session = Depe
 
 
 @router.post("/lyrics")
-async def start_lyrics(db: Session = Depends(get_db)):
+def start_lyrics(db: Session = Depends(get_db)):
     total = db.query(models.Track).count()
     run = _start_run("lyrics", lyrics_fetch, db, total=total, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 
 @router.post("/clusters")
-async def start_clusters(db: Session = Depends(get_db)):
+def start_clusters(db: Session = Depends(get_db)):
     run = _start_run("clusters", cluster_build, db, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 
 @router.post("/collab")
-async def start_collab(db: Session = Depends(get_db)):
+def start_collab(db: Session = Depends(get_db)):
     run = _start_run("collab", collab_build, db, job_timeout=900)
     return {"queued": True, "run_id": str(run.id)}
 
 
 @router.get("/runs")
-async def list_runs(db: Session = Depends(get_db)):
+def list_runs(db: Session = Depends(get_db)):
     rows = db.query(ScanRun).order_by(ScanRun.started_at.desc()).limit(100).all()
     return {"runs": [_run_to_dict(r) for r in rows]}
 
 
 @router.get("/runs/current")
-async def current_run(db: Session = Depends(get_db)):
+def current_run(db: Session = Depends(get_db)):
     r = (
         db.query(ScanRun)
         .filter(ScanRun.status.in_(["queued", "running"]))
@@ -140,7 +140,7 @@ async def current_run(db: Session = Depends(get_db)):
 
 
 @router.post("/runs/{run_id}/cancel")
-async def cancel_run(run_id: str, db: Session = Depends(get_db)):
+def cancel_run(run_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(run_id)
     except ValueError:
@@ -166,7 +166,7 @@ async def cancel_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/runs/{run_id}/logs")
-async def run_logs(run_id: str, db: Session = Depends(get_db)):
+def run_logs(run_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(run_id)
     except ValueError:

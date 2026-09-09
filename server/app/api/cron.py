@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 @router.get("/")
-async def list_jobs(db: Session = Depends(get_db)):
+def list_jobs(db: Session = Depends(get_db)):
     rows = db.query(CronJob).all()
     return {
         "jobs": [
@@ -29,7 +29,7 @@ async def list_jobs(db: Session = Depends(get_db)):
 
 
 @router.post("/{job_id}/run")
-async def run_now(job_id: str, db: Session = Depends(get_db)):
+def run_now(job_id: str, db: Session = Depends(get_db)):
     j = db.get(CronJob, job_id)
     if not j:
         return {"queued": False, "error": "not found"}

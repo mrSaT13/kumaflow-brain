@@ -13,7 +13,7 @@ router = APIRouter()
 
 
 @router.get("/{cover_id}")
-async def cover(cover_id: str, db=Depends(get_db)):
+def cover(cover_id: str, db=Depends(get_db)):
     data = get_cover(cover_id, cfg=dict(get_media_server_config(db)))
     if not data:
         return _placeholder_png()
@@ -21,7 +21,7 @@ async def cover(cover_id: str, db=Depends(get_db)):
 
 
 @router.get("/track/{track_id}")
-async def track_cover(track_id: str, db=Depends(get_db)):
+def track_cover(track_id: str, db=Depends(get_db)):
     """Обложка трека: встроенная в файл (диск) либо coverArt из Navidrome."""
     import uuid as _uuid
 

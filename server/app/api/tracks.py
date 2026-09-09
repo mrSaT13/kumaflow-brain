@@ -33,7 +33,7 @@ def _track_to_dict(t: Track) -> dict:
 
 @router.get("", include_in_schema=False)
 @router.get("/")
-async def list_tracks(
+def list_tracks(
     q: str | None = None,
     genre: str | None = None,
     artist: str | None = None,
@@ -67,7 +67,7 @@ async def list_tracks(
 
 
 @router.get("/{track_id}")
-async def get_track(track_id: str, db: Session = Depends(get_db)):
+def get_track(track_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(track_id)
     except ValueError:
@@ -133,7 +133,7 @@ async def get_track(track_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{track_id}/analyze")
-async def analyze_track_now(track_id: str, db: Session = Depends(get_db)):
+def analyze_track_now(track_id: str, db: Session = Depends(get_db)):
     """Sonic-анализ одного трека прямо сейчас (кнопка на странице трека)."""
     try:
         uuid.UUID(track_id)
@@ -161,7 +161,7 @@ async def analyze_track_now(track_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{track_id}/lyrics")
-async def fetch_track_lyrics_now(track_id: str, db: Session = Depends(get_db)):
+def fetch_track_lyrics_now(track_id: str, db: Session = Depends(get_db)):
     """Загрузка текста одного трека (LRCLIB + AI-настроение)."""
     try:
         uuid.UUID(track_id)

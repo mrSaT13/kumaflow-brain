@@ -37,14 +37,14 @@ def _to_dict(u: MediaUser) -> dict:
 
 @router.get("", include_in_schema=False)
 @router.get("/")
-async def list_users(db: Session = Depends(get_db)):
+def list_users(db: Session = Depends(get_db)):
     rows = db.query(MediaUser).order_by(MediaUser.username.asc()).all()
     return {"users": [_to_dict(u) for u in rows]}
 
 
 @router.post("", include_in_schema=False)
 @router.post("/")
-async def create_user(payload: UserIn, db: Session = Depends(get_db)):
+def create_user(payload: UserIn, db: Session = Depends(get_db)):
     server = resolve_active_server(db)
     db.commit()
     exists = (
@@ -68,7 +68,7 @@ async def create_user(payload: UserIn, db: Session = Depends(get_db)):
 
 
 @router.patch("/{user_id}")
-async def update_user(user_id: str, payload: UserPatch, db: Session = Depends(get_db)):
+def update_user(user_id: str, payload: UserPatch, db: Session = Depends(get_db)):
     try:
         uuid.UUID(user_id)
     except ValueError:
@@ -86,7 +86,7 @@ async def update_user(user_id: str, payload: UserPatch, db: Session = Depends(ge
 
 
 @router.delete("/{user_id}")
-async def delete_user(user_id: str, db: Session = Depends(get_db)):
+def delete_user(user_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(user_id)
     except ValueError:
@@ -100,7 +100,7 @@ async def delete_user(user_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/sync")
-async def sync_users(db: Session = Depends(get_db)):
+def sync_users(db: Session = Depends(get_db)):
     """Синхронизировать пользователей из Navidrome (getUsers) — сразу, без очереди."""
     from app.workers.tasks import sync_navidrome_users
 

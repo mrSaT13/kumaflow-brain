@@ -12,15 +12,15 @@ router = APIRouter()
 
 
 @router.post("/rebuild")
-async def rebuild():
+def rebuild():
     return {"queued": True, "job_id": enqueue(collab_build)}
 
 
 @router.get("/similar-users/{user_id}")
-async def similar_users(user_id: str):
+def similar_users(user_id: str):
     return {"users": []}
 
 
 @router.get("/recommend/{user_id}")
-async def recommend(user_id: str):
+def recommend(user_id: str):
     return {"tracks": []}

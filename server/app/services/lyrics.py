@@ -26,45 +26,68 @@ def _normalize(s: str | None) -> str | None:
 
 
 def fetch(artist: str, title: str, album: str | None = None, duration_sec: int | None = None) -> dict[str, Any] | None:
-    """Возвращает dict с полями provider/text/synced/language/source_url или None."""
+    """Возвращает dict с полями provider/text/synced/language/source_url или None.
+
+    Как в плеерах: точный /get с длительностью, затем /search с ранжированием
+    кандидатов (совпадение артиста+названия, близость длительности, наличие
+    synched-текста). Инструменталки и пустые тексты пропускаются.
+    """
     s = get_settings()
     headers = {"user-agent": s.lyrics_user_agent}
     a, t = _normalize(artist) or "", _normalize(title) or ""
     if not a or not t:
         return None
 
-    # сначала точное совпадение
+    # 1) точное совпадение (с длительностью — LRCLIB умеет фильтровать по ней)
     try:
-        r = httpx.get(
-            f"{BASE}/api/get",
-            params={"artist_name": artist, "track_name": title, "album_name": album} if album else {"artist_name": artist, "track_name": title},
-            headers=headers,
-            timeout=15,
-        )
+        params: dict[str, Any] = {"artist_name": artist, "track_name": title}
+        if album:
+            params["album_name"] = album
+        if duration_sec:
+            try:
+                params["duration"] = float(duration_sec)
+            except (TypeError, ValueError):
+                pass
+        r = httpx.get(f"{BASE}/api/get", params=params, headers=headers, timeout=15)
         if r.status_code == 200:
-            return _to_result(r.json())
+            res = _to_result(r.json())
+            if res and res.get("text"):
+                return res
     except httpx.HTTPError as e:
         logger.debug("lrclib /get failed: {}", e)
 
-    # затем поиск по каталогу
+    # 2) поиск по каталогу с ранжированием
     try:
         r = httpx.get(
             f"{BASE}/api/search",
-            params={"q": f"{artist} {title}", "limit": 5},
+            params={"q": f"{artist} {title}", "limit": 10},
             headers=headers,
             timeout=15,
         )
         if r.status_code == 200:
+            best: dict[str, Any] | None = None
+            best_score = -1.0
             for item in r.json() or []:
-                if _normalize(item.get("artistName")) == a and _normalize(item.get("trackName")) == t:
-                    return _to_result(item)
-                # пробуем по длительности ±3 сек
+                if _normalize(item.get("artistName")) != a or _normalize(item.get("trackName")) != t:
+                    continue
+                res = _to_result(item)
+                if not res or not res.get("text"):
+                    continue
+                score = 1.0
+                if res.get("synced"):
+                    score += 0.5  # синхронный текст ценнее
                 if duration_sec and item.get("duration"):
                     try:
-                        if abs(float(item["duration"]) - float(duration_sec)) < 3:
-                            return _to_result(item)
+                        diff = abs(float(item["duration"]) - float(duration_sec))
+                        if diff > 10:
+                            continue  # явно другой трек/версия
+                        score += max(0.0, 1.0 - diff / 10.0)
                     except (TypeError, ValueError):
-                        continue
+                        pass
+                if score > best_score:
+                    best, best_score = res, score
+            if best:
+                return best
     except httpx.HTTPError as e:
         logger.debug("lrclib /search failed: {}", e)
 

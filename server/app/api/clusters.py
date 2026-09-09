@@ -16,7 +16,7 @@ router = APIRouter()
 
 
 @router.post("/build")
-async def build(db: Session = Depends(get_db)):
+def build(db: Session = Depends(get_db)):
     """Пересобрать кластеры: создаёт задачу (видно в истории и логах)."""
     server = resolve_active_server(db)
     db.commit()
@@ -39,7 +39,7 @@ async def build(db: Session = Depends(get_db)):
 
 
 @router.get("/")
-async def list_clusters(db: Session = Depends(get_db)):
+def list_clusters(db: Session = Depends(get_db)):
     """Кластеры активного сервера: размер, жанры, примеры треков."""
     from collections import Counter
 

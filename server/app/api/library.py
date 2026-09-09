@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 @router.get("/overview")
-async def overview(db: Session = Depends(get_db)):
+def overview(db: Session = Depends(get_db)):
     from app.services.media_server import get_media_server_config
 
     cfg = get_media_server_config(db)
@@ -37,7 +37,7 @@ async def overview(db: Session = Depends(get_db)):
 
 
 @router.get("/servers")
-async def list_servers(db: Session = Depends(get_db)):
+def list_servers(db: Session = Depends(get_db)):
     rows = db.query(MediaServer).all()
     return {
         "servers": [
@@ -54,7 +54,7 @@ async def list_servers(db: Session = Depends(get_db)):
 
 
 @router.get("/genres")
-async def list_genres(db: Session = Depends(get_db)):
+def list_genres(db: Session = Depends(get_db)):
     from app.services.media_server import get_media_server_config
 
     cfg = get_media_server_config(db)

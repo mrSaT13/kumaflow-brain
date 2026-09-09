@@ -41,13 +41,13 @@ def _to_dict(p: Playlist, db: Session) -> dict:
 
 @router.get("", include_in_schema=False)
 @router.get("/")
-async def list_playlists(db: Session = Depends(get_db)):
+def list_playlists(db: Session = Depends(get_db)):
     rows = db.query(Playlist).order_by(Playlist.created_at.desc()).limit(100).all()
     return {"playlists": [_to_dict(p, db) for p in rows]}
 
 
 @router.get("/{playlist_id}")
-async def get_playlist(playlist_id: str, db: Session = Depends(get_db)):
+def get_playlist(playlist_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(playlist_id)
     except ValueError:
@@ -81,7 +81,7 @@ async def get_playlist(playlist_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/generate-daily")
-async def generate_daily(payload: GenerateIn | None = None, db: Session = Depends(get_db)):
+def generate_daily(payload: GenerateIn | None = None, db: Session = Depends(get_db)):
     """Если на сегодня уже есть ежедневный плейлист — удалить и сделать заново.
     Иначе создать новый и наполнить через 3-шаговый cold-start + коллаборативные сигналы."""
     n = (payload.n if payload else 30) or 30
@@ -131,7 +131,7 @@ async def generate_daily(payload: GenerateIn | None = None, db: Session = Depend
 
 
 @router.delete("/{playlist_id}")
-async def delete_playlist(playlist_id: str, db: Session = Depends(get_db)):
+def delete_playlist(playlist_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(playlist_id)
     except ValueError:
@@ -146,7 +146,7 @@ async def delete_playlist(playlist_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/fetch-lyrics")
-async def fetch_lyrics_now(db: Session = Depends(get_db)):
+def fetch_lyrics_now(db: Session = Depends(get_db)):
     """Запустить загрузку текстов + AI-анализ настроения прямо сейчас (как scan)."""
     server = resolve_active_server(db)
     db.commit()

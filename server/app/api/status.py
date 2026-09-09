@@ -5,11 +5,11 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health() -> dict:
+def health() -> dict:
     return {"status": "ok"}
 
 
 @router.get("/version")
-async def version() -> dict:
+def version() -> dict:
     s = get_settings()
     return {"name": s.app_name, "version": s.app_version, "env": s.env}

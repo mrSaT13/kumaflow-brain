@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.post("/clusters/build")
-async def clusters_build(db: Session = Depends(get_db)):
+def clusters_build(db: Session = Depends(get_db)):
     server = resolve_active_server(db)
     db.commit()
     res = build_clusters(str(server.id))
@@ -26,26 +26,26 @@ async def clusters_build(db: Session = Depends(get_db)):
 
 
 @router.get("/recommend/by-track/{track_id}")
-async def recommend_by_track_endpoint(track_id: str):
+def recommend_by_track_endpoint(track_id: str):
     return {"items": recommend_by_track(track_id, top_k=20)}
 
 
 @router.get("/cold-start")
-async def cold_start(db: Session = Depends(get_db), n: int = 30):
+def cold_start(db: Session = Depends(get_db), n: int = 30):
     server = resolve_active_server(db)
     db.commit()
     return cold_start_playlist(str(server.id), n=n)
 
 
 @router.post("/search-by-text")
-async def search_by_text(payload: dict):
+def search_by_text(payload: dict):
     """Заглушка для будущего CLAP-эмбеддинга от текста.
     Сейчас работает через keyword → embedding (если есть)."""
     return {"items": []}
 
 
 @router.post("/lyrics/analyze-all")
-async def analyze_all(db: Session = Depends(get_db)):
+def analyze_all(db: Session = Depends(get_db)):
     server = resolve_active_server(db)
     db.commit()
     from app.db.models import ScanRun, ScanLog, Track

@@ -169,8 +169,15 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
 
     from app.db.models import Artist, Album
 
-    artists_new = albums_new = tracks_cnt = 0
+    artists_new = albums_new = tracks_cnt = skipped = 0
+    # Сессия с autoflush=False: проверки .first() НЕ видят pending-объекты,
+    # поэтому дубли внутри батча ловили UniqueViolation и откатывали всё.
+    # Держим in-memory множества (заодно убираем 3 SELECT на файл).
     with session_scope() as db:
+        seen_artists = {r[0] for r in db.query(Artist.external_id).filter_by(server_id=server_id).all()}
+        seen_albums = {r[0] for r in db.query(Album.external_id).filter_by(server_id=server_id).all()}
+        seen_tracks = {r[0] for r in db.query(Track.external_id).filter_by(server_id=server_id).all()}
+        batch_seen: list[tuple[set, str]] = []  # что добавлено в текущем батче (для отката)
         for idx, path in enumerate(files):
             try:
                 rel = path.relative_to(base).as_posix()
@@ -185,42 +192,59 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
             a_ext = _disk_external_id("dartist:", artist_name.lower())
             b_ext = _disk_external_id("dalbum:", artist_name.lower(), album_name.lower())
             t_ext = _disk_external_id("disk:", rel)
-            if not db.query(Artist).filter_by(server_id=server_id, external_id=a_ext).first():
+            if a_ext not in seen_artists:
                 db.add(Artist(server_id=server_id, external_id=a_ext, name=artist_name[:512]))
+                seen_artists.add(a_ext)
+                batch_seen.append((seen_artists, a_ext))
                 artists_new += 1
-            ex_b = db.query(Album).filter_by(server_id=server_id, external_id=b_ext).first()
-            if not ex_b:
+            if b_ext not in seen_albums:
                 db.add(Album(server_id=server_id, external_id=b_ext, title=album_name[:512],
                              artist_external_id=a_ext, artist_name=artist_name[:512],
                              year=tags["year"], genre=(tags["genre"] or "")[:256] or None))
+                seen_albums.add(b_ext)
+                batch_seen.append((seen_albums, b_ext))
                 albums_new += 1
-            try:
-                size = path.stat().st_size
-            except OSError:
-                size = None
-            suffix = path.suffix.lower().lstrip(".")[:16] or None
-            vals = dict(title=title[:1024], artist_external_id=a_ext, artist_name=artist_name[:512],
-                        album_external_id=b_ext, album_name=album_name[:512],
-                        genre=(tags["genre"] or "")[:256] or None,
-                        duration_sec=tags["duration_sec"], year=tags["year"],
-                        track_no=tags["track_no"], disc_no=tags["disc_no"],
-                        bitrate=tags["bitrate"], suffix=suffix, size_bytes=size,
-                        content_type=_CONTENT_BY_SUFFIX.get(suffix or ""),
-                        path=str(path), play_count=0)
-            ex_t = db.query(Track).filter_by(server_id=server_id, external_id=t_ext).first()
-            if not ex_t:
-                db.add(Track(id=str(uuid.uuid4()), server_id=server_id, external_id=t_ext, **vals))
+            if t_ext in seen_tracks:
+                skipped += 1
             else:
-                for k, v in vals.items():
-                    if v is not None:
-                        setattr(ex_t, k, v)
-                ex_t.path = str(path)
-            tracks_cnt += 1
-            if (idx + 1) % 200 == 0:
-                db.commit()
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = None
+                suffix = path.suffix.lower().lstrip(".")[:16] or None
+                db.add(Track(id=str(uuid.uuid4()), server_id=server_id, external_id=t_ext,
+                             title=title[:1024], artist_external_id=a_ext, artist_name=artist_name[:512],
+                             album_external_id=b_ext, album_name=album_name[:512],
+                             genre=(tags["genre"] or "")[:256] or None,
+                             duration_sec=tags["duration_sec"], year=tags["year"],
+                             track_no=tags["track_no"], disc_no=tags["disc_no"],
+                             bitrate=tags["bitrate"], suffix=suffix, size_bytes=size,
+                             content_type=_CONTENT_BY_SUFFIX.get(suffix or ""),
+                             path=str(path), play_count=0))
+                seen_tracks.add(t_ext)
+                batch_seen.append((seen_tracks, t_ext))
+                tracks_cnt += 1
             if (idx + 1) % 500 == 0:
-                _append_log(run_id, "info", f"С диска обработано файлов: {idx + 1}/{len(files)}")
-    _append_log(run_id, "info", f"С диска загружено: треков {tracks_cnt}, новых альбомов {albums_new}, новых артистов {artists_new}")
+                try:
+                    db.commit()
+                    batch_seen.clear()
+                except Exception as e:
+                    db.rollback()
+                    for s, v in batch_seen:  # откаченные id снова станут кандидатами
+                        s.discard(v)
+                    batch_seen.clear()
+                    _append_log(run_id, "warn", f"Батч {(idx + 1) // 500} откатился ({e}); продолжаю")
+            if (idx + 1) % 2000 == 0:
+                _append_log(run_id, "info", f"С диска обработано файлов: {idx + 1}/{len(files)} (новых треков: {tracks_cnt})")
+                try:
+                    with session_scope() as dbp:
+                        rp = dbp.get(ScanRun, run_id)
+                        if rp:
+                            rp.total_items = len(files)
+                            rp.processed_items = idx + 1
+                except Exception:
+                    pass
+    _append_log(run_id, "info", f"С диска загружено: новых треков {tracks_cnt}, уже было {skipped}, новых альбомов {albums_new}, новых артистов {artists_new}")
     return {"files": len(files), "tracks": tracks_cnt, "artists": artists_new,
             "albums": albums_new, "music_dir": music_dir}
 
@@ -343,31 +367,158 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                             _append_log(run_id, "warn", "Navidrome сейчас сам сканирует папки — его ответы могут быть медленными. Дождитесь конца его сканирования и повторите.")
                     except Exception:
                         pass  # старые версии Navidrome не знают getScanStatus
-                    _append_log(run_id, "info", "получаю список артистов…")
-                    try:
-                        artists = await client.get_artists()
-                    except Exception as e:
-                        if "timeout" in type(e).__name__.lower() or "timeout" in str(e).lower():
-                            raise RuntimeError(
-                                "Navidrome не отдал список артистов за 120 секунд. "
-                                "Обычно это значит: библиотека очень большая или Navidrome "
-                                "занят собственным сканированием папок — дождитесь его "
-                                "завершения в интерфейсе Navidrome и запустите скан ещё раз."
-                            ) from e
-                        raise
-                    total_artists = len(artists)
-                    # Полный проход за один запуск: обрабатываем ВСЕХ артистов.
-                    # Прогресс виден в логах и в UI (processed/total).
-                    with session_scope() as db2:
-                        existing = db2.query(Artist).filter_by(server_id=server_row.id).count()
-                    if existing >= total_artists and total_artists > 0:
-                        _append_log(run_id, "info", f"Все {total_artists} артистов уже загружены — обновляю данные")
-                    _append_log(run_id, "info", f"Артистов в библиотеке: {total_artists}, уже в БД: {existing} — обрабатываю всех за один проход")
+                    seen_aids: set[str] = set()
+
+                    async def _ensure_artist(aid, aname):
+                        nonlocal artists_cnt
+                        if not aid or aid in seen_aids:
+                            return aid
+                        with session_scope() as db2:
+                            from sqlalchemy.exc import IntegrityError
+                            try:
+                                ex = db2.query(Artist).filter_by(server_id=server_row.id, external_id=aid).first()
+                                if not ex:
+                                    db2.add(Artist(server_id=server_row.id, external_id=aid, name=(aname or "Unknown")[:512]))
+                                    artists_cnt += 1
+                                elif aname:
+                                    ex.name = aname
+                            except IntegrityError:
+                                db2.rollback()
+                        seen_aids.add(aid)
+                        return aid
+
+                    async def _store_album(alid, alb, fb_aid=None, fb_aname=None):
+                        nonlocal albums_cnt, tracks_cnt
+                        alname = alb.get("name") or alb.get("title") or "Unknown Album"
+                        if not alid:
+                            return
+                        base_aid = alb.get("artistId") or fb_aid
+                        base_aname = alb.get("artist") or fb_aname or "Unknown"
+                        with session_scope() as db2:
+                            from sqlalchemy.exc import IntegrityError
+                            try:
+                                exa = db2.query(Album).filter_by(server_id=server_row.id, external_id=alid).first()
+                                if not exa:
+                                    exa = Album(
+                                        server_id=server_row.id,
+                                        external_id=alid,
+                                        title=alname,
+                                        artist_external_id=base_aid,
+                                        artist_name=base_aname,
+                                        year=_to_int(alb.get("year")),
+                                        genre=alb.get("genre"),
+                                        cover_art_id=alb.get("coverArt"),
+                                    )
+                                    db2.add(exa)
+                                else:
+                                    exa.title = alname
+                                    exa.artist_name = base_aname
+                                    exa.year = _to_int(alb.get("year")) or exa.year
+                                    exa.genre = alb.get("genre") or exa.genre
+                                    exa.cover_art_id = alb.get("coverArt") or exa.cover_art_id
+                            except IntegrityError:
+                                db2.rollback()
+                        albums_cnt += 1
+                        try:
+                            alb_detail = await client.get_album(alid)
+                        except Exception as e:
+                            _append_log(run_id, "warn", f"getAlbum {alid} failed: {e}")
+                            return
+                        songs = alb_detail.get("song") or []
+                        for s in songs:
+                            sid = s.get("id")
+                            if not sid:
+                                continue
+                            aid = s.get("artistId") or base_aid
+                            aname = s.get("artist") or base_aname
+                            await _ensure_artist(aid, aname)
+                            with session_scope() as db2:
+                                from sqlalchemy.exc import IntegrityError
+                                try:
+                                    ex_t = db2.query(Track).filter_by(server_id=server_row.id, external_id=sid).first()
+                                    vals = dict(
+                                        title=s.get("title") or "Unknown",
+                                        artist_external_id=aid,
+                                        artist_name=aname,
+                                        album_external_id=s.get("albumId") or alid,
+                                        album_name=s.get("album") or alname,
+                                        genre=s.get("genre"),
+                                        duration_sec=_to_int(s.get("duration")),
+                                        year=_to_int(s.get("year")),
+                                        track_no=_to_int(s.get("track")),
+                                        disc_no=_to_int(s.get("discNumber")),
+                                        bitrate=_to_int(s.get("bitRate")),
+                                        suffix=s.get("suffix"),
+                                        size_bytes=_to_int(s.get("size")),
+                                        content_type=s.get("contentType"),
+                                        path=s.get("path"),
+                                        cover_art_id=s.get("coverArt"),
+                                        starred=_to_bool(s.get("starred")),
+                                        play_count=_to_int(s.get("playCount"), 0),
+                                        rating=_to_int(s.get("userRating") or s.get("rating")),
+                                        last_played_at=_parse_dt(s.get("played") or s.get("lastPlayed")),
+                                    )
+                                    if not ex_t:
+                                        ex_t = Track(
+                                            id=str(uuid.uuid4()),
+                                            server_id=server_row.id,
+                                            external_id=sid,
+                                            **vals,
+                                        )
+                                        db2.add(ex_t)
+                                    else:
+                                        for k, v in vals.items():
+                                            if v is not None:
+                                                setattr(ex_t, k, v)
+                                except IntegrityError:
+                                    db2.rollback()
+                                tracks_cnt += 1
+
+                    # --- основной путь: альбомы постранично ---
+                    # Каждый ответ маленький (500 шт), гигантского getArtists нет —
+                    # таймаутов на больших библиотеках больше не будет.
+                    _append_log(run_id, "info", "получаю список альбомов постранично (по 500)…")
+                    _page_size = 500
+                    _page_offset = 0
+                    queued_albums: list = []
+                    while True:
+                        try:
+                            _page = await client.get_album_list2(type_="alphabeticalByName", size=_page_size, offset=_page_offset)
+                        except Exception as e:
+                            _append_log(run_id, "warn", f"getAlbumList2 offset={_page_offset} failed: {e}")
+                            break
+                        if not _page:
+                            break
+                        queued_albums.extend(_page)
+                        _page_offset += len(_page)
+                        if len(_page) < _page_size:
+                            break
+                        if (_page_offset // _page_size) % 4 == 0:
+                            _append_log(run_id, "info", f"Загружено альбомов: {len(queued_albums)}…")
+                    total_albums = len(queued_albums)
+                    artists: list = []
+                    total_artists = 0
+                    if total_albums == 0:
+                        # fallback: старый путь через getArtists
+                        _append_log(run_id, "info", "альбомный список пуст — пробую через артистов…")
+                        try:
+                            artists = await client.get_artists()
+                        except Exception as e:
+                            if "timeout" in type(e).__name__.lower() or "timeout" in str(e).lower():
+                                raise RuntimeError(
+                                    "Navidrome не отвечает дольше 120 секунд — дождитесь "
+                                    "конца его собственного сканирования и запустите ещё раз."
+                                ) from e
+                            raise
+                        total_artists = len(artists)
+                        _append_log(run_id, "info", f"Артистов в библиотеке: {total_artists} — обрабатываю всех за один проход")
+                    else:
+                        _append_log(run_id, "info", f"Альбомов в библиотеке: {total_albums} — обрабатываю все за один проход")
                     # обновим total
                     with session_scope() as db2:
                         r2 = db2.get(ScanRun, run_id)
                         if r2:
-                            r2.total_items = total_artists
+                            r2.total_items = total_artists + total_albums
                             r2.processed_items = 0
                     for idx, a in enumerate(artists):
                         aid = a.get("id")
@@ -486,13 +637,21 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                     tracks_cnt += 1
                         if (idx + 1) % 25 == 0:
                             _append_log(run_id, "info", f"Обработано артистов: {idx+1}/{total_artists}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
-                _append_log(run_id, "info", f"Готово — артистов: {total_artists}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
+                    for jdx, alb in enumerate(queued_albums):
+                        await _store_album(alb.get("id"), alb)
+                        if (jdx + 1) % 25 == 0:
+                            with session_scope() as db2:
+                                r2 = db2.get(ScanRun, run_id)
+                                if r2:
+                                    r2.processed_items = total_artists + jdx + 1
+                            _append_log(run_id, "info", f"Обработано альбомов: {jdx+1}/{total_albums}, артистов: {artists_cnt}, треков: {tracks_cnt}")
+                _append_log(run_id, "info", f"Готово — артистов: {artists_cnt}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
                 with session_scope() as db2:
                     r2 = db2.get(ScanRun, run_id)
                     if r2:
-                        r2.total_items = total_artists
-                        r2.processed_items = total_artists
-                return {"artists": len(artists), "albums": albums_cnt, "tracks": tracks_cnt}
+                        r2.total_items = total_artists + total_albums
+                        r2.processed_items = total_artists + total_albums
+                return {"artists": artists_cnt, "albums": albums_cnt, "tracks": tracks_cnt}
 
             try:
                 result = asyncio.run(_do_fetch())
@@ -1095,6 +1254,11 @@ def sync_navidrome_users(server_id: str) -> dict:
         try:
             users = asyncio.run(_fetch())
         except Exception as e:
+            err = str(e)
+            # getUsers требует прав администратора в Navidrome
+            if "50" in err or "admin" in err.lower() or "forbidden" in err.lower() or "401" in err or "403" in err:
+                return {"status": "failure",
+                        "error": "Navidrome отклонил getUsers — для синхронизации нужен пользователь с правами администратора (либо добавьте пользователей вручную на странице «Пользователи»)"}
             return {"status": "failure", "error": f"getUsers failed: {e}"}
 
         from app.db.models import MediaUser

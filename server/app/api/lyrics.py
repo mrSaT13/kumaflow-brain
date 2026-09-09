@@ -16,15 +16,15 @@ router = APIRouter()
 
 
 @router.post("/fetch")
-async def fetch_lyrics(db: Session = Depends(get_db)):
+def fetch_lyrics(db: Session = Depends(get_db)):
     """Синхронный фоллбэк: если есть очередь — через нее, иначе напрямую."""
     from app.workers.tasks import lyrics_fetch
 
     # быстрый старт задачи как в /api/scan/lyrics
     from app.db.models import ScanRun, ScanLog
-    from app.services.demo import ensure_demo_server
+    from app.services.media_server import resolve_active_server
 
-    server = ensure_demo_server(db)
+    server = resolve_active_server(db)
     db.commit()
     total = db.query(Track).filter_by(server_id=server.id).count()
     run = ScanRun(
@@ -44,7 +44,7 @@ async def fetch_lyrics(db: Session = Depends(get_db)):
 
 
 @router.get("/{track_id}")
-async def get_lyrics(track_id: str, db: Session = Depends(get_db)):
+def get_lyrics(track_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(track_id)
     except ValueError:
@@ -86,7 +86,7 @@ async def get_lyrics(track_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{track_id}/refresh")
-async def refresh_lyrics(track_id: str, db: Session = Depends(get_db)):
+def refresh_lyrics(track_id: str, db: Session = Depends(get_db)):
     """Принудительно перетянуть текст с lrclib и прогнать AI анализ."""
     try:
         uuid.UUID(track_id)

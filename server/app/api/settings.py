@@ -13,7 +13,7 @@ router = APIRouter()
 
 @router.get("", include_in_schema=False)
 @router.get("/")
-async def list_settings(db: Session = Depends(get_db)):
+def list_settings(db: Session = Depends(get_db)):
     s = get_settings()
     runtime = {
         "app_name": s.app_name,
@@ -39,7 +39,7 @@ async def list_settings(db: Session = Depends(get_db)):
 
 
 @router.put("/")
-async def upsert_setting(payload: dict, db: Session = Depends(get_db)):
+def upsert_setting(payload: dict, db: Session = Depends(get_db)):
     key = payload.get("key")
     value = payload.get("value")
     if not key:
@@ -55,7 +55,7 @@ async def upsert_setting(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/ai/test")
-async def ai_test(payload: dict | None = None):
+def ai_test(payload: dict | None = None):
     """Пинг AI-провайдера. Если передан prompt — ответит, иначе просто 'ok'."""
     if not ai.is_configured():
         return {"ok": False, "error": "AI не настроен"}
@@ -72,7 +72,7 @@ async def ai_test(payload: dict | None = None):
 
 
 @router.get("/ai/models")
-async def ai_models():
+def ai_models():
     """Список моделей (если поддерживается провайдером)."""
     s = get_settings()
     models = ai.available_models()
@@ -89,7 +89,7 @@ async def ai_models():
 
 
 @router.get("/ai")
-async def get_ai(db: Session = Depends(get_db)):
+def get_ai(db: Session = Depends(get_db)):
     """Настройки ИИ из БД (сохранены из веб-UI) + effective-итог и статус."""
     from app.services import ai as _ai
     from app.services.ai_config import effective_ai, get_ai_config
@@ -102,7 +102,7 @@ async def get_ai(db: Session = Depends(get_db)):
 
 
 @router.post("/ai")
-async def save_ai(payload: dict, db: Session = Depends(get_db)):
+def save_ai(payload: dict, db: Session = Depends(get_db)):
     """Сохранить провайдера/модель/ключи ИИ. Без перезапуска и правок файлов."""
     from app.services.ai_config import save_ai_config
 
@@ -111,7 +111,7 @@ async def save_ai(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/media-server")
-async def save_media_server(payload: dict, db: Session = Depends(get_db)):
+def save_media_server(payload: dict, db: Session = Depends(get_db)):
     from app.services.media_server import save_media_server_config
 
     if not (payload.get("url") or "").strip():
@@ -121,7 +121,7 @@ async def save_media_server(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/media-server")
-async def get_media_server(db: Session = Depends(get_db)):
+def get_media_server(db: Session = Depends(get_db)):
     from app.services.media_server import get_media_server_config
 
     return get_media_server_config(db)
@@ -183,7 +183,7 @@ async def test_media_server(payload: dict | None = None, db: Session = Depends(g
 
 
 @router.get("/bridge")
-async def get_bridge(db: Session = Depends(get_db)):
+def get_bridge(db: Session = Depends(get_db)):
     """Настройки моста из БД (сохранены из веб-UI) с фолбэком на env."""
     from app.services.bridge import get_bridge_config
 
@@ -191,7 +191,7 @@ async def get_bridge(db: Session = Depends(get_db)):
 
 
 @router.post("/bridge")
-async def save_bridge(payload: dict, db: Session = Depends(get_db)):
+def save_bridge(payload: dict, db: Session = Depends(get_db)):
     """Сохранить адрес моста и вкл/выкл. Ничего в файлах править не нужно."""
     from app.services.bridge import save_bridge_config
 
