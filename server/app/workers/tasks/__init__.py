@@ -42,10 +42,27 @@ def _finish_run(run_id: str, status: str = "success", error: str | None = None) 
         run = db.get(ScanRun, run_id)
         if not run:
             return
+        # Не перезаписываем отмену пользователем
+        if run.status == "failure" and (run.error or "") == "Отменено пользователем":
+            return
         run.status = status
         run.finished_at = datetime.utcnow()
         if error:
             run.error = error
+
+
+def _is_cancelled(run_id: str | None) -> bool:
+    """Кооперативная отмена: пользователь нажал «Отменить» (статус failure)."""
+    if not run_id:
+        return False
+    try:
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id)
+            if not run:
+                return False
+            return run.status == "failure" and (run.error or "") == "Отменено пользователем"
+    except Exception:
+        return False
 
 
 def noop(*args, **kwargs):
@@ -521,6 +538,8 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                             r2.total_items = total_artists + total_albums
                             r2.processed_items = 0
                     for idx, a in enumerate(artists):
+                        if idx % 10 == 0 and _is_cancelled(run_id):
+                            raise RuntimeError("Отменено пользователем")
                         aid = a.get("id")
                         aname = a.get("name") or "Unknown"
                         if not aid:
@@ -638,6 +657,8 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                         if (idx + 1) % 25 == 0:
                             _append_log(run_id, "info", f"Обработано артистов: {idx+1}/{total_artists}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
                     for jdx, alb in enumerate(queued_albums):
+                        if jdx % 10 == 0 and _is_cancelled(run_id):
+                            raise RuntimeError("Отменено пользователем")
                         await _store_album(alb.get("id"), alb)
                         if (jdx + 1) % 25 == 0:
                             with session_scope() as db2:
@@ -680,6 +701,11 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                 combined["mode"] = "navidrome+disk"
             return {"status": "success", **combined}
     except Exception as e:  # noqa: BLE001
+        if "Отменено пользователем" in str(e) or _is_cancelled(run_id):
+            logger.info("library_scan cancelled by user: {}", run_id)
+            # Статус failure+«Отменено пользователем» уже выставил cancel_run —
+            # не перезаписываем его.
+            return {"status": "failure", "error": "Отменено пользователем"}
         logger.exception("library_scan failed: {}", e)
         _append_log(run_id, "error", str(e))
         _finish_run(run_id, "failure", str(e))
@@ -733,11 +759,12 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
             run = db.get(ScanRun, run_id)
             if not run:
                 return {"status": "no run"}
-            server_id = run.server_id
+            # Охват — ВСЯ база (Navidrome + диск + демо), а не только server_id
+            # запуска: раньше файлы с диска на другой строке media_servers
+            # игнорировались анализом.
             q = (
                 db.query(Track)
                 .outerjoin(TrackFeatures, TrackFeatures.track_id == Track.id)
-                .filter(Track.server_id == server_id)
             )
             if not force:
                 q = q.filter(TrackFeatures.track_id.is_(None))
@@ -762,6 +789,9 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
 
         ok = fail = n_local = n_stream = 0
         for i, (tid, ext_id, tpath, suffix, dur, title, artist) in enumerate(todo_data):
+            if _is_cancelled(run_id):
+                _append_log(run_id, "warn", f"Остановлено пользователем на {i}/{len(todo_data)}")
+                return {"status": "failure", "error": "Отменено пользователем", "ok": ok, "failed": fail}
             tmp_to_clean: Path | None = None
             try:
                 local_path = aa.resolve_local_file(tpath, music_dir)
@@ -771,6 +801,10 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                 else:
                     if not ext_id:
                         raise RuntimeError("нет external_id и нет локального файла")
+                    if str(ext_id).startswith("disk:"):
+                        raise RuntimeError(
+                            f"локальный файл не найден: {tpath} (проверьте MUSIC_DIR/volumes)"
+                        )
                     src = aa.download_from_navidrome(ext_id, cfg)
                     tmp_to_clean = Path(src)
                     n_stream += 1
@@ -847,10 +881,10 @@ def lyrics_fetch(run_id: str, *args, **kwargs) -> dict:
             run = db.get(ScanRun, run_id)
             # только треки без lrclib-текста
             have = db.query(Lyrics.track_id).filter(Lyrics.provider == "lrclib").subquery()
+            # Охват — вся база (раньше только run.server_id, диск выпадал).
             todo_q = (
                 db.query(Track)
                 .filter(
-                    Track.server_id == run.server_id,
                     Track.artist_name.isnot(None),
                     Track.title.isnot(None),
                     ~Track.id.in_(db.query(have.c.track_id)),
@@ -870,6 +904,10 @@ def lyrics_fetch(run_id: str, *args, **kwargs) -> dict:
 
         fetched = analyzed = skipped = 0
         for i, (tid, artist, title, album, dur) in enumerate(todo_data):
+            if _is_cancelled(run_id):
+                _append_log(run_id, "warn", f"Остановлено пользователем на {i}/{len(todo_data)}")
+                return {"status": "failure", "error": "Отменено пользователем",
+                        "fetched": fetched, "analyzed": analyzed, "skipped": skipped}
             # сеть вне транзакции
             result = lyrics_svc.fetch(artist=artist or "", title=title or "", album=album, duration_sec=dur)
             with session_scope() as db:
@@ -944,12 +982,10 @@ def lyrics_fetch(run_id: str, *args, **kwargs) -> dict:
             f"Загружено: {fetched}, проанализировано AI: {analyzed}, пропущено: {skipped}",
         )
         with session_scope() as db:
-            run = db.get(ScanRun, run_id)
             have2 = db.query(Lyrics.track_id).filter(Lyrics.provider == "lrclib").subquery()
             remaining = (
                 db.query(Track)
                 .filter(
-                    Track.server_id == (run.server_id if run else ""),
                     ~Track.id.in_(db.query(have2.c.track_id)),
                 )
                 .count()
@@ -1183,17 +1219,12 @@ def cluster_build(*args, **kwargs):
         with session_scope() as db:
             run = db.get(ScanRun, run_id) if run_id else None
             server_id = run.server_id if run else None
-            if not server_id:
-                # нет run — берём активный сервер
-                from app.services.media_server import resolve_active_server
-
-                server_id = resolve_active_server(db).id
-                db.commit()
-            n_tracks = db.query(Track).filter_by(server_id=server_id).count()
+            # Кластеризуем ВСЮ базу (Navidrome + диск). server_id оставляем
+            # только для совместимости сигнатуры build_clusters.
+            n_tracks = db.query(Track).count()
             n_feats = (
                 db.query(TrackFeatures)
                 .join(Track, TrackFeatures.track_id == Track.id)
-                .filter(Track.server_id == server_id)
                 .count()
             )
         if n_tracks == 0:

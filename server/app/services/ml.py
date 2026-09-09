@@ -83,12 +83,11 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
             return []
         f_t = db.get(TrackFeatures, target.id)
         v_t = _feature_vector(target, f_t)
-        server_id = target.server_id
         cluster_t = (
             db.query(TrackCluster).filter(TrackCluster.track_id == target.id).first()
         )
-        # bulk-загрузка одним проходом
-        rows = db.query(Track).filter(Track.server_id == server_id).all()
+        # bulk-загрузка одним проходом — по всей базе (Navidrome + диск)
+        rows = db.query(Track).all()
         ids = [str(r.id) for r in rows]
         feat_map: dict[str, TrackFeatures] = {}
         if ids:
@@ -143,15 +142,16 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
 
 # ---------- 2. 3-шаговый cold-start с идеальными сочетаниями ----------
 
-def _step1_signal(server_id: str) -> dict[str, float]:
+def _step1_signal(server_id: str | None = None) -> dict[str, float]:
     """Собирает веса по artist/genre/mood с учётом прослушиваний, избранного, оценок, давности.
 
     Фичи грузятся одним запросом (иначе на большой библиотеке — N+1).
+    server_id игнорируется: охватываем всю базу (Navidrome + диск).
     """
     weights: dict[str, float] = {}
     now = datetime.utcnow()
     with session_scope() as db:
-        tracks = db.query(Track).filter_by(server_id=server_id).all()
+        tracks = db.query(Track).all()
         ids = [t.id for t in tracks]
         feat_map: dict[str, TrackFeatures] = {}
         if ids:
@@ -199,11 +199,11 @@ def _step1_signal(server_id: str) -> dict[str, float]:
     return weights
 
 
-def _step2_candidates(server_id: str, signal: dict[str, float]) -> list[tuple[Track, float]]:
+def _step2_candidates(server_id: str | None, signal: dict[str, float]) -> list[tuple[Track, float]]:
     """Расширяем кандидатов: точные совпадения + кластер-соседи + sonic-близость к топ-сигналам + fallback."""
     candidates: dict[str, float] = {}
     with session_scope() as db:
-        tracks = db.query(Track).filter_by(server_id=server_id).all()
+        tracks = db.query(Track).all()
         if not tracks:
             return []
         # заранее соберём кластеры и фичи для быстрого доступа (bulk, не N+1)
@@ -448,8 +448,11 @@ def cold_start_playlist(server_id: str, n: int = 30) -> dict[str, Any]:
 
 # ---------- 3. Кластеризация KMeans по фичам ----------
 
-def build_clusters(server_id: str, k: int = 8) -> dict[str, Any]:
-    """KMeans по нормированным фичам. Перезаписывает TrackCluster (algorithm='kmeans')."""
+def build_clusters(server_id: str | None = None, k: int = 8) -> dict[str, Any]:
+    """KMeans по нормированным фичам. Перезаписывает TrackCluster (algorithm='kmeans').
+
+    server_id игнорируется: кластеризуем всю базу (Navidrome + диск).
+    """
     if not _HAS_NP:
         return {"status": "numpy не установлен"}
     try:
@@ -458,7 +461,7 @@ def build_clusters(server_id: str, k: int = 8) -> dict[str, Any]:
         return {"status": f"sklearn не установлен: {e}"}
 
     with session_scope() as db:
-        tracks = db.query(Track).filter_by(server_id=server_id).all()
+        tracks = db.query(Track).all()
         feats: list[tuple[str, np.ndarray]] = []
         for t in tracks:
             f = db.get(TrackFeatures, t.id)

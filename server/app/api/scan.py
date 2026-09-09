@@ -28,6 +28,11 @@ router = APIRouter()
 
 
 def _run_to_dict(r: ScanRun) -> dict:
+    job_id = None
+    try:
+        job_id = (r.metadata_extra or {}).get("job_id")
+    except Exception:
+        job_id = None
     return {
         "id": str(r.id),
         "phase": r.phase,
@@ -37,6 +42,8 @@ def _run_to_dict(r: ScanRun) -> dict:
         "started_at": r.started_at.isoformat() if r.started_at else None,
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
         "error": r.error,
+        "job_id": job_id,
+        "cancellable": r.status in ("queued", "running"),
     }
 
 
@@ -68,6 +75,10 @@ def _start_run(phase: str, fn, db: Session, *, total: int = 0, job_kwargs: dict 
     db.add(run)
     db.flush()
     job_id = enqueue(fn, str(run.id), job_timeout=job_timeout, **(job_kwargs or {}))
+    try:
+        run.metadata_extra = dict(run.metadata_extra or {}) | {"job_id": job_id}
+    except Exception:
+        run.metadata_extra = {"job_id": job_id}
     db.add(
         ScanLog(
             id=str(uuid.uuid4()),
@@ -150,6 +161,20 @@ def cancel_run(run_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "not found")
     if r.status in ("success", "failure"):
         return {"ok": False, "error": "already finished"}
+    job_id = None
+    try:
+        job_id = (r.metadata_extra or {}).get("job_id")
+    except Exception:
+        job_id = None
+    # Пробуем снять RQ-job с очереди (если ещё ждёт). Если уже выполняется —
+    # воркер увидит статус failure и остановится сам (кооперативная отмена).
+    rq_res: dict = {"ok": False}
+    try:
+        from app.services.queue import cancel_job
+
+        rq_res = cancel_job(job_id)
+    except Exception as e:  # noqa: BLE001
+        rq_res = {"ok": False, "error": str(e)}
     r.status = "failure"
     r.finished_at = datetime.utcnow()
     r.error = "Отменено пользователем"
@@ -162,7 +187,7 @@ def cancel_run(run_id: str, db: Session = Depends(get_db)):
         )
     )
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "rq": rq_res}
 
 
 @router.get("/runs/{run_id}/logs")

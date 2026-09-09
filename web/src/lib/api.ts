@@ -11,6 +11,8 @@ export type Track = {
   rating?: number;
   starred?: boolean;
   last_played_at?: string | null;
+  server_id?: string | null;
+  source?: "navidrome" | "disk" | "demo" | string;
 };
 
 export type TrackDetail = Track & {
@@ -31,6 +33,8 @@ export type ScanRun = {
   started_at: string;
   finished_at?: string | null;
   error?: string | null;
+  job_id?: string | null;
+  cancellable?: boolean;
 };
 
 export type LogLine = {
@@ -78,9 +82,16 @@ export const api = {
   version: () => http<{ name: string; version: string }>("/api/version"),
 
   overview: () =>
-    http<{ tracks: number; albums: number; artists: number; users: number; servers: number }>(
-      "/api/library/overview",
-    ),
+    http<{
+      tracks: number;
+      albums: number;
+      artists: number;
+      users: number;
+      servers: number;
+      active_server?: string | null;
+      disk_tracks?: number;
+      navidrome_tracks?: number;
+    }>("/api/library/overview"),
   servers: () =>
     http<{ servers: { id: string; type: string; name: string; url: string; enabled: boolean }[] }>(
       "/api/library/servers",
@@ -91,7 +102,9 @@ export const api = {
     const qs = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v !== undefined) as [string, string][],
     ).toString();
-    return http<{ items: Track[]; total: number }>(`/api/tracks/${qs ? `?${qs}` : ""}`);
+    return http<{ items: Track[]; total: number; limit: number; offset: number }>(
+      `/api/tracks/${qs ? `?${qs}` : ""}`,
+    );
   },
   getTrack: (id: string) => http<TrackDetail>(`/api/tracks/${id}`),
   analyzeTrack: (id: string) =>
@@ -111,6 +124,8 @@ export const api = {
   listRuns: () => http<{ runs: ScanRun[] }>(`/api/scan/runs`),
   currentRun: () => http<{ current: ScanRun | null }>(`/api/scan/runs/current`),
   runLogs: (id: string) => http<{ logs: LogLine[] }>(`/api/scan/runs/${id}/logs`),
+  cancelRun: (id: string) =>
+    http<{ ok: boolean; error?: string }>(`/api/scan/runs/${id}/cancel`, { method: "POST" }),
 
   generateDailyPlaylist: (n = 30) =>
     http<{ queued: boolean; playlist_id: string; tracks: number; steps: { step: number; name: string; items: number }[] }>(

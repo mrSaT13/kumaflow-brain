@@ -97,3 +97,37 @@ def enqueue(fn: Callable[..., Any], *args: Any, queue: str = "default", job_time
     job_id = f"bg-{id(fut)}"
     logger.info("submitted to in-process executor: {} -> {}", job_id, fn.__name__)
     return job_id
+
+
+def cancel_job(job_id: str | None) -> dict:
+    """Попытка снять задачу с очереди RQ. Возвращает статус операции."""
+    if not job_id:
+        return {"ok": False, "error": "no job_id"}
+    if job_id.startswith("bg-"):
+        # in-process executor отменить нельзя — воркер сам увидит
+        # статус failure в БД (кооперативная отмена) и остановится.
+        return {"ok": True, "mode": "cooperative"}
+    if not _HAS_RQ:
+        return {"ok": False, "error": "RQ не установлен"}
+    try:
+        conn = get_redis()
+        from rq.job import Job as _RQJob
+
+        try:
+            job = _RQJob.fetch(job_id, connection=conn)
+        except Exception:
+            return {"ok": False, "error": "job not found (уже выполняется или завершён)"}
+        try:
+            job.cancel()
+        except Exception:
+            pass
+        # если job ещё в очереди — убрать из обеих очередей
+        for qname in ("default", "high"):
+            try:
+                get_queue(qname).remove(job)
+            except Exception:
+                pass
+        return {"ok": True, "mode": "rq-cancel"}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cancel_job failed: {}", e)
+        return {"ok": False, "error": str(e)}

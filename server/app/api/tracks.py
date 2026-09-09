@@ -14,6 +14,15 @@ from app.workers.tasks import analyze_single
 router = APIRouter()
 
 
+def _track_source(t: Track) -> str:
+    ext = (t.external_id or "")
+    if ext.startswith("disk:") or ext.startswith("dartist:") or ext.startswith("dalbum:"):
+        return "disk"
+    if ext.startswith("demo-"):
+        return "demo"
+    return "navidrome"
+
+
 def _track_to_dict(t: Track) -> dict:
     return {
         "id": str(t.id),
@@ -28,6 +37,8 @@ def _track_to_dict(t: Track) -> dict:
         "rating": t.rating,
         "starred": t.starred,
         "last_played_at": t.last_played_at.isoformat() if t.last_played_at else None,
+        "server_id": str(t.server_id) if t.server_id else None,
+        "source": _track_source(t),
     }
 
 
@@ -37,21 +48,24 @@ def list_tracks(
     q: str | None = None,
     genre: str | None = None,
     artist: str | None = None,
-    limit: int = Query(50, le=500),
+    source: str | None = None,
+    server_id: str | None = None,
+    limit: int = Query(100, le=500),
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    from app.services.media_server import get_media_server_config
-
-    cfg = get_media_server_config(db)
-    real_url = cfg.get("url") if cfg.get("url") not in ("", "http://localhost", "https://localhost") else None
+    # Показываем ВСЕ треки (Navidrome + файлы с диска + демо).
+    # Раньше был фильтр по active server — файлы с диска, привязанные
+    # к другой строке media_servers, пропадали из выдачи.
     query = db.query(Track)
-    if real_url:
-        from app.db.models import MediaServer
-
-        srv = db.query(MediaServer).filter(MediaServer.url == real_url).first()
-        if srv:
-            query = query.filter(Track.server_id == srv.id)
+    if server_id:
+        query = query.filter(Track.server_id == server_id)
+    if source == "disk":
+        query = query.filter(Track.external_id.like("disk:%"))
+    elif source == "navidrome":
+        query = query.filter(~Track.external_id.like("disk:%"), ~Track.external_id.like("demo-%"))
+    elif source == "demo":
+        query = query.filter(Track.external_id.like("demo-%"))
     if q:
         like = f"%{q.lower()}%"
         query = query.filter(

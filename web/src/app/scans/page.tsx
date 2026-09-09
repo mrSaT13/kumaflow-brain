@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 import { useEffect, useRef, useState } from "react";
-import { Activity, FileText, Play, RefreshCw, Sparkles, Zap } from "lucide-react";
+import { Activity, FileText, RefreshCw, Sparkles, XCircle, Zap } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
 import { api, type LogLine } from "@/lib/api";
 import { fmtDate, PHASE_LABELS, STATUS_LABELS, STATUS_TONE } from "@/lib/format";
@@ -77,6 +77,21 @@ export default function ScansPage() {
     refreshInterval: 3000,
   });
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
+
+  async function cancel(id: string) {
+    if (!confirm("Отменить задачу? Воркер остановится на ближайшем чекпоинте.")) return;
+    setCancelling(id);
+    try {
+      await api.cancelRun(id);
+      refreshRuns();
+      refreshCurrent();
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setCancelling(null);
+    }
+  }
 
   async function start(kind: "library" | "analysis" | "lyrics" | "clusters") {
     let res: { run_id: string };
@@ -121,11 +136,23 @@ export default function ScansPage() {
                 <span className="font-medium">{PHASE_LABELS[current.current.phase] ?? current.current.phase}</span>
                 <Badge tone={STATUS_TONE[current.current.status]}>{STATUS_LABELS[current.current.status]}</Badge>
                 <span className="ml-auto text-xs text-muted">старт {fmtDate(current.current.started_at)}</span>
+                <Button
+                  variant="ghost"
+                  className="!text-rose-600 !border-rose-300"
+                  onClick={() => cancel(current.current.id)}
+                  disabled={cancelling === current.current.id}
+                >
+                  <XCircle className="w-4 h-4" />
+                  {cancelling === current.current.id ? "Отмена…" : "Отменить задание"}
+                </Button>
               </div>
               <ProgressBar value={current.current.processed_items} total={current.current.total_items} />
               <div className="text-xs text-muted">
                 {current.current.processed_items} / {current.current.total_items}
               </div>
+              {current.current.error && (
+                <div className="text-xs text-rose-600">{current.current.error}</div>
+              )}
             </div>
           ) : (
             <EmptyState message="Нет активных задач." />
@@ -135,6 +162,7 @@ export default function ScansPage() {
 
       <Section title="История">
         <div className="kuma-card overflow-hidden">
+          <div className="overflow-x-auto">
           {(runs?.runs ?? []).length === 0 ? (
             <EmptyState message="Задач ещё не было." />
           ) : (
@@ -161,16 +189,27 @@ export default function ScansPage() {
                     </td>
                     <td className="text-muted text-xs">{fmtDate(r.started_at)}</td>
                     <td className="text-muted text-xs">{fmtDate(r.finished_at)}</td>
-                    <td className="text-right">
+                    <td className="text-right whitespace-nowrap">
                       <button className="kuma-pill hover:text-text" onClick={() => setSelectedRun(r.id)}>
                         <FileText className="w-3 h-3" /> логи
                       </button>
+                      {(r.status === "queued" || r.status === "running") && (
+                        <button
+                          className="kuma-pill hover:text-rose-600 !border-rose-300 ml-2"
+                          onClick={() => cancel(r.id)}
+                          disabled={cancelling === r.id}
+                        >
+                          <XCircle className="w-3 h-3" />
+                          {cancelling === r.id ? "отмена…" : "отменить"}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
+          </div>
         </div>
       </Section>
 
