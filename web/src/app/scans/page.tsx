@@ -129,34 +129,36 @@ export default function ScansPage() {
 
       <Section title="Текущая задача">
         <Card>
-          {current?.current ? (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-sm flex-wrap">
-                <Activity className="w-4 h-4 text-muted" />
-                <span className="font-medium">{PHASE_LABELS[current.current.phase] ?? current.current.phase}</span>
-                <Badge tone={STATUS_TONE[current.current.status]}>{STATUS_LABELS[current.current.status]}</Badge>
-                <span className="ml-auto text-xs text-muted">старт {fmtDate(current.current.started_at)}</span>
-                <Button
-                  variant="ghost"
-                  className="!text-rose-600 !border-rose-300"
-                  onClick={() => cancel(current.current.id)}
-                  disabled={cancelling === current.current.id}
-                >
-                  <XCircle className="w-4 h-4" />
-                  {cancelling === current.current.id ? "Отмена…" : "Отменить задание"}
-                </Button>
+          {(() => {
+            const cur = current?.current ?? null;
+            if (!cur) return <EmptyState message="Нет активных задач." />;
+            return (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-sm flex-wrap">
+                  <Activity className="w-4 h-4 text-muted" />
+                  <span className="font-medium">{PHASE_LABELS[cur.phase] ?? cur.phase}</span>
+                  <Badge tone={STATUS_TONE[cur.status]}>{STATUS_LABELS[cur.status]}</Badge>
+                  <span className="ml-auto text-xs text-muted">старт {fmtDate(cur.started_at)}</span>
+                  <Button
+                    variant="ghost"
+                    className="!text-rose-600 !border-rose-300"
+                    onClick={() => cancel(cur.id)}
+                    disabled={cancelling === cur.id}
+                  >
+                    <XCircle className="w-4 h-4" />
+                    {cancelling === cur.id ? "Отмена…" : "Отменить задание"}
+                  </Button>
+                </div>
+                <ProgressBar value={cur.processed_items} total={cur.total_items} />
+                <div className="text-xs text-muted">
+                  {cur.processed_items} / {cur.total_items}
+                </div>
+                {cur.error && (
+                  <div className="text-xs text-rose-600">{cur.error}</div>
+                )}
               </div>
-              <ProgressBar value={current.current.processed_items} total={current.current.total_items} />
-              <div className="text-xs text-muted">
-                {current.current.processed_items} / {current.current.total_items}
-              </div>
-              {current.current.error && (
-                <div className="text-xs text-rose-600">{current.current.error}</div>
-              )}
-            </div>
-          ) : (
-            <EmptyState message="Нет активных задач." />
-          )}
+            );
+          })()}
         </Card>
       </Section>
 
