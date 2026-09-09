@@ -94,6 +94,12 @@ export const api = {
     return http<{ items: Track[]; total: number }>(`/api/tracks/${qs ? `?${qs}` : ""}`);
   },
   getTrack: (id: string) => http<TrackDetail>(`/api/tracks/${id}`),
+  analyzeTrack: (id: string) =>
+    http<{ queued: boolean; run_id: string; job_id: string }>(`/api/tracks/${id}/analyze`, { method: "POST" }),
+  fetchTrackLyrics: (id: string) =>
+    http<{ ok: boolean; error?: string }>(`/api/tracks/${id}/lyrics`, { method: "POST" }),
+  trackCoverUrl: (id: string) => `/api/covers/track/${id}`,
+  coverUrl: (coverId: string) => `/api/covers/${encodeURIComponent(coverId)}`,
   recommendByTrack: (id: string) => http<{ items: Track[] }>(`/api/analysis/recommend/by-track/${id}`),
   coldStart: (n = 30) => http<{ tracks: string[]; items: Track[]; steps: { step: number; name: string; items: number }[] }>(`/api/analysis/cold-start?n=${n}`),
 
@@ -121,13 +127,30 @@ export const api = {
   updateUser: (id: string, body: { username?: string; is_admin?: boolean }) =>
     http<{ user: MediaUser }>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (id: string) => http<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
-  syncUsers: () => http<{ queued: boolean }>(`/api/users/sync`, { method: "POST" }),
+  syncUsers: () =>
+    http<{ ok: boolean; added?: number; updated?: number; total?: number; error?: string }>(
+      `/api/users/sync`,
+      { method: "POST" },
+    ),
+
+  buildClusters: () =>
+    http<{ queued: boolean; run_id: string; job_id: string }>(`/api/clusters/build`, { method: "POST" }),
+  listClusters: () =>
+    http<{
+      clusters: {
+        id: number;
+        algorithm: string;
+        size: number;
+        top_genres: string[];
+        avg_energy: number | null;
+        sample: { id: string; title: string; artist_name: string }[];
+      }[];
+    }>(`/api/clusters/`),
 
   fetchLyrics: () => http<{ queued: boolean }>(`/api/playlists/fetch-lyrics`, { method: "POST" }),
 
   settings: () =>
-    http<{ runtime: Record<string, unknown>; db: Record<string, unknown> }>(`/api/settings/`),
-  saveMediaServer: (body: Record<string, string>) =>
+    http<{ runtime: Record<string, unknown>; db: Record<string, unknown> }>(`/api/settings/`),  saveMediaServer: (body: Record<string, string>) =>
     http<{ ok: boolean; saved?: Record<string, string>; error?: string }>(`/api/settings/media-server`, {
       method: "POST",
       body: JSON.stringify(body),
@@ -145,6 +168,17 @@ export const api = {
     }),
   aiModels: () =>
     http<{ provider: string; configured_model: string; available: string[] }>(`/api/settings/ai/models`),
+  getAi: () =>
+    http<{
+      saved: Record<string, string>;
+      effective: Record<string, string>;
+      configured: boolean;
+    }>(`/api/settings/ai`),
+  saveAi: (body: Record<string, string>) =>
+    http<{ ok: boolean; error?: string }>(`/api/settings/ai`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   getBridge: () => http<{ url: string; enabled: boolean }>(`/api/settings/bridge`),
   saveBridge: (body: { url: string; enabled: boolean }) =>

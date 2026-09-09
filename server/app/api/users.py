@@ -6,11 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.db import get_db, models
-from app.db.models import MediaUser, MediaServer
-from app.services.demo import ensure_demo_server
-from app.services.queue import enqueue
-from app.workers.tasks import collab_build
+from app.db import get_db
+from app.db.models import MediaUser
+from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
+from app.services.media_server import resolve_active_server
 
 router = APIRouter()
 
@@ -46,7 +45,7 @@ async def list_users(db: Session = Depends(get_db)):
 @router.post("", include_in_schema=False)
 @router.post("/")
 async def create_user(payload: UserIn, db: Session = Depends(get_db)):
-    server = ensure_demo_server(db)
+    server = resolve_active_server(db)
     db.commit()
     exists = (
         db.query(MediaUser)
@@ -102,7 +101,12 @@ async def delete_user(user_id: str, db: Session = Depends(get_db)):
 
 @router.post("/sync")
 async def sync_users(db: Session = Depends(get_db)):
-    server = ensure_demo_server(db)
+    """Синхронизировать пользователей из Navidrome (getUsers) — сразу, без очереди."""
+    from app.workers.tasks import sync_navidrome_users
+
+    server = resolve_active_server(db)
     db.commit()
-    job_id = enqueue(collab_build)
-    return {"queued": True, "job_id": job_id}
+    res = sync_navidrome_users(str(server.id))
+    if res.get("status") != "success":
+        return {"ok": False, "error": res.get("error")}
+    return {"ok": True, **res}

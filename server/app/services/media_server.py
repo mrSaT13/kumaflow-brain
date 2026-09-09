@@ -61,6 +61,26 @@ def save_media_server_config(db: Session, payload: dict[str, Any]) -> dict[str, 
     return value
 
 
+def is_real_config(cfg: dict[str, str]) -> bool:
+    """Настроен ли реальный сервер (а не заглушка localhost)."""
+    url = (cfg.get("url") or "").strip()
+    return bool(url) and url not in ("http://localhost", "https://localhost")
+
+
+def resolve_active_server(db: Session) -> MediaServer:
+    """Активный сервер для всех операций: реальный из настроек или демо.
+
+    Заменяет прямое использование ensure_demo_server в API: если пользователь
+    настроил Navidrome в веб-UI — работаем с ним, иначе с демо-сервером.
+    """
+    from app.services.demo import ensure_demo_server
+
+    cfg = get_media_server_config(db)
+    if is_real_config(cfg):
+        return ensure_media_server_row(db, cfg)
+    return ensure_demo_server(db)
+
+
 def ensure_media_server_row(db: Session, cfg: dict[str, str] | None = None) -> MediaServer:
     if cfg is None:
         cfg = get_media_server_config(db)

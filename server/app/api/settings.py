@@ -11,6 +11,7 @@ from app.services import ai
 router = APIRouter()
 
 
+@router.get("", include_in_schema=False)
 @router.get("/")
 async def list_settings(db: Session = Depends(get_db)):
     s = get_settings()
@@ -85,6 +86,28 @@ async def ai_models():
         ),
         "available": models,
     }
+
+
+@router.get("/ai")
+async def get_ai(db: Session = Depends(get_db)):
+    """Настройки ИИ из БД (сохранены из веб-UI) + effective-итог и статус."""
+    from app.services import ai as _ai
+    from app.services.ai_config import effective_ai, get_ai_config
+
+    return {
+        "saved": get_ai_config(db),
+        "effective": {k: (v if "key" not in k else ("***" if v else "")) for k, v in effective_ai().items()},
+        "configured": _ai.is_configured(),
+    }
+
+
+@router.post("/ai")
+async def save_ai(payload: dict, db: Session = Depends(get_db)):
+    """Сохранить провайдера/модель/ключи ИИ. Без перезапуска и правок файлов."""
+    from app.services.ai_config import save_ai_config
+
+    value = save_ai_config(db, payload or {})
+    return {"ok": True, "saved": {k: (v if "key" not in k else ("***" if v else "")) for k, v in value.items()}}
 
 
 @router.post("/media-server")

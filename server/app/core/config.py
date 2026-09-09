@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 MediaServerType = Literal["navidrome", "jellyfin", "emby", "lyrion", "none"]
-AiProvider = Literal["NONE", "OLLAMA", "OPENAI", "GEMINI", "MISTRAL"]
+AiProvider = Literal["NONE", "OLLAMA", "OLLAMA_CLOUD", "OPENAI", "GEMINI", "MISTRAL"]
 
 
 class Settings(BaseSettings):

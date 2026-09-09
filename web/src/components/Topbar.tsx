@@ -27,7 +27,7 @@ export function Topbar() {
     // одинаковый HTML на сервере и клиенте до гидратации
     return (
       <div className="h-14 border-b border-border bg-bg/80 backdrop-blur sticky top-0 z-10 flex items-center justify-between px-8">
-        <div className="text-sm text-muted">Самохостинг ИИ для вашей музыкальной библиотеки</div>
+        <div className="text-sm text-muted">Музыкальная аналитика и рекомендации для вашей библиотеки</div>
         <span className="kuma-pill opacity-0" aria-hidden>
           Тёмная
         </span>
@@ -37,7 +37,7 @@ export function Topbar() {
   return (
     <div className="h-14 border-b border-border bg-bg/80 backdrop-blur sticky top-0 z-10 flex items-center justify-between px-8">
       <div className="text-sm text-muted">
-        Самохостинг ИИ для вашей музыкальной библиотеки
+        Музыкальная аналитика и рекомендации для вашей библиотеки
       </div>
       <button onClick={toggle} className="kuma-pill" aria-label="Переключить тему" suppressHydrationWarning>
         {dark ? <Sun className="w-3 h-3" /> : <Moon className="w-3 h-3" />}

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db, models
-from app.db.models import Track, TrackFeatures, TrackCluster, Lyrics, TrackMetadataEnrich
+from app.db.models import ScanLog, ScanRun, Track, TrackFeatures, TrackCluster, Lyrics, TrackMetadataEnrich
+from app.services.queue import enqueue
+from app.workers.tasks import analyze_single
 
 router = APIRouter()
 
@@ -127,3 +130,49 @@ async def get_track(track_id: str, db: Session = Depends(get_db)):
         ),
         "metadata": {row.source: row.data for row in enrich},
     }
+
+
+@router.post("/{track_id}/analyze")
+async def analyze_track_now(track_id: str, db: Session = Depends(get_db)):
+    """Sonic-анализ одного трека прямо сейчас (кнопка на странице трека)."""
+    try:
+        uuid.UUID(track_id)
+    except ValueError:
+        raise HTTPException(400, "invalid id")
+    t = db.get(Track, track_id)
+    if not t:
+        raise HTTPException(404, "track not found")
+    run = ScanRun(
+        id=str(uuid.uuid4()),
+        server_id=t.server_id,
+        phase="analysis",
+        status="running",
+        total_items=1,
+        processed_items=0,
+        started_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.flush()
+    job_id = enqueue(analyze_single, str(run.id), str(track_id), job_timeout=1200)
+    db.add(ScanLog(id=str(uuid.uuid4()), run_id=run.id, level="info",
+                   message=f"Sonic-анализ трека «{t.artist_name} — {t.title}» (job {job_id})"))
+    db.commit()
+    return {"queued": True, "run_id": str(run.id), "job_id": job_id}
+
+
+@router.post("/{track_id}/lyrics")
+async def fetch_track_lyrics_now(track_id: str, db: Session = Depends(get_db)):
+    """Загрузка текста одного трека (LRCLIB + AI-настроение)."""
+    try:
+        uuid.UUID(track_id)
+    except ValueError:
+        raise HTTPException(400, "invalid id")
+    t = db.get(Track, track_id)
+    if not t:
+        raise HTTPException(404, "track not found")
+    from app.workers.tasks import lyrics_fetch_one
+
+    res = lyrics_fetch_one(str(track_id))
+    if res.get("status") != "success":
+        return {"ok": False, "error": res.get("error")}
+    return {"ok": True, **res}

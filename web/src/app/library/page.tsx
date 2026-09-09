@@ -106,7 +106,7 @@ export default function LibraryPage() {
               <EmptyState
                 message={
                   <>
-                    В библиотеке пусто. Нажмите <span className="font-medium">«Синхронизировать с Navidrome»</span> чтобы загрузить первые 100 артистов. Повторный запуск догрузит следующих 100.
+                    В библиотеке пусто. Нажмите <span className="font-medium">«Синхронизировать с Navidrome»</span> — сканирование пройдёт полностью за один запуск (включая файлы с диска, если примонтирован MUSIC_DIR).
                   </>
                 }
               />
@@ -136,9 +136,19 @@ export default function LibraryPage() {
                 {(data?.items ?? []).map((t: Track) => (
                   <tr key={t.id} className="hover:bg-surface/60">
                     <td>
-                      <Link href={`/track/${t.id}`} className="kuma-link">
-                        {t.title}
-                      </Link>
+                      <div className="flex items-center gap-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={api.trackCoverUrl(t.id)}
+                          alt=""
+                          loading="lazy"
+                          className="w-8 h-8 rounded object-cover border border-border shrink-0"
+                          onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+                        />
+                        <Link href={`/track/${t.id}`} className="kuma-link">
+                          {t.title}
+                        </Link>
+                      </div>
                     </td>
                     <td className="text-muted">{t.artist_name ?? "—"}</td>
                     <td className="text-muted">{t.album_name ?? "—"}</td>

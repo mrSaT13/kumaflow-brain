@@ -5,7 +5,7 @@ import { Topbar } from "@/components/Topbar";
 
 export const metadata: Metadata = {
   title: "KumaFlow Brain",
-  description: "Самохостинг ИИ для вашей музыкальной библиотеки",
+  description: "Музыкальная аналитика и рекомендации для вашей библиотеки",
   icons: { icon: "/app-icon.png", apple: "/app-icon.png" },
 };
 

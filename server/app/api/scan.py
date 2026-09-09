@@ -90,7 +90,7 @@ async def start_library_scan(db: Session = Depends(get_db)):
         db.commit()
         seed_demo_library(str(server.id))
 
-    run = _start_run("library", library_scan, db, job_timeout=3600)
+    run = _start_run("library", library_scan, db, job_timeout=7200)
     return {"queued": True, "run_id": str(run.id)}
 
 
@@ -106,19 +106,19 @@ async def start_analysis(force: bool = False, limit: int = 0, db: Session = Depe
 @router.post("/lyrics")
 async def start_lyrics(db: Session = Depends(get_db)):
     total = db.query(models.Track).count()
-    run = _start_run("lyrics", lyrics_fetch, db, total=total)
+    run = _start_run("lyrics", lyrics_fetch, db, total=total, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 
 @router.post("/clusters")
 async def start_clusters(db: Session = Depends(get_db)):
-    run = _start_run("clusters", cluster_build, db)
+    run = _start_run("clusters", cluster_build, db, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 
 @router.post("/collab")
 async def start_collab(db: Session = Depends(get_db)):
-    run = _start_run("collab", collab_build, db)
+    run = _start_run("collab", collab_build, db, job_timeout=900)
     return {"queued": True, "run_id": str(run.id)}
 
 

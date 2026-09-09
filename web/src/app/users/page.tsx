@@ -42,9 +42,16 @@ export default function UsersPage() {
 
   async function sync() {
     setBusy(true);
-    await api.syncUsers();
-    setTimeout(() => mutate(), 800);
-    setBusy(false);
+    try {
+      const r = await api.syncUsers();
+      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      else alert(`Готово: +${r.added ?? 0} новых, обновлено ${r.updated ?? 0}, всего ${r.total ?? 0}`);
+      mutate();
+    } catch (e: unknown) {
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (

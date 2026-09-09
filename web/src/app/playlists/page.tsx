@@ -79,9 +79,14 @@ export default function PlaylistsPage() {
               variant="ghost"
               onClick={async () => {
                 setBusy(true);
-                await fetch("/api/analysis/clusters/build", { method: "POST" });
-                setBusy(false);
-                alert("Кластеры пересобраны");
+                try {
+                  const r = await api.buildClusters();
+                  alert(`Кластеризация запущена (задача ${r.run_id.slice(0, 8)}). Следите в «Задачи и логи».`);
+                } catch (e: unknown) {
+                  alert(String(e));
+                } finally {
+                  setBusy(false);
+                }
               }}
             >
               Пересобрать кластеры

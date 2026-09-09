@@ -72,23 +72,38 @@ def _cosine(a, b) -> float:
 # ---------- 1. Content-based рекомендации ----------
 
 def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
-    """Похожие треки по косинусу фичей + кластеру + жанру + настроению."""
+    """Похожие треки по косинусу фичей + кластеру + жанру + настроению.
+
+    Кандидаты — только свой сервер; фичи и кластеры грузятся bulk-запросами
+    (иначе на 80k треков — десятки тысяч SQL-запросов).
+    """
     with session_scope() as db:
         target = db.get(Track, track_id)
         if not target:
             return []
         f_t = db.get(TrackFeatures, target.id)
         v_t = _feature_vector(target, f_t)
+        server_id = target.server_id
         cluster_t = (
             db.query(TrackCluster).filter(TrackCluster.track_id == target.id).first()
         )
-        rows = db.query(Track).all()
+        # bulk-загрузка одним проходом
+        rows = db.query(Track).filter(Track.server_id == server_id).all()
+        ids = [str(r.id) for r in rows]
+        feat_map: dict[str, TrackFeatures] = {}
+        if ids:
+            for f in db.query(TrackFeatures).filter(TrackFeatures.track_id.in_(ids)).all():
+                feat_map[str(f.track_id)] = f
+        cluster_map: dict[str, int] = {}
+        if ids:
+            for c in db.query(TrackCluster).filter(TrackCluster.track_id.in_(ids)).all():
+                cluster_map.setdefault(str(c.track_id), c.cluster_id)
 
         scored: list[tuple[float, Track]] = []
         for r in rows:
             if str(r.id) == str(target.id):
                 continue
-            f_r = db.get(TrackFeatures, r.id)
+            f_r = feat_map.get(str(r.id))
             v_r = _feature_vector(r, f_r)
             if v_t is not None and v_r is not None:
                 sim = _cosine(v_t, v_r)
@@ -96,10 +111,8 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
                 sim = 0.0
             # кластер бонус
             if cluster_t is not None:
-                cluster_r = (
-                    db.query(TrackCluster).filter(TrackCluster.track_id == r.id).first()
-                )
-                if cluster_r and cluster_r.cluster_id == cluster_t.cluster_id:
+                cid = cluster_map.get(str(r.id))
+                if cid is not None and cid == cluster_t.cluster_id:
                     sim += 0.18
             # жанр бонус
             if target.genre and r.genre and target.genre == r.genre:

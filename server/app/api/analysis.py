@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.services.demo import ensure_demo_server
+from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
+from app.services.media_server import resolve_active_server
 from app.services.ml import (
     build_clusters,
     cold_start_playlist,
@@ -18,7 +19,7 @@ router = APIRouter()
 
 @router.post("/clusters/build")
 async def clusters_build(db: Session = Depends(get_db)):
-    server = ensure_demo_server(db)
+    server = resolve_active_server(db)
     db.commit()
     res = build_clusters(str(server.id))
     return res
@@ -31,7 +32,7 @@ async def recommend_by_track_endpoint(track_id: str):
 
 @router.get("/cold-start")
 async def cold_start(db: Session = Depends(get_db), n: int = 30):
-    server = ensure_demo_server(db)
+    server = resolve_active_server(db)
     db.commit()
     return cold_start_playlist(str(server.id), n=n)
 
@@ -45,7 +46,7 @@ async def search_by_text(payload: dict):
 
 @router.post("/lyrics/analyze-all")
 async def analyze_all(db: Session = Depends(get_db)):
-    server = ensure_demo_server(db)
+    server = resolve_active_server(db)
     db.commit()
     from app.db.models import ScanRun, ScanLog, Track
     import uuid

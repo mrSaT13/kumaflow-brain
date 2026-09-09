@@ -356,26 +356,20 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                             ) from e
                         raise
                     total_artists = len(artists)
-                    # для первого прогона берём только 100 артистов чтобы быстро показать результат
-                    # повторный запуск догрузит следующих 100 (инкрементально)
-                    limit = 100
+                    # Полный проход за один запуск: обрабатываем ВСЕХ артистов.
+                    # Прогресс виден в логах и в UI (processed/total).
                     with session_scope() as db2:
                         existing = db2.query(Artist).filter_by(server_id=server_row.id).count()
-                    offset = existing  # уже загруженные пропускаем
-                    # если уже всё загружено — начнём сначала (обновим)
-                    if offset >= total_artists:
-                        offset = 0
-                        _append_log(run_id, "info", f"Все {total_artists} артистов уже загружены — обновляю")
-                    remaining = total_artists - offset
-                    display_total = min(remaining, limit)
-                    _append_log(run_id, "info", f"Артистов в библиотеке: {total_artists}, уже в БД: {existing}, загружаю {display_total} начиная с {offset}")
+                    if existing >= total_artists and total_artists > 0:
+                        _append_log(run_id, "info", f"Все {total_artists} артистов уже загружены — обновляю данные")
+                    _append_log(run_id, "info", f"Артистов в библиотеке: {total_artists}, уже в БД: {existing} — обрабатываю всех за один проход")
                     # обновим total
                     with session_scope() as db2:
                         r2 = db2.get(ScanRun, run_id)
                         if r2:
-                            r2.total_items = display_total
+                            r2.total_items = total_artists
                             r2.processed_items = 0
-                    for idx, a in enumerate(artists[offset:offset+limit]):
+                    for idx, a in enumerate(artists):
                         aid = a.get("id")
                         aname = a.get("name") or "Unknown"
                         if not aid:
@@ -490,16 +484,14 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                                 if v is not None:
                                                     setattr(ex_t, k, v)
                                     tracks_cnt += 1
-                        if (idx + 1) % 10 == 0:
-                            _append_log(run_id, "info", f"Обработано артистов: {idx+1}/{display_total}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
-                _append_log(run_id, "info", f"Готово — артистов: {display_total}/{total_artists}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
-                if total_artists > display_total:
-                    _append_log(run_id, "info", f"Быстрый старт завершён. Для полной загрузки {total_artists} артистов запустите сканирование ещё раз — догрузит остальных.")
+                        if (idx + 1) % 25 == 0:
+                            _append_log(run_id, "info", f"Обработано артистов: {idx+1}/{total_artists}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
+                _append_log(run_id, "info", f"Готово — артистов: {total_artists}, альбомов: {albums_cnt}, треков: {tracks_cnt}")
                 with session_scope() as db2:
                     r2 = db2.get(ScanRun, run_id)
                     if r2:
-                        r2.total_items = display_total
-                        r2.processed_items = display_total
+                        r2.total_items = total_artists
+                        r2.processed_items = total_artists
                 return {"artists": len(artists), "albums": albums_cnt, "tracks": tracks_cnt}
 
             try:
@@ -685,33 +677,37 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
 
 
 def lyrics_fetch(run_id: str, *args, **kwargs) -> dict:
-    """Тянет тексты с LRCLIB и анализирует настроение через AI. Берёт только 200 за раз, без удержания транзакции."""
-    _append_log(run_id, "info", "Загрузка текстов (LRCLIB) — быстрый старт 200 треков")
+    """Тянет тексты с LRCLIB и анализирует настроение через AI.
+
+    Берёт треки БЕЗ текстов (до 2000 за прогон), сеть — вне транзакций.
+    Остаток показывается в итоге — повторные запуски продолжают.
+    """
+    _append_log(run_id, "info", "Загрузка текстов (LRCLIB) — беру треки без текстов")
     try:
         with session_scope() as db:
             run = db.get(ScanRun, run_id)
-            tracks = (
+            # только треки без lrclib-текста
+            have = db.query(Lyrics.track_id).filter(Lyrics.provider == "lrclib").subquery()
+            todo_q = (
                 db.query(Track)
                 .filter(
                     Track.server_id == run.server_id,
                     Track.artist_name.isnot(None),
                     Track.title.isnot(None),
+                    ~Track.id.in_(db.query(have.c.track_id)),
                 )
-                .limit(200)
-                .all()
+                .order_by(Track.created_at.asc())
+                .limit(2000)
             )
-            # фильтруем уже имеющиеся
-            todo = []
-            for t in tracks:
-                exists = db.query(Lyrics).filter(Lyrics.track_id == t.id, Lyrics.provider == "lrclib").first()
-                if not exists:
-                    todo.append(t)
-            run.total_items = len(todo)
-            run.processed_items = 0
-            # копируем нужные поля чтобы не держать сессию
             todo_data = [
-                (t.id, t.artist_name, t.title, t.album_name, t.duration_sec) for t in todo
+                (t.id, t.artist_name, t.title, t.album_name, t.duration_sec) for t in todo_q.all()
             ]
+            run.total_items = len(todo_data)
+            run.processed_items = 0
+        if not todo_data:
+            _append_log(run_id, "info", "Все треки уже с текстами — делать нечего")
+            _finish_run(run_id, "success")
+            return {"status": "success", "fetched": 0, "analyzed": 0, "skipped": 0, "remaining": 0}
 
         fetched = analyzed = skipped = 0
         for i, (tid, artist, title, album, dur) in enumerate(todo_data):
@@ -788,13 +784,138 @@ def lyrics_fetch(run_id: str, *args, **kwargs) -> dict:
             "info",
             f"Загружено: {fetched}, проанализировано AI: {analyzed}, пропущено: {skipped}",
         )
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id)
+            have2 = db.query(Lyrics.track_id).filter(Lyrics.provider == "lrclib").subquery()
+            remaining = (
+                db.query(Track)
+                .filter(
+                    Track.server_id == (run.server_id if run else ""),
+                    ~Track.id.in_(db.query(have2.c.track_id)),
+                )
+                .count()
+            )
+        if remaining > 0:
+            _append_log(run_id, "info", f"Осталось без текстов: {remaining} — запустите загрузку текстов ещё раз")
         _finish_run(run_id, "success")
-        return {"status": "success", "fetched": fetched, "analyzed": analyzed, "skipped": skipped}
+        return {"status": "success", "fetched": fetched, "analyzed": analyzed, "skipped": skipped, "remaining": remaining}
     except Exception as e:  # noqa: BLE001
         logger.exception("lyrics_fetch failed: {}", e)
         _append_log(run_id, "error", str(e))
         _finish_run(run_id, "failure", str(e))
         return {"status": "failure", "error": str(e)}
+
+
+def lyrics_fetch_one(track_id: str) -> dict:
+    """Загрузка текста для одного трека (кнопка на странице трека)."""
+    with session_scope() as db:
+        t = db.get(Track, track_id)
+        if not t:
+            return {"status": "failure", "error": "track not found"}
+        artist, title, album, dur = t.artist_name, t.title, t.album_name, t.duration_sec
+    result = lyrics_svc.fetch(artist=artist or "", title=title or "", album=album, duration_sec=dur)
+    if not result or not result.get("text"):
+        return {"status": "failure", "error": "Текст не найден в LRCLIB"}
+    with session_scope() as db:
+        exists = db.query(Lyrics).filter(Lyrics.track_id == track_id, Lyrics.provider == "lrclib").first()
+        if not exists:
+            db.add(Lyrics(track_id=track_id, provider="lrclib", text=result["text"],
+                          synced=result.get("synced"), language=result.get("language"),
+                          source_url=result.get("source_url")))
+        try:
+            ai_result = lyrics_ai.analyze(result["text"])
+        except Exception:
+            ai_result = None
+        if ai_result:
+            f = db.get(TrackFeatures, track_id)
+            if f is None:
+                f = TrackFeatures(track_id=track_id)
+                db.add(f)
+            for k in ("valence", "arousal", "energy"):
+                if k in ai_result:
+                    try:
+                        setattr(f, k, float(ai_result[k]))
+                    except Exception:
+                        pass
+            moods = (f.mood_labels or []) + ai_result.get("moods", [])
+            f.mood_labels = list(dict.fromkeys([str(m).lower() for m in moods if str(m).strip()]))[:8]
+    return {"status": "success", "track_id": track_id, "ai_analyzed": bool(ai_result)}
+
+
+def analyze_single(run_id: str, track_id: str) -> dict:
+    """Sonic-анализ одного трека (кнопка на странице трека)."""
+    from app.core.config import get_settings
+    from app.services import audio_analysis as aa
+
+    try:
+        import librosa  # noqa: F401
+    except Exception:
+        msg = "librosa не установлена — пересоберите backend-образ"
+        _append_log(run_id, "error", msg)
+        _finish_run(run_id, "failure", msg)
+        return {"status": "failure", "error": msg}
+    try:
+        settings = get_settings()
+        sample_seconds = int(settings.analysis_sample_seconds or 90)
+        music_dir = settings.music_dir or os.getenv("MUSIC_DIR", "")
+    except Exception:
+        sample_seconds, music_dir = 90, os.getenv("MUSIC_DIR", "")
+    with session_scope() as db:
+        run = db.get(ScanRun, run_id)
+        if run:
+            run.total_items = 1
+            run.processed_items = 0
+        t = db.get(Track, track_id)
+        if not t:
+            _finish_run(run_id, "failure", "track not found")
+            return {"status": "failure", "error": "track not found"}
+        ext_id, tpath, dur = t.external_id, t.path, t.duration_sec
+        label = f"{t.artist_name} — {t.title}"
+        try:
+            from app.services.media_server import get_media_server_config
+
+            cfg = dict(get_media_server_config(db))
+        except Exception:
+            cfg = {}
+    _append_log(run_id, "info", f"Анализирую: {label}")
+    tmp_to_clean: Path | None = None
+    try:
+        local_path = aa.resolve_local_file(tpath, music_dir)
+        if local_path is not None:
+            src = local_path
+        else:
+            if not ext_id or ext_id.startswith("disk:"):
+                raise RuntimeError("Локальный файл не найден (проверьте MUSIC_DIR/volumes)")
+            src = aa.download_from_navidrome(ext_id, cfg)
+            tmp_to_clean = Path(src)
+        feats = aa.analyze_file(src, sample_seconds=sample_seconds, track_duration_sec=dur)
+        with session_scope() as db:
+            f = db.get(TrackFeatures, track_id)
+            if f is None:
+                f = TrackFeatures(track_id=track_id)
+                db.add(f)
+            for k in ("tempo_bpm", "key_name", "scale", "energy", "danceability",
+                      "valence", "arousal", "loudness_db", "spectral_centroid",
+                      "spectral_rolloff", "zero_crossing_rate", "mfcc_summary",
+                      "chroma_summary", "mood_vector", "mood_labels"):
+                setattr(f, k, feats.get(k))
+            f.analyzed_at = datetime.utcnow()
+            run = db.get(ScanRun, run_id)
+            if run:
+                run.processed_items = 1
+        _append_log(run_id, "info", f"Готово: {label} — tempo {feats.get('tempo_bpm')}, key {feats.get('key_name')}")
+        _finish_run(run_id, "success")
+        return {"status": "success", "track_id": track_id}
+    except Exception as e:  # noqa: BLE001
+        _append_log(run_id, "error", str(e))
+        _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+    finally:
+        if tmp_to_clean is not None:
+            try:
+                tmp_to_clean.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def daily_playlist(playlist_id: str, *args, **kwargs) -> dict:
@@ -891,12 +1012,110 @@ def daily_playlist(playlist_id: str, *args, **kwargs) -> dict:
 
 
 def cluster_build(*args, **kwargs):
+    """KMeans-кластеризация по sonic-фичам (пересборка с нуля).
+
+    k подбирается под размер библиотеки: min(50, max(4, tracks//250)).
+    Без проанализированных треков — честная ошибка с подсказкой.
+    """
     run_id = args[0] if args else None
-    msg = "Кластеризация ещё не реализована (следующий шаг после sonic-анализа)"
-    if run_id:
-        _append_log(run_id, "error", msg)
-        _finish_run(run_id, "failure", msg)
-    return {"status": "not_implemented", "error": msg}
+    try:
+        from app.services.ml import build_clusters
+
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            server_id = run.server_id if run else None
+            if not server_id:
+                # нет run — берём активный сервер
+                from app.services.media_server import resolve_active_server
+
+                server_id = resolve_active_server(db).id
+                db.commit()
+            n_tracks = db.query(Track).filter_by(server_id=server_id).count()
+            n_feats = (
+                db.query(TrackFeatures)
+                .join(Track, TrackFeatures.track_id == Track.id)
+                .filter(Track.server_id == server_id)
+                .count()
+            )
+        if n_tracks == 0:
+            msg = "Библиотека пуста — сначала запустите сканирование библиотеки"
+            raise RuntimeError(msg)
+        if n_feats < 4:
+            msg = (
+                f"Проанализировано треков: {n_feats} — мало для кластеризации. "
+                "Запустите Sonic-анализ, затем пересоберите кластеры."
+            )
+            raise RuntimeError(msg)
+        # адаптивное k: ~1 кластер на 250 треков, в пределах 4..50
+        k = max(4, min(50, n_tracks // 250))
+        _append_log(run_id, "info", f"Треков: {n_tracks}, с фичами: {n_feats} — строю {k} кластеров (KMeans)…") if run_id else None
+        res = build_clusters(server_id, k=k)
+        if res.get("status") != "ok":
+            raise RuntimeError(str(res.get("status")))
+        summary = f"Готово — кластеров: {res['clusters']}, треков в кластерах: {res['tracks_clustered']}"
+        if run_id:
+            _append_log(run_id, "info", summary)
+            with session_scope() as db:
+                run = db.get(ScanRun, run_id)
+                if run:
+                    run.total_items = res["tracks_clustered"]
+                    run.processed_items = res["tracks_clustered"]
+            _finish_run(run_id, "success")
+        return {"status": "success", **res}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("cluster_build failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
+def sync_navidrome_users(server_id: str) -> dict:
+    """Синхронизация пользователей из Navidrome (getUsers) в media_users."""
+    import asyncio
+
+    from app.services.navidrome.client import SubsonicClient, SubsonicAuth
+
+    with session_scope() as db:
+        from app.db.models import MediaServer
+        from app.services.media_server import get_media_server_config
+
+        cfg = get_media_server_config(db)
+        server_row = db.get(MediaServer, server_id)
+        url = (cfg.get("url") if cfg else "") or (server_row.url if server_row else "")
+        user = (cfg.get("user") if cfg else "") or ""
+        password = (cfg.get("password") if cfg else "") or ""
+        if not url or not user:
+            return {"status": "failure", "error": "Navidrome не настроен (url/user) — укажите его в Настройках → Медиа-сервер"}
+
+        async def _fetch():
+            async with SubsonicClient(url, SubsonicAuth(user=user, password=password), timeout=60.0) as client:
+                return await client.get_users()
+
+        try:
+            users = asyncio.run(_fetch())
+        except Exception as e:
+            return {"status": "failure", "error": f"getUsers failed: {e}"}
+
+        from app.db.models import MediaUser
+
+        added = updated = 0
+        for u in users:
+            ext = str(u.get("id") or u.get("username") or "")
+            name = u.get("username") or ext
+            if not ext:
+                continue
+            ex = db.query(MediaUser).filter_by(server_id=server_id, external_id=ext).first()
+            if ex is None:
+                db.add(MediaUser(id=str(uuid.uuid4()), server_id=server_id,
+                                 external_id=ext[:128], username=str(name)[:128],
+                                 is_admin=bool(u.get("adminRole"))))
+                added += 1
+            else:
+                ex.username = str(name)[:128]
+                ex.is_admin = bool(u.get("adminRole"))
+                updated += 1
+        return {"status": "success", "added": added, "updated": updated, "total": len(users)}
 
 
 def yandex_enrich(*args, **kwargs):
@@ -909,9 +1128,48 @@ def yandex_enrich(*args, **kwargs):
 
 
 def collab_build(*args, **kwargs):
+    """Коллаборативный проход: синхронизация пользователей Navidrome.
+
+    Пользователи — источник коллаборативных сигналов (избранное, плейлисты).
+    После синка логирует, сколько пользователей доступно для рекомендаций.
+    """
     run_id = args[0] if args else None
-    msg = "Коллаборативная фильтрация ещё не реализована"
-    if run_id:
-        _append_log(run_id, "error", msg)
-        _finish_run(run_id, "failure", msg)
-    return {"status": "not_implemented", "error": msg}
+    try:
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            server_id = run.server_id if run else None
+            if not server_id:
+                from app.services.media_server import resolve_active_server
+
+                server_id = resolve_active_server(db).id
+                db.commit()
+            from app.db.models import MediaUser
+
+            before = db.query(MediaUser).filter_by(server_id=server_id).count()
+        if run_id:
+            _append_log(run_id, "info", "Синхронизирую пользователей из Navidrome…")
+        res = sync_navidrome_users(server_id)
+        if res.get("status") != "success":
+            raise RuntimeError(res.get("error", "sync failed"))
+        with session_scope() as db:
+            from app.db.models import MediaUser, Playlist
+
+            total_users = db.query(MediaUser).filter_by(server_id=server_id).count()
+            user_playlists = db.query(Playlist).filter_by(server_id=server_id, is_auto_generated=False).count()
+        summary = (f"Пользователей: {total_users} (было {before}, +{res['added']}, обновлено {res['updated']}), "
+                   f"пользовательских плейлистов: {user_playlists} — коллаборативные сигналы готовы")
+        if run_id:
+            _append_log(run_id, "info", summary)
+            with session_scope() as db:
+                run = db.get(ScanRun, run_id)
+                if run:
+                    run.total_items = total_users
+                    run.processed_items = total_users
+            _finish_run(run_id, "success")
+        return {"status": "success", **res, "user_playlists": user_playlists}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("collab_build failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}

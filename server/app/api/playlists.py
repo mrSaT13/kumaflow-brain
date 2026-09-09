@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db, models
 from app.db.models import Playlist, PlaylistTrack, Track
-from app.services.demo import ensure_demo_server
+from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
+from app.services.media_server import resolve_active_server
 from app.services.queue import enqueue
 from app.workers.tasks import daily_playlist, lyrics_fetch
 from app.services.ml import cold_start_playlist
@@ -84,7 +85,7 @@ async def generate_daily(payload: GenerateIn | None = None, db: Session = Depend
     """Если на сегодня уже есть ежедневный плейлист — удалить и сделать заново.
     Иначе создать новый и наполнить через 3-шаговый cold-start + коллаборативные сигналы."""
     n = (payload.n if payload else 30) or 30
-    server = ensure_demo_server(db)
+    server = resolve_active_server(db)
     db.commit()
 
     today = date.today()
@@ -147,7 +148,7 @@ async def delete_playlist(playlist_id: str, db: Session = Depends(get_db)):
 @router.post("/fetch-lyrics")
 async def fetch_lyrics_now(db: Session = Depends(get_db)):
     """Запустить загрузку текстов + AI-анализ настроения прямо сейчас (как scan)."""
-    server = ensure_demo_server(db)
+    server = resolve_active_server(db)
     db.commit()
     from app.db.models import ScanRun
 
