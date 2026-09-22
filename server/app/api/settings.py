@@ -54,12 +54,36 @@ def upsert_setting(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True, "key": key}
 
 
+@router.post("/ai/pull")
+def ai_pull(payload: dict | None = None, db: Session = Depends(get_db)):
+    """Скачать модель в локальную Ollama (как на мобиле — выгрузка модели). Только для OLLAMA."""
+    from app.services.ai_config import effective_ai
+
+    eff = effective_ai()
+    if (eff.get("provider") or "").upper() != "OLLAMA":
+        return {"ok": False, "error": "Только для OLLAMA local (для CLOUD модель в облаке)"}
+    base = (eff.get("ollama_server_url") or (payload or {}).get("ollama_server_url") or "").strip().rstrip("/")
+    model = (eff.get("model") or eff.get("ollama_model") or (payload or {}).get("model") or "llama3.1").strip()
+    if not base:
+        return {"ok": False, "error": "Ollama URL не задан"}
+    import httpx
+
+    try:
+        # Ollama pull — стримим логи, но ждём завершения
+        r = httpx.post(f"{base}/api/pull", json={"name": model}, timeout=600.0)
+        if r.status_code >= 400:
+            return {"ok": False, "error": f"{r.status_code}: {r.text[:500]}"}
+        return {"ok": True, "model": model, "response": r.text[:500]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/ai/test")
 def ai_test(payload: dict | None = None):
     """Пинг AI-провайдера. Если передан prompt — ответит, иначе просто 'ok'."""
     if not ai.is_configured():
-        return {"ok": False, "error": "AI не настроен"}
-    prompt = (payload or {}).get("prompt", "Скажи 'ok' одним словом")
+        return {"ok": False, "error": "AI не настроен (проверьте провайдера/ключ/модель в настройках)"}
+    prompt = (payload or {}).get("prompt", "Скажи ok одним словом")
     try:
         text = ai.chat(
             messages=[{"role": "user", "content": prompt}],

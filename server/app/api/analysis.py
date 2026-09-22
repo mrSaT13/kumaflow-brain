@@ -31,10 +31,29 @@ def recommend_by_track_endpoint(track_id: str):
 
 
 @router.get("/cold-start")
-def cold_start(db: Session = Depends(get_db), n: int = 30):
+def cold_start(db: Session = Depends(get_db), n: int = 30, user_id: str | None = None):
+    """Холодный старт: per-user если user_id указан (копия mobile seedTaste), иначе глобально."""
     server = resolve_active_server(db)
     db.commit()
-    return cold_start_playlist(str(server.id), n=n)
+    # user_id может быть uuid или external_id — пробуем резолв
+    resolved: str | None = None
+    if user_id:
+        try:
+            from app.db.models import MediaUser
+
+            u = db.get(MediaUser, user_id)
+            if u:
+                resolved = str(u.id)
+            else:
+                # поиск по external_id
+                q = db.query(MediaUser).filter(MediaUser.external_id == user_id).first()
+                if q:
+                    resolved = str(q.id)
+                else:
+                    resolved = user_id
+        except Exception:
+            resolved = user_id
+    return cold_start_playlist(str(server.id), n=n, user_id=resolved)
 
 
 @router.post("/search-by-text")

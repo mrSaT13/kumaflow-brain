@@ -142,11 +142,14 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
 
 # ---------- 2. 3-шаговый cold-start с идеальными сочетаниями ----------
 
-def _step1_signal(server_id: str | None = None) -> dict[str, float]:
+def _step1_signal(server_id: str | None = None, user_id: str | None = None) -> dict[str, float]:
     """Собирает веса по artist/genre/mood с учётом прослушиваний, избранного, оценок, давности.
 
     Фичи грузятся одним запросом (иначе на большой библиотеке — N+1).
     server_id игнорируется: охватываем всю базу (Navidrome + диск).
+    user_id: если указан — персонализация через PlayHistory/Favorite (per-user),
+             иначе глобально по Track.play_count/starred (как раньше).
+    Порт: mobile ml_store.seedTaste + MLService 0.6 floor.
     """
     weights: dict[str, float] = {}
     now = datetime.utcnow()
@@ -157,26 +160,45 @@ def _step1_signal(server_id: str | None = None) -> dict[str, float]:
         if ids:
             for f in db.query(TrackFeatures).filter(TrackFeatures.track_id.in_(ids)).all():
                 feat_map[str(f.track_id)] = f
+        # per-user карты
+        hist_cnt: dict[str, int] = {}
+        fav_set: set[str] = set()
+        if user_id:
+            try:
+                rows = db.query(PlayHistory.track_id).filter(PlayHistory.user_id == user_id).all()
+                for (tid,) in rows:
+                    hist_cnt[str(tid)] = hist_cnt.get(str(tid), 0) + 1
+                favs = db.query(Favorite.track_id).filter(Favorite.user_id == user_id).all()
+                fav_set = {str(tid) for (tid,) in favs}
+            except Exception:
+                pass
         for t in tracks:
             base = 0.0
-            base += (t.play_count or 0) * 0.45
-            if t.starred:
-                base += 8.0
-            if t.rating:
-                base += float(t.rating) * 1.6
-            # бонус за недавность прослушивания (идеальное сочетание учитывает актуальность)
-            if t.last_played_at:
-                try:
-                    days = (now - t.last_played_at).days
-                    if days <= 7:
-                        base += 3.0
-                    elif days <= 30:
-                        base += 1.8
-                    elif days <= 90:
-                        base += 0.7
-                except Exception:
-                    pass
-            # маленький базовый вес чтобы не было пусто при cold-start
+            if user_id and (hist_cnt or fav_set):
+                # per-user: PlayHistory + Favorite как в mobile ml_store
+                c = hist_cnt.get(str(t.id), 0)
+                base += c * 0.9  # play
+                if str(t.id) in fav_set:
+                    base += 10.0  # like
+                # artist/genre boost позже
+            else:
+                base += (t.play_count or 0) * 0.45
+                if t.starred:
+                    base += 8.0
+                if t.rating:
+                    base += float(t.rating) * 1.6
+                if t.last_played_at:
+                    try:
+                        days = (now - t.last_played_at).days
+                        if days <= 7:
+                            base += 3.0
+                        elif days <= 30:
+                            base += 1.8
+                        elif days <= 90:
+                            base += 0.7
+                    except Exception:
+                        pass
+            # маленький базовый вес чтобы не было пусто при cold-start (mobile 0.6 floor)
             base += 0.6
             if t.artist_name:
                 key = f"artist::{t.artist_name}"
@@ -184,13 +206,11 @@ def _step1_signal(server_id: str | None = None) -> dict[str, float]:
             if t.genre:
                 key = f"genre::{t.genre}"
                 weights[key] = weights.get(key, 0.0) + base * 0.85 + 0.7
-            # муд-сигнал из фичей
             f = feat_map.get(str(t.id))
             if f and f.mood_labels:
                 for m in f.mood_labels[:2]:
                     key = f"mood::{str(m).lower()}"
                     weights[key] = weights.get(key, 0.0) + base * 0.35
-    # нормализуем чтобы веса не взрывались
     if weights:
         mx = max(weights.values())
         if mx > 20:
@@ -407,9 +427,12 @@ def _step3_diversify(items: list[tuple[Track, float, TrackFeatures | None, Track
     return chosen
 
 
-def cold_start_playlist(server_id: str, n: int = 30) -> dict[str, Any]:
-    """Полный 3-шаговый cold-start с идеальными сочетаниями. Возвращает метаданные + список ID треков."""
-    signal = _step1_signal(server_id)
+def cold_start_playlist(server_id: str, n: int = 30, user_id: str | None = None) -> dict[str, Any]:
+    """Полный 3-шаговый cold-start с идеальными сочетаниями. Возвращает метаданные + список ID треков.
+
+    user_id: если указан — персонализация (копируем mobile cold_start), иначе глобально.
+    """
+    signal = _step1_signal(server_id, user_id=user_id)
     candidates = _step2_candidates(server_id, signal)
     with session_scope() as db:
         # bulk-загрузка фичей/кластеров одним запросом (не N+1)

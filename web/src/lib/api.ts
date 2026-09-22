@@ -111,8 +111,14 @@ export const api = {
     http<{ queued: boolean; run_id: string; job_id: string }>(`/api/tracks/${id}/analyze`, { method: "POST" }),
   fetchTrackLyrics: (id: string) =>
     http<{ ok: boolean; error?: string }>(`/api/tracks/${id}/lyrics`, { method: "POST" }),
-  trackCoverUrl: (id: string) => `/api/covers/track/${id}`,
-  coverUrl: (coverId: string) => `/api/covers/${encodeURIComponent(coverId)}`,
+  trackCoverUrl: (id: string, size: number = 300) => `/api/covers/track/${id}?size=${size}`,
+  coverUrl: (coverId: string, size: number = 300) => `/api/covers/${encodeURIComponent(coverId)}?size=${size}`,
+  prefetchCovers: (artist_ids?: string[]) => http<{ fetched: number }>(`/api/covers/prefetch`, { method: "POST", body: JSON.stringify({ artist_ids: artist_ids ?? [] }) }),
+  // yandex + ai + clap
+  getYandexConfig: () => http<{ token: string; enabled: boolean; has_token: boolean }>(`/api/yandex/config`),
+  saveYandexConfig: (p: Record<string, unknown>) => http<unknown>(`/api/yandex/config`, { method: "POST", body: JSON.stringify(p) }),
+  testYandex: (p?: Record<string, unknown>) => http<{ ok: boolean; result?: unknown; error?: string }>(`/api/yandex/test`, { method: "POST", body: JSON.stringify(p ?? {}) }),
+  aiPull: (p?: Record<string, unknown>) => http<{ ok: boolean; error?: string; model?: string }>(`/api/settings/ai/pull`, { method: "POST", body: JSON.stringify(p ?? {}) }),
   recommendByTrack: (id: string) => http<{ items: Track[] }>(`/api/analysis/recommend/by-track/${id}`),
   coldStart: (n = 30) => http<{ tracks: string[]; items: Track[]; steps: { step: number; name: string; items: number }[] }>(`/api/analysis/cold-start?n=${n}`),
 

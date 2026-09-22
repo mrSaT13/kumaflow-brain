@@ -152,7 +152,21 @@ export default function SettingsPage() {
     try {
       const r = await api.aiModels();
       setAiModels(r.available ?? []);
-      if (!r.available?.length) alert("Список моделей пуст — проверьте ключ/URL и сохраните настройки");
+      if (!r.available?.length) alert("Список моделей пуст — проверьте ключ/URL и сохраните настройки (для OLLAMA_CLOUD нужен токен с ollama.com/settings)");
+    } catch (e: unknown) {
+      alert(String(e));
+    } finally {
+      setModelsBusy(false);
+    }
+  }
+
+  async function pullModel() {
+    setModelsBusy(true);
+    try {
+      const r = await api.aiPull({ model: aiModel.trim() || undefined });
+      if (r.ok) alert(`Модель ${r.model ?? aiModel} скачана ✓ — теперь проверьте AI`);
+      else alert(`Ошибка скачки: ${r.error}`);
+      await loadModels();
     } catch (e: unknown) {
       alert(String(e));
     } finally {
@@ -283,22 +297,40 @@ export default function SettingsPage() {
               </select>
             </label>
             <div className="block">
-              <div className="text-xs text-muted mb-1">Модель</div>
-              <div className="flex gap-2">
-                {aiModels.length > 0 ? (
-                  <select className="kuma-input flex-1" value={aiModel} onChange={(e) => setAiModel(e.target.value)}>
-                    <option value="">— выбрать —</option>
+              <div className="text-xs text-muted mb-1">Модель {aiModels.length > 0 && <span className="font-normal">({aiModels.length} найдено — можно выбрать или вписать вручную)</span>}</div>
+              <Input
+                className="flex-1"
+                value={aiModel}
+                onChange={(e) => setAiModel(e.target.value)}
+                placeholder="llama3.1 / gpt-4o-mini / gemini-2.0-flash — впишите вручную если нет в списке"
+                list="ai-models-list"
+              />
+              <datalist id="ai-models-list">
+                {aiModels.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+              <div className="flex gap-2 mt-2">
+                <Button variant="ghost" onClick={loadModels} disabled={modelsBusy} className="flex-1">
+                  {modelsBusy ? "Загрузка…" : `Загрузить список моделей${aiModels.length ? ` (${aiModels.length})` : ""}`}
+                </Button>
+                {aiProvider === "OLLAMA" && (
+                  <Button variant="ghost" onClick={pullModel} disabled={modelsBusy || !aiModel.trim()}>
+                    Скачать модель
+                  </Button>
+                )}
+              </div>
+              {aiModels.length > 0 && (
+                <div className="mt-2">
+                  <div className="text-[11px] text-muted mb-1">Быстрый выбор из списка:</div>
+                  <select className="kuma-input w-full" value={aiModel} onChange={(e) => setAiModel(e.target.value)}>
+                    <option value="">— выбрать из загруженных —</option>
                     {aiModels.map((m) => (
                       <option key={m} value={m}>{m}</option>
                     ))}
                   </select>
-                ) : (
-                  <Input className="flex-1" value={aiModel} onChange={(e) => setAiModel(e.target.value)} placeholder="llama3.1 / gpt-4o-mini / gemini-2.0-flash" />
-                )}
-                <Button variant="ghost" onClick={loadModels} disabled={modelsBusy}>
-                  {modelsBusy ? "…" : "Модели"}
-                </Button>
-              </div>
+                </div>
+              )}
             </div>
             {(aiProvider === "OPENAI") && (
               <>

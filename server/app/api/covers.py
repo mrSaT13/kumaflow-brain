@@ -11,17 +11,33 @@ from app.workers.tasks import noop as _placeholder
 
 router = APIRouter()
 
+import hashlib
+
+
+def _etag_for(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()[:16]
+
 
 @router.get("/{cover_id}")
-def cover(cover_id: str, db=Depends(get_db)):
-    data = get_cover(cover_id, cfg=dict(get_media_server_config(db)))
+def cover(cover_id: str, db=Depends(get_db), size: int = 300):
+    from fastapi import Request
+    from fastapi.responses import Response as _Resp
+
+    # size из query ?size=300
+    data = get_cover(cover_id, size=size, cfg=dict(get_media_server_config(db)))
     if not data:
         return _placeholder_png()
-    return Response(content=data, media_type=cached_content_type(cover_id))
+    etag = _etag_for(data)
+    headers = {
+        "Cache-Control": "public, max-age=604800, immutable",
+        "ETag": f'"{etag}"',
+        "X-Cache": "HIT" if data else "MISS",
+    }
+    return Response(content=data, media_type=cached_content_type(cover_id, size), headers=headers)
 
 
 @router.get("/track/{track_id}")
-def track_cover(track_id: str, db=Depends(get_db)):
+def track_cover(track_id: str, db=Depends(get_db), size: int = 300):
     """Обложка трека: встроенная в файл (диск) либо coverArt из Navidrome."""
     import uuid as _uuid
 
@@ -38,12 +54,14 @@ def track_cover(track_id: str, db=Depends(get_db)):
     data = get_disk_cover(t.path)
     if data:
         ctype = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
-        return Response(content=data, media_type=ctype)
+        headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{_etag_for(data)}"'}
+        return Response(content=data, media_type=ctype, headers=headers)
     # 2) coverArt из Navidrome
     if t.cover_art_id:
-        data = get_cover(t.cover_art_id, cfg=dict(get_media_server_config(db)))
+        data = get_cover(t.cover_art_id, size=size, cfg=dict(get_media_server_config(db)))
         if data:
-            return Response(content=data, media_type=cached_content_type(t.cover_art_id))
+            headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{_etag_for(data)}"'}
+            return Response(content=data, media_type=cached_content_type(t.cover_art_id, size), headers=headers)
     return _placeholder_png()
 
 

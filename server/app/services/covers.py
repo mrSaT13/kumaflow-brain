@@ -36,15 +36,70 @@ def _ext_from(content_type: str | None) -> str:
     return "jpg"
 
 
-def _path_for(cover_id: str) -> Path:
+def _path_for(cover_id: str, size: int | None = None) -> Path:
     h = hashlib.sha1(cover_id.encode("utf-8")).hexdigest()
-    p = CACHE_DIR / f"{h}.bin"
-    return p
+    if size:
+        return CACHE_DIR / f"{h}_{size}.bin"
+    return CACHE_DIR / f"{h}.bin"
 
 
-def _ext_path_for(cover_id: str) -> Path:
+def _ext_path_for(cover_id: str, size: int | None = None) -> Path:
     h = hashlib.sha1(cover_id.encode("utf-8")).hexdigest()
+    if size:
+        return CACHE_DIR / f"{h}_{size}.ext"
     return CACHE_DIR / f"{h}.ext"
+
+
+def _is_image_bytes(data: bytes) -> bool:
+    if not data or len(data) < 8:
+        return False
+    if data.startswith(b"\xff\xd8\xff"):
+        return True
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return True
+    if data.startswith(b"RIFF") and b"WEBP" in data[:12]:
+        return True
+    if data.startswith(b"BM"):
+        return True
+    return False
+
+
+def clear_expired(ttl_days: int = 7, max_mb: int = 2048) -> dict:
+    """Очистка старых/лишних как на mobile SafeManager 400/7d."""
+    import time
+
+    now = time.time()
+    ttl = ttl_days * 86400
+    files = [p for p in CACHE_DIR.glob("*.bin")]
+    removed = 0
+    # TTL
+    for p in files:
+        try:
+            if now - p.stat().st_mtime > ttl:
+                p.unlink(missing_ok=True)
+                (CACHE_DIR / f"{p.stem}.ext").unlink(missing_ok=True)
+                removed += 1
+        except Exception:
+            pass
+    # size cap LRU
+    files = [p for p in CACHE_DIR.glob("*.bin")]
+    total = sum(p.stat().st_size for p in files if p.exists())
+    if total > max_mb * 1024 * 1024:
+        files.sort(key=lambda pp: pp.stat().st_mtime)
+        for p in files:
+            if total <= max_mb * 1024 * 1024:
+                break
+            try:
+                sz = p.stat().st_size
+                p.unlink(missing_ok=True)
+                (CACHE_DIR / f"{p.stem}.ext").unlink(missing_ok=True)
+                total -= sz
+                removed += 1
+            except Exception:
+                pass
+    return {"removed": removed, "remaining": len(list(CACHE_DIR.glob("*.bin")))}
 
 
 def cached_path(cover_id: str) -> Optional[Path]:
@@ -68,14 +123,18 @@ def _auth_params(user: str, password: str) -> dict[str, str]:
 
 
 def get_cover(cover_id: str, size: int = 300, cfg: dict | None = None) -> bytes | None:
-    """Синхронная версия (для API proxy). Кэширует.
-
-    cfg — конфиг медиа-сервера (url/user/password); если не передан —
-    берётся из БД (настройки из веб-UI) с фолбэком на env.
-    """
-    cached = cached_path(cover_id)
-    if cached is not None:
-        return cached.read_bytes()
+    """Синхронная версия (для API proxy). Кэширует per-size, валидирует magic bytes."""
+    # пробуем size-specific, затем legacy без size
+    for cand in (_path_for(cover_id, size), _path_for(cover_id)):
+        if cand.exists():
+            try:
+                data = cand.read_bytes()
+                if not _is_image_bytes(data):
+                    cand.unlink(missing_ok=True)
+                    continue
+                return data
+            except Exception:
+                pass
     if cfg is None:
         cfg = _load_cfg()
     url = (cfg.get("url") or "").rstrip("/")
@@ -94,11 +153,20 @@ def get_cover(cover_id: str, size: int = 300, cfg: dict | None = None) -> bytes 
         return None
     ctype = (r.headers.get("content-type") or "").lower()
     if "json" in ctype or "xml" in ctype:
-        # Navidrome вернул ошибку, а не картинку
         return None
-    p = _path_for(cover_id)
+    if not _is_image_bytes(r.content):
+        return None
+    p = _path_for(cover_id, size)
     p.write_bytes(r.content)
-    _ext_path_for(cover_id).write_text(_ext_from(r.headers.get("content-type")))
+    _ext_path_for(cover_id, size).write_text(_ext_from(r.headers.get("content-type")))
+    # также кладём legacy для совместимости
+    legacy = _path_for(cover_id)
+    if not legacy.exists():
+        try:
+            legacy.write_bytes(r.content)
+            _ext_path_for(cover_id).write_text(_ext_from(r.headers.get("content-type")))
+        except Exception:
+            pass
     return r.content
 
 
@@ -165,11 +233,11 @@ def get_disk_cover(track_path: str | None) -> bytes | None:
     return None
 
 
-def cached_content_type(cover_id: str) -> str:
-    p = _ext_path_for(cover_id)
-    if p.exists():
-        ct = p.read_text().strip()
-        return {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ct, "image/jpeg")
+def cached_content_type(cover_id: str, size: int | None = None) -> str:
+    for cand in (_ext_path_for(cover_id, size), _ext_path_for(cover_id)):
+        if cand.exists():
+            ct = cand.read_text().strip()
+            return {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ct, "image/jpeg")
     return "image/jpeg"
 
 
