@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import "@/styles/globals.css";
-import { Sidebar } from "@/components/Sidebar";
-import { Topbar } from "@/components/Topbar";
+import { MobileShell } from "@/components/MobileShell";
 
 export const metadata: Metadata = {
   title: "KumaFlow Brain",
@@ -13,20 +12,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="ru" suppressHydrationWarning>
       <body>
-        {/* Применяет сохранённую тему до гидратации, чтобы не было вспышки.
-            try/catch: localStorage может быть недоступен (приватный режим). */}
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.classList.add('dark');}catch(e){}})();`,
           }}
         />
-        <div suppressHydrationWarning className="min-h-screen flex">
-          <Sidebar />
-          <main className="flex-1 min-w-0">
-            <Topbar />
-            <div className="px-8 py-6 max-w-[1400px] mx-auto">{children}</div>
-          </main>
-        </div>
+        <MobileShell>{children}</MobileShell>
       </body>
     </html>
   );
