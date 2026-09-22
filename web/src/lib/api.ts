@@ -47,11 +47,21 @@ export type LogLine = {
 export type Playlist = {
   id: string;
   name: string;
+  external_id?: string | null;
+  in_navidrome?: boolean;
   is_public: boolean;
   is_auto_generated: boolean;
   generated_for_date?: string | null;
   track_count: number;
   created_at: string;
+};
+
+export type PlaylistTrackDetail = Track & {
+  position: number;
+  mood?: string[];
+  musical_key?: string | null;
+  energy?: number | null;
+  similarity?: number | null;
 };
 
 export type MediaUser = {
@@ -170,14 +180,19 @@ export const api = {
       { method: "POST", body: JSON.stringify({ query, n, user_id }) },
     ),
   listPlaylists: () => http<{ playlists: Playlist[] }>(`/api/playlists/`),
-  getPlaylist: (id: string) => http<Playlist & { tracks: Track[] }>(`/api/playlists/${id}`),
+  getPlaylist: (id: string) => http<Playlist & { tracks: PlaylistTrackDetail[] }>(`/api/playlists/${id}`),
   deletePlaylist: (id: string) => http<{ ok: boolean }>(`/api/playlists/${id}`, { method: "DELETE" }),
+  exportPlaylist: (id: string) =>
+    http<{ ok: boolean; navidrome_id?: string; exported?: number; skipped?: number; error?: string }>(
+      `/api/playlists/${id}/export`,
+      { method: "POST" },
+    ),
 
   listUsers: () => http<{ users: MediaUser[] }>(`/api/users/`),
   createUser: (body: { external_id: string; username: string; is_admin?: boolean }) =>
     http<{ user: MediaUser }>(`/api/users`, { method: "POST", body: JSON.stringify(body) }),
-  createUserByCredentials: (body: { username: string; password: string }) =>
-    http<{ ok: boolean; user?: MediaUser; import?: Record<string, unknown>; error?: string }>(
+  createUserByCredentials: (body: { username: string; password: string; remember?: boolean }) =>
+    http<{ ok: boolean; user?: MediaUser; import?: Record<string, unknown>; vault_stored?: boolean | string; error?: string }>(
       `/api/users/by-credentials`,
       { method: "POST", body: JSON.stringify(body) },
     ),
@@ -190,6 +205,68 @@ export const api = {
     http<{ user_id: string; favorites: number; playlists: number; playlist_tracks: number }>(
       `/api/users/${id}/tastes`,
     ),
+  userProfile: (id: string) =>
+    http<{
+      ok: boolean; username: string;
+      genres: { name: string; weight: number; likes: number; plays: number }[];
+      artists: { name: string; weight: number; likes: number; plays: number; dislikes: number; banned: boolean }[];
+      moods: { name: string; count: number }[];
+      hours: number[]; days: number[];
+      top_tracks: { track_id: string; title: string; artist_name?: string; score: number; like: boolean | null; plays: number; skips: number; replays: number; last_played?: string | null }[];
+      mobile?: { synced_at?: string | null; counts?: Record<string, number>; genres_top?: [string, number][]; artists_top?: [string, number][] };
+      likedSongs: string[]; dislikedSongs: string[]; bannedArtists: string[];
+      artistDislikeCounts: Record<string, number>;
+      counts: { likes: number; dislikes: number; banned: number; events: number; plays: number };
+    }>(`/api/users/${id}/profile`),
+  rateTrack: (userId: string, track_id: string, like: boolean | null) =>
+    http<{ ok: boolean; auto_banned_artist?: string | null }>(
+      `/api/users/${userId}/rate`,
+      { method: "POST", body: JSON.stringify({ track_id, like }) },
+    ),
+  pushEvents: (userId: string, events: { track_id: string; action: string; position_sec?: number }[]) =>
+    http<{ ok: boolean; stored: number; auto_bans: string[] }>(
+      `/api/users/${userId}/events`,
+      { method: "POST", body: JSON.stringify({ events }) },
+    ),
+  banArtist: (userId: string, artist_name: string) =>
+    http<{ ok: boolean }>(`/api/users/${userId}/ban-artist`, { method: "POST", body: JSON.stringify({ artist_name }) }),
+  unbanArtist: (userId: string, artist_name: string) =>
+    http<{ ok: boolean }>(`/api/users/${userId}/unban-artist`, { method: "POST", body: JSON.stringify({ artist_name }) }),
+  vaultStatus: (id: string) => http<{ stored: boolean; available: boolean }>(`/api/users/${id}/vault`),
+  vaultStore: (id: string, password: string) =>
+    http<{ ok: boolean; error?: string }>(`/api/users/${id}/vault`, { method: "POST", body: JSON.stringify({ password }) }),
+  vaultForget: (id: string) => http<{ ok: boolean }>(`/api/users/${id}/vault`, { method: "DELETE" }),
+  refreshNow: (id: string) =>
+    http<{ ok: boolean; favorites_total?: number; playlists?: number; error?: string }>(
+      `/api/users/${id}/refresh-now`, { method: "POST" },
+    ),
+  myWave: (user_id: string, n = 30, seed_track_id?: string, mood?: string) =>
+    http<{ playlist_id: string; tracks: number; excluded_disliked: number; excluded_banned: number }>(
+      `/api/playlists/my-wave`,
+      { method: "POST", body: JSON.stringify({ user_id, n, seed_track_id, mood }) },
+    ),
+  collabSimilar: (userId: string) =>
+    http<{ users: { user_id: string; username: string; similarity: number; shared_likes: number; likes: number }[] }>(
+      `/api/collab/similar-users/${userId}`,
+    ),
+  collabRecommend: (userId: string, n = 30) =>
+    http<{ items: { track_id: string; title: string; artist_name?: string; score: number; because_of: string[] }[] }>(
+      `/api/collab/recommend/${userId}?n=${n}`,
+    ),
+  duplicates: () =>
+    http<{ groups: { key: string; keep_id: string; tracks: { id: string; title: string; artist_name?: string; album_name?: string; duration_sec?: number; play_count: number; starred: boolean; source: string }[] }[]; group_count: number; duplicate_tracks: number }>(
+      `/api/library/duplicates`,
+    ),
+  mergeDuplicates: (keep_id: string, drop_ids: string[]) =>
+    http<{ ok: boolean; merged?: number; error?: string }>(
+      `/api/library/duplicates/merge`,
+      { method: "POST", body: JSON.stringify({ keep_id, drop_ids }) },
+    ),
+  autoMergeDuplicates: () =>
+    http<{ ok: boolean; groups: number; merged: number }>(`/api/library/duplicates/auto`, { method: "POST" }),
+  getDedupSettings: () => http<{ auto_merge: boolean }>(`/api/library/dedup-settings`),
+  saveDedupSettings: (auto_merge: boolean) =>
+    http<{ ok: boolean }>(`/api/library/dedup-settings`, { method: "POST", body: JSON.stringify({ auto_merge }) }),
   updateUser: (id: string, body: { username?: string; is_admin?: boolean }) =>
     http<{ user: MediaUser }>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (id: string) => http<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),

@@ -14,14 +14,17 @@ from datetime import datetime
 
 
 def _ensure_defaults(db: Session):
-    if db.query(CronJob).count() > 0:
-        return
-    for name, kind, expr in [
+    defaults = [
         ("Daily per-user", "daily", "0 3 * * *"),
+        ("Taste refresh", "refresh_tastes", "30 4 * * *"),
         ("CLAP embed", "clap", "0 4 * * *"),
         ("Cover GC 7d", "covers_gc", "0 5 * * 0"),
-    ]:
-        db.add(CronJob(id=str(uuid.uuid4()), name=name, kind=kind, cron_expr=expr, enabled=True))
+    ]
+    # upsert по kind — подтягивает новые задачи и на старых базах
+    have = {r[0] for r in db.query(CronJob.kind).all()}
+    for name, kind, expr in defaults:
+        if kind not in have:
+            db.add(CronJob(id=str(uuid.uuid4()), name=name, kind=kind, cron_expr=expr, enabled=True))
     db.commit()
 
 
@@ -95,6 +98,24 @@ def run_now(job_id: str, db: Session = Depends(get_db)):
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job}
+    if kind == "refresh_tastes":
+        from app.db.models import ScanRun
+        from app.services.media_server import resolve_active_server
+        from app.workers.tasks import refresh_tastes
+
+        server = resolve_active_server(db)
+        db.commit()
+        run = ScanRun(
+            id=str(uuid.uuid4()), server_id=server.id, phase="taste_refresh",
+            status="running", total_items=0, processed_items=0,
+            started_at=datetime.utcnow(),
+        )
+        db.add(run)
+        db.flush()
+        job = enqueue(refresh_tastes, str(run.id), job_timeout=3600)
+        j.last_run_at = datetime.utcnow()
+        db.commit()
+        return {"queued": True, "job_id": job, "run_id": str(run.id)}
     if kind == "clap":
         from app.workers.tasks import clap_embed
 

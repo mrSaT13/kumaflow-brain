@@ -284,6 +284,112 @@ export default function LibraryPage() {
           </div>
         )}
       </Section>
+      <DuplicatesSection refreshTracks={mutate} />
     </>
+  );
+}
+
+function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
+  const { data, mutate } = useSWR("/api/library/duplicates", () => api.duplicates());
+  const { data: settings, mutate: mutateSettings } = useSWR("/api/library/dedup-settings", () => api.getDedupSettings());
+  const [busy, setBusy] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+
+  async function mergeGroup(keep_id: string, ids: string[]) {
+    if (!confirm(`Сшить ${ids.length} дубля в один? Статистика и лайки переедут.`)) return;
+    setBusy(true);
+    try {
+      const r = await api.mergeDuplicates(keep_id, ids);
+      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      mutate();
+      refreshTracks();
+    } catch (e: unknown) {
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function autoAll() {
+    if (!confirm("Сшить ВСЕ точные дубли? Live/remix-версии не тронутся.")) return;
+    setBusy(true);
+    try {
+      const r = await api.autoMergeDuplicates();
+      alert(`Групп: ${r.groups}, сшито треков: ${r.merged}`);
+      mutate();
+      refreshTracks();
+    } catch (e: unknown) {
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleAuto(v: boolean) {
+    try {
+      await api.saveDedupSettings(v);
+      mutateSettings();
+    } catch (e: unknown) {
+      alert(String(e));
+    }
+  }
+
+  const groups = data?.groups ?? [];
+  const shown = showAll ? groups : groups.slice(0, 10);
+
+  return (
+    <Section
+      title={`Дубликаты · групп ${data?.group_count ?? 0}, лишних треков ${data?.duplicate_tracks ?? 0}`}
+      action={
+        <div className="flex items-center gap-2 text-xs">
+          <label className="flex items-center gap-1.5 text-muted">
+            <input type="checkbox" checked={settings?.auto_merge ?? false} onChange={(e) => toggleAuto(e.target.checked)} />
+            автоматом после сканирования
+          </label>
+          <button className="kuma-pill hover:text-text" onClick={autoAll} disabled={busy || groups.length === 0}>
+            Сшить все точные
+          </button>
+        </div>
+      }
+    >
+      {groups.length === 0 ? (
+        <div className="kuma-card p-5 text-sm text-muted">Дублей не найдено. Точным считается совпадение артист + название + длительность ±2с (live/remix-версии не трогаем).</div>
+      ) : (
+        <div className="space-y-2">
+          {shown.map((g) => (
+            <div key={g.keep_id} className="kuma-card p-4">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-medium">{g.key}</span>
+                <span className="kuma-pill">{g.tracks.length} шт.</span>
+                <span className="flex-1" />
+                <button
+                  className="kuma-pill hover:text-text"
+                  disabled={busy}
+                  onClick={() => mergeGroup(g.keep_id, g.tracks.map((t) => t.id).filter((x) => x !== g.keep_id))}
+                >
+                  Объединить в один
+                </button>
+              </div>
+              <div className="mt-2 space-y-1">
+                {g.tracks.map((t) => (
+                  <div key={t.id} className={`flex items-center gap-2 text-xs ${t.id === g.keep_id ? "" : "text-muted"}`}>
+                    {t.id === g.keep_id && <span className="kuma-pill">останется</span>}
+                    <Link href={`/track/${t.id}`} className="kuma-link truncate">{t.album_name ?? "—"}</Link>
+                    <span className="tabular-nums">{t.duration_sec != null ? `${Math.floor(t.duration_sec / 60)}:${String(t.duration_sec % 60).padStart(2, "0")}` : "—"}</span>
+                    <span>▶ {t.play_count}{t.starred ? " ★" : ""}</span>
+                    <span className="kuma-pill">{t.source}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {groups.length > 10 && (
+            <button className="kuma-pill hover:text-text text-xs" onClick={() => setShowAll((v) => !v)}>
+              {showAll ? "Скрыть" : `Показать все (${groups.length})`}
+            </button>
+          )}
+        </div>
+      )}
+    </Section>
   );
 }

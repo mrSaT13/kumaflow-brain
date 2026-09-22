@@ -28,6 +28,30 @@ class UserPatch(BaseModel):
 class TasteImportIn(BaseModel):
     username: str
     password: str
+    remember: bool = False  # opt-in: зашифровать пароль в сейф для автообновления
+
+
+class SeedTasteIn(BaseModel):
+    genres: list[str] = []
+    artists: list[str] = []
+    track_ids: list[str] = []
+
+
+class RateIn(BaseModel):
+    track_id: str
+    like: bool | None  # True лайк / False дизлайк / None снять оценку
+
+
+class EventsIn(BaseModel):
+    events: list[dict] = []
+
+
+class BanIn(BaseModel):
+    artist_name: str
+
+
+class VaultIn(BaseModel):
+    password: str
 
 
 class UserTasteImportIn(BaseModel):
@@ -137,7 +161,24 @@ def create_user_by_credentials(payload: TasteImportIn, db: Session = Depends(get
     if res.get("status") != "success":
         return {"ok": False, "error": res.get("error")}
     u = db.get(MediaUser, res["user_id"])
-    return {"ok": True, "user": _to_dict(u) if u else None, "import": res}
+    vault_stored: bool | str = False
+    if payload.remember and u is not None:
+        from app.db.models import UserCredential as _UC
+        from app.services import vault as _vault
+
+        try:
+            blob = _vault.encrypt_password(payload.password)
+            row = db.query(_UC).filter_by(user_id=u.id).first()
+            if row is None:
+                db.add(_UC(user_id=u.id, enc_password=blob))
+            else:
+                row.enc_password = blob
+            db.commit()
+            vault_stored = True
+        except RuntimeError as e:
+            vault_stored = str(e)
+    return {"ok": True, "user": _to_dict(u) if u else None, "import": res,
+            "vault_stored": vault_stored}
 
 
 @router.post("/{user_id}/import-tastes")
@@ -167,7 +208,13 @@ def import_tastes(user_id: str, payload: UserTasteImportIn, db: Session = Depend
         return {"ok": False, "error": "Нужен пароль пользователя Navidrome — передайте {\"password\": \"...\"}"}
     from app.services.taste_import import import_user_tastes
 
-    res = import_user_tastes(str(u.server_id), u.external_id, password)
+    try:
+        res = import_user_tastes(str(u.server_id), u.external_id, password)
+    except Exception as e:  # noqa: BLE001 — читаемая ошибка вместо голого 500
+        from app.core.logging import get_logger as _gl
+
+        _gl("api.users").exception("import-tastes failed")
+        return {"ok": False, "error": f"Импорт не удался: {str(e)[:400]}"}
     if res.get("status") != "success":
         return {"ok": False, "error": res.get("error")}
     return {"ok": True, **res}
@@ -194,12 +241,6 @@ def user_tastes(user_id: str, db: Session = Depends(get_db)):
         .count()
     )
     return {"user_id": str(u.id), "favorites": fav, "playlists": pls, "playlist_tracks": pl_tracks}
-
-
-class SeedTasteIn(BaseModel):
-    genres: list[str] = []
-    artists: list[str] = []
-    track_ids: list[str] = []
 
 
 @router.post("/{user_id}/seed-taste")
@@ -247,31 +288,34 @@ def seed_taste(user_id: str, payload: SeedTasteIn, db: Session = Depends(get_db)
         if db.get(Track, tid) is not None:
             _fav(tid)
 
-    # артисты: топ-3 по play_count → лайк лучшему + история остальным
+    # артисты: раз выбрал артиста — значит нравятся его треки:
+    # топ-10 по play_count → в лайки, топ-3 → ещё и в историю (вес)
     for aname in artists:
         tops = (
-            db.query(Track)
+            db.query(Track.id)
             .filter(Track.artist_name == aname)
             .order_by(Track.play_count.desc().nullslast())
-            .limit(3)
+            .limit(10)
             .all()
         )
-        for i, t in enumerate(tops):
-            if i == 0:
-                _fav(str(t.id))
-            _hist(str(t.id), 2 if i == 0 else 1)
+        for i, (tid,) in enumerate(tops):
+            _fav(str(tid))
+            if i < 3:
+                _hist(str(tid), 2 if i == 0 else 1)
 
-    # жанры: топ-5 по play_count → история (жанровый вес)
+    # жанры: топ-8 по play_count → лайки первым 3 + история (жанровый вес)
     for g in genres:
         tops = (
-            db.query(Track)
+            db.query(Track.id)
             .filter(Track.genre == g)
             .order_by(Track.play_count.desc().nullslast())
-            .limit(5)
+            .limit(8)
             .all()
         )
-        for t in tops[:3]:
-            _hist(str(t.id), 1)
+        for i, (tid,) in enumerate(tops):
+            if i < 3:
+                _fav(str(tid))
+            _hist(str(tid), 1)
 
     db.commit()
     fav_total = db.query(Favorite).filter_by(user_id=u.id).count()
@@ -282,3 +326,179 @@ def seed_taste(user_id: str, payload: SeedTasteIn, db: Session = Depends(get_db)
         "history_added": hist_added,
         "favorites_total": fav_total,
     }
+
+
+def _require_user(db: Session, user_id: str):
+    from app.db.models import MediaUser as _MU
+
+    try:
+        uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(400, "invalid id")
+    u = db.get(_MU, user_id)
+    if not u:
+        raise HTTPException(404, "not found")
+    return u
+
+
+@router.post("/{user_id}/rate")
+def rate_track(user_id: str, payload: RateIn, db: Session = Depends(get_db)):
+    """Оценка трека (обмен с плеером, порт mobile rateSong).
+
+    like=true → лайк, false → дизлайк (+проверка автобана артиста),
+    null → снять оценку.
+    """
+    from app.services import taste as _taste
+
+    u = _require_user(db, user_id)
+    try:
+        uuid.UUID(payload.track_id)
+    except ValueError:
+        raise HTTPException(400, "invalid track_id")
+    return _taste.record_rate(db, str(u.id), payload.track_id, payload.like)
+
+
+@router.post("/{user_id}/events")
+def push_events(user_id: str, payload: EventsIn, db: Session = Depends(get_db)):
+    """Пакет событий плеера: play/complete/skip/replay/seek_back/abandon.
+
+    Применяет правила mobile: 3 скипа → автодизлайк, 3 дизлайка артиста → автобан.
+    """
+    from app.services import taste as _taste
+
+    u = _require_user(db, user_id)
+    return _taste.record_events(db, str(u.id), payload.events or [])
+
+
+@router.post("/{user_id}/ban-artist")
+def ban_artist(user_id: str, payload: BanIn, db: Session = Depends(get_db)):
+    """Ручной бан артиста (порт mobile banArtist)."""
+    from app.db.models import ArtistBan as _AB
+
+    u = _require_user(db, user_id)
+    name = (payload.artist_name or "").strip()
+    if not name:
+        raise HTTPException(400, "artist_name required")
+    if db.query(_AB).filter_by(user_id=u.id, artist_name=name).first() is None:
+        db.add(_AB(user_id=u.id, artist_name=name[:512], reason="manual"))
+        db.commit()
+    return {"ok": True, "artist_name": name}
+
+
+@router.post("/{user_id}/unban-artist")
+def unban_artist(user_id: str, payload: BanIn, db: Session = Depends(get_db)):
+    """Разбан артиста (порт mobile unbanArtist)."""
+    from app.db.models import ArtistBan as _AB
+
+    u = _require_user(db, user_id)
+    db.query(_AB).filter_by(user_id=u.id, artist_name=(payload.artist_name or "").strip()).delete()
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/{user_id}/profile")
+def taste_profile(user_id: str, top_n: int = 50, db: Session = Depends(get_db)):
+    """Вкусовой профиль пользователя: веса жанров/артистов, скоры треков,
+    паттерны часов/дней, дизлайки, баны — для веба и обмена с плеером."""
+    from app.services import taste as _taste
+
+    _require_user(db, user_id)
+    return _taste.user_profile(db, user_id, top_n=max(1, min(200, top_n)))
+
+
+@router.post("/{user_id}/sync-from-mobile")
+def sync_from_mobile(user_id: str, payload: dict, db: Session = Depends(get_db)):
+    """Полный синк истории с мобильного плеера (обучение волны и плейлистов).
+
+    Body: {ratings: [{external_id, like, playCount, skipCount, replayCount,
+    seekBackCount, abandonCount, score, lastPlayed}], profile: {MLProfile},
+    events: [{track_id|external_id, action, position_sec}]}.
+    Мобила шлёт историю страницами (events до 5000/запрос, ratings до 20000).
+    """
+    from app.services import taste as _taste
+
+    _require_user(db, user_id)
+    try:
+        return _taste.sync_from_mobile(db, user_id, payload or {})
+    except Exception as e:  # noqa: BLE001
+        from app.core.logging import get_logger as _gl
+
+        _gl("api.users").exception("sync-from-mobile failed")
+        return {"ok": False, "error": f"Синк не удался: {str(e)[:400]}"}
+
+
+@router.get("/{user_id}/sync-to-mobile")
+def sync_to_mobile(user_id: str, db: Session = Depends(get_db)):
+    """Слепок сервера для мобилы: лайки/дизлайки/баны (external ids), веса, статы."""
+    from app.services import taste as _taste
+
+    _require_user(db, user_id)
+    return _taste.sync_to_mobile(db, user_id)
+
+
+@router.get("/{user_id}/vault")
+def vault_status(user_id: str, db: Session = Depends(get_db)):
+    """Есть ли запомненный пароль для автообновления (сам пароль не отдаём)."""
+    from app.db.models import UserCredential as _UC
+    from app.services import vault as _vault
+
+    u = _require_user(db, user_id)
+    stored = db.query(_UC).filter_by(user_id=u.id).first() is not None
+    return {"stored": stored, "available": _vault.vault_available()}
+
+
+@router.post("/{user_id}/vault")
+def vault_store(user_id: str, payload: VaultIn, db: Session = Depends(get_db)):
+    """Запомнить пароль (opt-in автообновление). Шифр Fernet, ключ в env."""
+    from app.db.models import UserCredential as _UC
+    from app.services import vault as _vault
+
+    u = _require_user(db, user_id)
+    if not (payload.password or "").strip():
+        raise HTTPException(400, "password required")
+    try:
+        blob = _vault.encrypt_password(payload.password)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    row = db.query(_UC).filter_by(user_id=u.id).first()
+    if row is None:
+        db.add(_UC(user_id=u.id, enc_password=blob))
+    else:
+        row.enc_password = blob
+    db.commit()
+    return {"ok": True, "stored": True}
+
+
+@router.delete("/{user_id}/vault")
+def vault_forget(user_id: str, db: Session = Depends(get_db)):
+    """Забыть пароль (выключить автообновление)."""
+    from app.db.models import UserCredential as _UC
+
+    u = _require_user(db, user_id)
+    db.query(_UC).filter_by(user_id=u.id).delete()
+    db.commit()
+    return {"ok": True, "stored": False}
+
+
+@router.post("/{user_id}/refresh-now")
+def refresh_now(user_id: str, db: Session = Depends(get_db)):
+    """Срочно обновить вкусы из Navidrome по запомненному паролю (без ожидания ночи)."""
+    from app.db.models import UserCredential as _UC
+    from app.services import taste_import as _ti
+    from app.services import vault as _vault
+
+    u = _require_user(db, user_id)
+    row = db.query(_UC).filter_by(user_id=u.id).first()
+    if not row:
+        return {"ok": False, "error": "Пароль не запомнен — включите автообновление (vault) или импортируйте с паролем вручную"}
+    try:
+        password = _vault.decrypt_password(row.enc_password)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        res = _ti.import_user_tastes(str(u.server_id), u.external_id, password)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"Импорт не удался: {str(e)[:400]}"}
+    if res.get("status") != "success":
+        return {"ok": False, "error": res.get("error")}
+    return {"ok": True, **res}

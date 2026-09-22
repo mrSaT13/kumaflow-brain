@@ -40,6 +40,23 @@ def main() -> int:
                         if j.kind == "daily":
                             enqueue(__import__("app.workers.tasks", fromlist=["daily_per_user"]).daily_per_user, job_timeout=3600)
                             j.last_run_at = __import__("datetime").datetime.utcnow()
+                        elif j.kind == "refresh_tastes":
+                            import uuid as _uuid
+
+                            from app.db.models import ScanRun as _SR
+                            from app.services.media_server import resolve_active_server as _ras
+                            try:
+                                _srv = _ras(db)
+                                db.commit()
+                                _run = _SR(id=str(_uuid.uuid4()), server_id=_srv.id, phase="taste_refresh",
+                                           status="running", total_items=0, processed_items=0,
+                                           started_at=__import__("datetime").datetime.utcnow())
+                                db.add(_run)
+                                db.flush()
+                                enqueue(__import__("app.workers.tasks", fromlist=["refresh_tastes"]).refresh_tastes, str(_run.id), job_timeout=3600)
+                            except Exception:
+                                enqueue(__import__("app.workers.tasks", fromlist=["refresh_tastes"]).refresh_tastes, job_timeout=3600)
+                            j.last_run_at = __import__("datetime").datetime.utcnow()
                         elif j.kind == "clap":
                             enqueue(__import__("app.workers.tasks", fromlist=["clap_embed"]).clap_embed, str(j.id), job_timeout=3600)
                             j.last_run_at = __import__("datetime").datetime.utcnow()

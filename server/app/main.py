@@ -33,6 +33,26 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
     init_db()
+    # зависшие задачи прошлого запуска (queued/running) — в failure, иначе
+    # новые запуски той же фазы вечно упираются в 409 «уже выполняется»,
+    # а анализ продолжает пропускать уже проанализированное (resume по факту).
+    try:
+        from datetime import datetime
+
+        from app.db.database import session_scope
+        from app.db.models import ScanLog, ScanRun
+        import uuid as _uuid
+
+        with session_scope() as db:
+            stuck = db.query(ScanRun).filter(ScanRun.status.in_(["queued", "running"])).all()
+            for r in stuck:
+                r.status = "failure"
+                r.finished_at = datetime.utcnow()
+                r.error = "Прервано перезапуском backend — запустите задачу заново"
+                db.add(ScanLog(id=str(_uuid.uuid4()), run_id=r.id, level="warn",
+                               message="Помечена проваленной: backend перезапускался"))
+    except Exception:
+        pass
     init_redis()
     try:
         yield

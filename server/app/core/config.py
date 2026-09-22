@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     clap_enabled: bool = True
     use_gpu_clustering: bool = False
 
+    # Сейф паролей Navidrome (opt-in автообновление вкусов, Fernet).
+    # Ключ генерируется один раз и живёт в секретах compose, НЕ в базе.
+    taste_vault_key: str = ""
+
     yandex_music_token: str = ""
     yandex_music_enabled: bool = False
 

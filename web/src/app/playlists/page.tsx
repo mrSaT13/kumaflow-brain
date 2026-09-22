@@ -3,7 +3,7 @@
 import useSWR from "swr";
 import Link from "next/link";
 import { useState } from "react";
-import { ListMusic, RefreshCw, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { ListMusic, Play, RefreshCw, Send, Sparkles, Trash2, Wand2 } from "lucide-react";
 import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/components/ui";
 import { api } from "@/lib/api";
 import { fmtDate } from "@/lib/format";
@@ -57,10 +57,41 @@ export default function PlaylistsPage() {
     }
   }
 
+  async function myWave() {
+    const uid = coldUser || (usersData?.users ?? [])[0]?.id;
+    if (!uid) return alert("Сначала добавьте пользователя на странице «Пользователи»");
+    setBusy(true);
+    try {
+      const r = await api.myWave(uid, coldN || 30);
+      mutate();
+      alert(`Моя волна готова: треков ${r.tracks} (убрано дизлайков ${r.excluded_disliked}, банов ${r.excluded_banned}). Откройте плейлист ниже.`);
+    } catch (e: unknown) {
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function del(id: string) {
-    if (!confirm("Удалить плейлист?")) return;
+    if (!confirm("Удалить плейлист? (копия в Navidrome тоже будет удалена, если выгружалась)")) return;
     await api.deletePlaylist(id);
     mutate();
+  }
+
+  async function exportOne(id: string, name: string) {
+    setBusy(true);
+    try {
+      const r = await api.exportPlaylist(id);
+      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      else {
+        alert(`«${name}» теперь в Navidrome: треков ${r.exported ?? 0}${r.skipped ? ` (пропущено файлов с диска: ${r.skipped})` : ""}.`);
+        mutate();
+      }
+    } catch (e: unknown) {
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -69,10 +100,15 @@ export default function PlaylistsPage() {
         title="Плейлисты"
         subtitle="Ежедневный плейлист пересоздаётся автоматически (если уже есть — удаляется и делается заново). Cold-start в 3 шага."
         actions={
-          <Button onClick={generate} disabled={busy}>
-            <RefreshCw className={`w-4 h-4 ${busy ? "animate-spin" : ""}`} />
-            {busy ? "Генерирую…" : "Пройти холодный старт"}
-          </Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button variant="ghost" onClick={myWave} disabled={busy}>
+              <Play className="w-4 h-4" /> Моя волна
+            </Button>
+            <Button onClick={generate} disabled={busy}>
+              <RefreshCw className={`w-4 h-4 ${busy ? "animate-spin" : ""}`} />
+              {busy ? "Генерирую…" : "Пройти холодный старт"}
+            </Button>
+          </div>
         }
       />
 
@@ -183,14 +219,20 @@ export default function PlaylistsPage() {
                       {p.is_auto_generated ? "ежедневный" : "обычный"} · {p.track_count} треков · {fmtDate(p.created_at)}
                     </div>
                   </div>
-                  <Badge tone={p.is_auto_generated ? "info" : "default"}>
-                    {p.is_auto_generated ? "auto" : "manual"}
-                  </Badge>
+                  <div className="flex gap-1">
+                    <Badge tone={p.is_auto_generated ? "info" : "default"}>
+                      {p.is_auto_generated ? "auto" : "manual"}
+                    </Badge>
+                    {p.in_navidrome && <Badge tone="ok">в Navidrome</Badge>}
+                  </div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   <Link href={`/playlists/${p.id}`} className="kuma-btn kuma-btn-ghost text-sm">
                     Открыть
                   </Link>
+                  <button className="kuma-pill hover:text-text" onClick={() => exportOne(p.id, p.name)} disabled={busy}>
+                    <Send className="w-3 h-3" /> {p.in_navidrome ? "обновить в Navidrome" : "в Navidrome"}
+                  </button>
                   <button className="kuma-pill hover:text-text" onClick={() => del(p.id)}>
                     <Trash2 className="w-3 h-3" /> удалить
                   </button>

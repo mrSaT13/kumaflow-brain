@@ -237,6 +237,139 @@ class Favorite(Base):
     starred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class TrackDislike(Base):
+    """Дизлайк трека (порт mobile TrackRating.like=false).
+
+    source: manual (кнопка), rating (оценка <=2 из Navidrome), skip3 (3 скипа).
+    """
+
+    __tablename__ = "track_dislikes"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    track_id: Mapped[str] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), primary_key=True
+    )
+    source: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ArtistBan(Base):
+    """Бан артиста (порт mobile bannedArtists).
+
+    reason: manual, auto3 (3 дизлайка треков артиста — правило mobile).
+    """
+
+    __tablename__ = "artist_bans"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    artist_name: Mapped[str] = mapped_column(String(512), primary_key=True)
+    reason: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PlayEvent(Base):
+    """Богатое событие прослушивания (порт mobile PlayEvent + TrackRating счётчики).
+
+    action: play, complete, skip, replay, seek_back, abandon.
+    hour/day_of_week денормализованы для паттернов «когда слушает».
+    """
+
+    __tablename__ = "play_events"
+
+    id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), index=True
+    )
+    track_id: Mapped[str] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    position_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    hour: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    day_of_week: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (Index("ix_play_event_user_track", "user_id", "track_id"),)
+
+
+class UserCredential(Base):
+    """Шифрованный пароль Navidrome пользователя (opt-in автообновление вкусов).
+
+    Хранится ТОЛЬКО шифротекст Fernet; ключ — в env TASTE_VAULT_KEY (секрет
+    compose, не в базе). Без ключа расшифровка невозможна.
+    """
+
+    __tablename__ = "user_credentials"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    enc_password: Mapped[bytes] = mapped_column(BlobCol(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class TrackStat(Base):
+    """Агрегат прослушиваний (user, track) — одна строка на пару.
+
+    Для bulk-синка с мобилы (TrackRating целиком) и обмена обратно:
+    upsert без раздувания PlayHistory тысячами строк.
+    """
+
+    __tablename__ = "track_stats"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    track_id: Mapped[str] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), primary_key=True
+    )
+    plays: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    early_skips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    replays: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    seek_backs: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    abandons: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    mobile_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_played: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class TasteProfile(Base):
+    """Слепок вкусов (user_id PK): свой + прилетевший с мобилы.
+
+    mobile: точная копия MLProfile (preferredGenres/Artists, liked/disliked
+    external ids, banned, artistDislikeCounts) — для обмена и подмешивания
+    в серверный скоринг (точнее волна и плейлисты).
+    """
+
+    __tablename__ = "taste_profiles"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    genres: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    artists: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    mobile_genres: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    mobile_artists: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    mobile_liked: Mapped[list] = mapped_column(JSONCol(), default=list, nullable=False)
+    mobile_disliked: Mapped[list] = mapped_column(JSONCol(), default=list, nullable=False)
+    mobile_banned: Mapped[list] = mapped_column(JSONCol(), default=list, nullable=False)
+    mobile_counts: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    mobile_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class ScanRun(Base):
     __tablename__ = "scan_runs"
 

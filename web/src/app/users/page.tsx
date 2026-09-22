@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import Link from "next/link";
 import { useState } from "react";
 import { Shield, Trash2, UserPlus, RefreshCw, Heart } from "lucide-react";
 import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/components/ui";
@@ -24,6 +25,7 @@ export default function UsersPage() {
   const [busy, setBusy] = useState(false);
   const [navLogin, setNavLogin] = useState("");
   const [navPassword, setNavPassword] = useState("");
+  const [rememberPwd, setRememberPwd] = useState(true);
   const [importBusy, setImportBusy] = useState<string | null>(null);
 
   async function create() {
@@ -46,9 +48,14 @@ export default function UsersPage() {
     if (!navLogin.trim() || !navPassword) return alert("Укажите логин и пароль пользователя Navidrome");
     setBusy(true);
     try {
-      const r = await api.createUserByCredentials({ username: navLogin.trim(), password: navPassword });
+      const r = await api.createUserByCredentials({ username: navLogin.trim(), password: navPassword, remember: rememberPwd });
       if (!r.ok) return alert(`Ошибка: ${r.error ?? "неизвестная"}`);
       const im = (r.import ?? {}) as Record<string, unknown>;
+      // пароль запоминаем только в sessionStorage браузера (на сервер не сохраняется) —
+      // повторный «импорт» уже не спросит его заново
+      try {
+        if (r.user?.id) sessionStorage.setItem(`navpwd:${r.user.id}`, navPassword);
+      } catch { /* приватный режим */ }
       setNavLogin("");
       setNavPassword("");
       mutate();
@@ -63,14 +70,27 @@ export default function UsersPage() {
   }
 
   async function importFor(id: string, fallbackName: string) {
-    const pwd = window.prompt(`Пароль пользователя «${fallbackName}» в Navidrome (нужен для чтения его лайков):`, "");
-    if (pwd === null) return;
-    if (!pwd) return alert("Без пароля Navidrome не отдаст чужие лайки — введите пароль.");
+    // если пароль уже вводился в этой вкладке — берём из памяти, не спрашиваем
+    let pwd: string | null = null;
+    try {
+      pwd = sessionStorage.getItem(`navpwd:${id}`);
+    } catch { pwd = null; }
+    if (!pwd) {
+      const entered = window.prompt(`Пароль пользователя «${fallbackName}» в Navidrome (нужен для чтения его лайков, спрашиваю один раз):`, "");
+      if (entered === null) return;
+      if (!entered) return alert("Без пароля Navidrome не отдаст чужие лайки — введите пароль.");
+      pwd = entered;
+    }
     setImportBusy(id);
     try {
       const r = await api.importTastes(id, pwd);
       if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
-      else alert(`Готово: лайков всего ${r.favorites_total ?? 0} (+${r.favorites_added ?? 0} новых), плейлистов ${r.playlists ?? 0}. Теперь cold-start для этого пользователя будет персональным.`);
+      else {
+        try {
+          sessionStorage.setItem(`navpwd:${id}`, pwd);
+        } catch { /* приватный режим */ }
+        alert(`Готово: лайков всего ${r.favorites_total ?? 0} (+${r.favorites_added ?? 0} новых), плейлистов ${r.playlists ?? 0}. Теперь cold-start для этого пользователя будет персональным.`);
+      }
       mutate();
     } catch (e: unknown) {
       alert(String(e));
@@ -125,8 +145,12 @@ export default function UsersPage() {
               <Heart className="w-4 h-4" /> Добавить + импорт вкусов
             </Button>
           </div>
+          <label className="flex items-center gap-2 text-sm mt-3">
+            <input type="checkbox" checked={rememberPwd} onChange={(e) => setRememberPwd(e.target.checked)} />
+            запомнить пароль для автообновления (шифр Fernet, ключ в compose)
+          </label>
           <div className="text-xs text-muted mt-2">
-            Тянет лайки (★), оценки и плейлисты пользователя прямо из Navidrome. Пароль не хранится — используется только для одного запроса. Треки, которых нет в локальной библиотеке, пропускаются (сначала «Синхронизировать» в Библиотеке).
+            Тянет лайки (★), оценки и плейлисты пользователя прямо из Navidrome. Без галочки пароль используется один раз и забывается. Треки, которых нет в локальной библиотеке, пропускаются (сначала «Синхронизировать» в Библиотеке).
           </div>
         </Card>
       </Section>
@@ -169,7 +193,7 @@ export default function UsersPage() {
               <tbody>
                 {(data?.users ?? []).map((u) => (
                   <tr key={u.id}>
-                    <td className="font-medium">{u.username}</td>
+                    <td className="font-medium"><Link href={`/users/${u.id}` as never} className="kuma-link">{u.username}</Link></td>
                     <td className="text-muted text-xs font-mono">{u.external_id}</td>
                     <td><TasteBadge id={u.id} /></td>
                     <td>

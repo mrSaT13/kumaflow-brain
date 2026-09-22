@@ -59,6 +59,10 @@ services:
       POSTGRES_PASSWORD: CHANGE_ME_postgres_password
       POSTGRES_DB: kumaflow
       REDIS_HOST: redis
+      # Сейф паролей (opt-in автообновление вкусов, Fernet). Сгенерировать один раз:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      # Пусто = автообновление выключено (ручной импорт работает всегда).
+      TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
       # Твой внешний Navidrome. host.docker.internal = сам хост-сервер
       # (работает на Linux Docker 20.10+). Если Navidrome на другой машине —
       # впиши её IP: http://192.168.x.x:4533
@@ -96,6 +100,8 @@ services:
       POSTGRES_PASSWORD: CHANGE_ME_postgres_password
       POSTGRES_DB: kumaflow
       REDIS_HOST: redis
+      # Сейф паролей для автообновления вкусов (тот же ключ, что у backend).
+      TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
       MEDIA_SERVER_TYPE: navidrome
       NAVIDROME_URL: http://host.docker.internal:4533
       # --- Примонтированная папка музыки (вариант А) ---

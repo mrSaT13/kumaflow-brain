@@ -30,8 +30,8 @@ class SubsonicAuth:
     user: str
     password: str
 
-    def params(self, extra: Mapping[str, Any] | None = None) -> dict[str, str]:
-        params: dict[str, str] = {
+    def params(self, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {
             "u": self.user,
             "v": SUBSONIC_API_VERSION,
             "c": CLIENT_NAME,
@@ -47,9 +47,10 @@ class SubsonicAuth:
             for k, v in extra.items():
                 if v is None:
                     continue
+                # списки (songId=..&songId=..) — через doseq в _url, иначе
+                # уехал бы только последний элемент (старый баг перезаписи)
                 if isinstance(v, (list, tuple)):
-                    for item in v:
-                        params[k] = str(item)
+                    params[k] = [str(item) for item in v]
                 else:
                     params[k] = str(v)
         return params
@@ -74,7 +75,8 @@ class SubsonicClient:
 
     def _url(self, endpoint: str, params: Mapping[str, Any] | None = None) -> str:
         merged = self.auth.params(params or {})
-        return f"{self.base_url}/rest/{endpoint}?{urlencode(merged)}"
+        # doseq: списки (songId, songIndexToRemove) едут повторами ключа
+        return f"{self.base_url}/rest/{endpoint}?{urlencode(merged, doseq=True)}"
 
     async def _call(self, endpoint: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         url = self._url(endpoint, params)

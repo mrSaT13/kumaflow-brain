@@ -54,6 +54,7 @@ export default function ColdStartPage() {
   const [similarServer, setSimilarServer] = useState<Record<string, boolean>>({});
   const [similarBusy, setSimilarBusy] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [seedResult, setSeedResult] = useState<{ favorites_added: number; history_added: number; favorites_total: number } | null>(null);
   const [playlistId, setPlaylistId] = useState<string | null>(null);
 
@@ -121,6 +122,34 @@ export default function ColdStartPage() {
       alert(String(e));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function importStarred() {
+    if (!userId) return;
+    let pwd: string | null = null;
+    try {
+      pwd = sessionStorage.getItem(`navpwd:${userId}`);
+    } catch { pwd = null; }
+    if (!pwd) {
+      const entered = window.prompt("Пароль этого пользователя в Navidrome (нужен, чтобы забрать его ★, спрашиваю один раз):", "");
+      if (entered === null) return;
+      if (!entered) return alert("Без пароля Navidrome чужие лайки не отдаст.");
+      pwd = entered;
+    }
+    setImporting(true);
+    try {
+      const r = await api.importTastes(userId, pwd);
+      if (!r.ok) return alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      try {
+        sessionStorage.setItem(`navpwd:${userId}`, pwd);
+      } catch { /* приватный режим */ }
+      setSeedResult((prev) => prev ? { ...prev, favorites_total: r.favorites_total ?? prev.favorites_total } : prev);
+      alert(`Готово: лайков всего ${r.favorites_total ?? 0} (+${r.favorites_added ?? 0} новых), плейлистов ${r.playlists ?? 0}.`);
+    } catch (e: unknown) {
+      alert(String(e));
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -206,31 +235,101 @@ export default function ColdStartPage() {
           <div className="mb-3">
             <Input placeholder="Поиск артиста…" value={artistQ} onChange={(e) => setArtistQ(e.target.value)} />
           </div>
+          {expanded && (
+            <Card className="mb-4">
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-sm font-semibold">Похожие на «{expanded}»</span>
+                {similarServer[expanded] ? (
+                  <span className="kuma-pill">с сервера</span>
+                ) : (
+                  <span className="kuma-pill">локально</span>
+                )}
+                <button className="kuma-pill hover:text-text ml-auto" onClick={() => setExpanded(null)}>
+                  ✕ скрыть
+                </button>
+              </div>
+              {similarBusy && (similarCache[expanded] ?? []).length === 0 ? (
+                <div className="text-sm text-muted flex items-center gap-2 py-4">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Подбираем похожих…
+                </div>
+              ) : (similarCache[expanded] ?? []).length === 0 ? (
+                <div className="text-sm text-muted py-2">Похожих не нашлось.</div>
+              ) : (
+                <div className="flex gap-4 overflow-x-auto pb-2 -mx-1 px-1">
+                  {(similarCache[expanded] ?? []).map((s) => {
+                    const sSel = selectedArtists.includes(s.name);
+                    const sImg = coverUrlSmall(s);
+                    return (
+                      <button
+                        key={s.name}
+                        title={s.name}
+                        onClick={() => toggleArtist(s)}
+                        className="flex flex-col items-center gap-1.5 w-20 shrink-0 group"
+                      >
+                        <span className="relative">
+                          <span
+                            className="w-16 h-16 rounded-full overflow-hidden flex items-center justify-center font-bold transition-all"
+                            style={{
+                              background: sImg ? "var(--surface)" : "color-mix(in srgb, var(--accent) 12%, var(--surface))",
+                              outline: sSel ? "3px solid var(--accent)" : "2px solid var(--border)",
+                              outlineOffset: 2,
+                            }}
+                          >
+                            {sImg ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={sImg} alt={s.name} loading="lazy" className="w-full h-full object-cover"
+                                onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
+                            ) : (
+                              <span className="text-xl">{s.name.slice(0, 1).toUpperCase()}</span>
+                            )}
+                          </span>
+                          <span
+                            className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold border-2"
+                            style={{
+                              background: sSel ? "var(--accent)" : "var(--surface)",
+                              color: sSel ? "var(--bg)" : "var(--text)",
+                              borderColor: "var(--bg)",
+                            }}
+                          >
+                            {sSel ? <Check className="w-3.5 h-3.5" /> : "+"}
+                          </span>
+                        </span>
+                        <span className="text-xs leading-tight text-center line-clamp-2 w-full" style={{ fontWeight: sSel ? 700 : 500 }}>
+                          {s.name}
+                        </span>
+                        {s.track_count > 0 && (
+                          <span className="text-[10px] text-muted -mt-1">{s.track_count} тр.</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          )}
           {artistsLoading ? (
             <Card><div className="text-sm text-muted text-center py-8 flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Загружаем артистов…</div></Card>
           ) : (artistsData?.items ?? []).length === 0 ? (
             <Card><div className="text-sm text-muted text-center py-8">Артисты не найдены. Попробуйте другой запрос или уберите фильтр жанров.</div></Card>
           ) : (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-4">
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-x-4 gap-y-6">
               {(artistsData?.items ?? []).map((a) => {
                 const sel = selectedArtists.includes(a.name);
                 const img = coverUrl(a);
-                const isExp = expanded === a.name;
-                const similars = similarCache[a.name] ?? [];
                 return (
                   <div key={a.name} className="flex flex-col items-center gap-1.5">
-                    <button onClick={() => toggleArtist(a)} className="relative">
+                    <button onClick={() => toggleArtist(a)} className="relative transition-transform hover:scale-105 active:scale-95">
                       <span
                         className="w-20 h-20 rounded-full overflow-hidden flex items-center justify-center transition-all bg-[#FFE066]"
                         style={{
                           outline: sel ? "3px solid var(--accent)" : "3px solid transparent",
                           outlineOffset: 2,
-                          boxShadow: "0 4px 10px #0002",
+                          boxShadow: sel ? "0 0 18px color-mix(in srgb, var(--accent) 45%, transparent)" : "0 4px 10px #0002",
                         }}
                       >
                         {img ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={img} alt="" loading="lazy" className="w-full h-full object-cover"
+                          <img src={img} alt={a.name} loading="lazy" className="w-full h-full object-cover"
                             onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
                         ) : (
                           <Heart className="w-7 h-7 text-[#FF3B30]" fill="currentColor" />
@@ -243,43 +342,10 @@ export default function ColdStartPage() {
                         </span>
                       )}
                     </button>
-                    <span className="text-xs text-center leading-tight line-clamp-2" style={{ fontWeight: sel ? 700 : 500 }}>
+                    <span className="text-xs text-center leading-tight line-clamp-2 min-h-8" style={{ fontWeight: sel ? 700 : 500 }}>
                       {a.name}
                     </span>
                     <span className="text-[10px] text-muted">{a.track_count} тр.</span>
-                    {isExp && sel && (
-                      <div className="w-full rounded-xl border border-border p-2 mt-1">
-                        <div className="text-[10px] text-muted mb-1.5 text-center">
-                          Похожие{similarServer[a.name] ? " · с сервера" : ""}:
-                        </div>
-                        {similarBusy && similars.length === 0 ? (
-                          <div className="text-[10px] text-muted text-center">ищем…</div>
-                        ) : (
-                          <div className="flex justify-center gap-1.5">
-                            {similars.map((s) => {
-                              const sSel = selectedArtists.includes(s.name);
-                              const sImg = coverUrlSmall(s);
-                              return (
-                                <button key={s.name} title={s.name} onClick={() => toggleArtist(s)} className="flex flex-col items-center gap-0.5 w-12">
-                                  <span
-                                    className="w-10 h-10 rounded-full overflow-hidden flex items-center justify-center bg-surface text-xs font-bold"
-                                    style={{ outline: sSel ? "2px solid var(--accent)" : "1px solid var(--border)" }}
-                                  >
-                                    {sImg ? (
-                                      // eslint-disable-next-line @next/next/no-img-element
-                                      <img src={sImg} alt="" loading="lazy" className="w-full h-full object-cover"
-                                        onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
-                                    ) : s.name.slice(0, 1)}
-                                  </span>
-                                  <span className="text-[8px] leading-tight text-center line-clamp-1 w-full">{s.name}</span>
-                                  {!sSel && <span className="text-[10px] leading-none text-[#FF3B30]">＋</span>}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -303,9 +369,14 @@ export default function ColdStartPage() {
                 . Миксы станут персональными с каждым прослушиванием.
               </div>
               {!playlistId ? (
-                <Button onClick={makePlaylist} disabled={saving || !userId}>
-                  <Play className="w-4 h-4" /> {saving ? "Создаю…" : "Начать слушать — создать плейлист"}
-                </Button>
+                <div className="flex gap-2 flex-wrap justify-center">
+                  <Button variant="ghost" onClick={importStarred} disabled={importing || !userId}>
+                    <Heart className="w-4 h-4" /> {importing ? "Тяну…" : "Подтянуть мои ★ из Navidrome"}
+                  </Button>
+                  <Button onClick={makePlaylist} disabled={saving || !userId}>
+                    <Play className="w-4 h-4" /> {saving ? "Создаю…" : "Начать слушать — создать плейлист"}
+                  </Button>
+                </div>
               ) : (
                 <Link href={`/playlists/${playlistId}`} className="kuma-btn">
                   <Play className="w-4 h-4" /> Открыть мой плейлист

@@ -357,3 +357,74 @@ def similar_artists(name: str, limit: int = Query(6, le=12), db: Session = Depen
             items.append(s)
             have.add(str(s["name"]).lower())
     return {"items": items[:limit], "server_used": server_used}
+
+
+@router.get("/duplicates")
+def list_duplicates(limit: int = Query(200, le=1000), db: Session = Depends(get_db)):
+    """Группы точных дублей (артист+название+длительность±2с, без live/remix-версий).
+
+    keep_id — кого оставить (больше прослушиваний/starred/старше).
+    """
+    from app.services import dedup as _dd
+
+    groups = _dd.find_duplicate_groups(db, limit_groups=limit)
+    dup_tracks = sum(len(g["tracks"]) - 1 for g in groups)
+    return {"groups": groups, "group_count": len(groups), "duplicate_tracks": dup_tracks}
+
+
+@router.post("/duplicates/merge")
+def merge_duplicates(payload: dict, db: Session = Depends(get_db)):
+    """Сшить дубли вручную: {keep_id, drop_ids[]} — статистика суммируется,
+    лайки/история/плейлисты/фичи переезжают на keep."""
+    import uuid as _uuid
+
+    from fastapi import HTTPException as _HE
+
+    from app.services import dedup as _dd
+
+    try:
+        keep_id = str(payload.get("keep_id") or "")
+        _uuid.UUID(keep_id)
+        drop_ids = [str(x) for x in (payload.get("drop_ids") or []) if x]
+        for d in drop_ids:
+            _uuid.UUID(d)
+    except (ValueError, AttributeError):
+        raise _HE(400, "invalid ids")
+    if not drop_ids:
+        raise _HE(400, "drop_ids required")
+    return _dd.merge_tracks(db, keep_id, drop_ids)
+
+
+@router.post("/duplicates/auto")
+def auto_merge_duplicates(db: Session = Depends(get_db)):
+    """Автослияние ВСЕХ точных групп (то же, что чекбокс «автоматом»).
+
+    Трогает только строгие совпадения; live/remix/edit-версии не сливаются никогда.
+    """
+    from app.services import dedup as _dd
+
+    return {"ok": True, **_dd.auto_merge_exact(db)}
+
+
+@router.get("/dedup-settings")
+def get_dedup_settings(db: Session = Depends(get_db)):
+    """Настройка автослияния дублей после сканирования."""
+    from app.db.models import AppSetting
+
+    row = db.get(AppSetting, "dedup")
+    val = dict(row.value) if row and isinstance(row.value, dict) else {}
+    return {"auto_merge": bool(val.get("auto_merge", False))}
+
+
+@router.post("/dedup-settings")
+def save_dedup_settings(payload: dict, db: Session = Depends(get_db)):
+    from app.db.models import AppSetting
+
+    value = {"auto_merge": bool((payload or {}).get("auto_merge", False))}
+    row = db.get(AppSetting, "dedup")
+    if row is None:
+        db.add(AppSetting(key="dedup", value=value))
+    else:
+        row.value = value
+    db.commit()
+    return {"ok": True, **value}

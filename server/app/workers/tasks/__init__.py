@@ -760,6 +760,22 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                 raise
             if disk["tracks"] > 0:
                 _append_log(run_id, "info", f"Дополнительно с диска: треков {disk['tracks']}, альбомов {disk['albums']}")
+            # автослияние точных дублей (если включено в Библиотеке → чекбокс)
+            try:
+                from app.db.models import AppSetting as _AS
+
+                with session_scope() as db3:
+                    _row = db3.get(_AS, "dedup")
+                    _auto = bool(dict(_row.value).get("auto_merge")) if _row and isinstance(_row.value, dict) else False
+                if _auto:
+                    from app.services import dedup as _dd
+
+                    with session_scope() as db3:
+                        _res = _dd.auto_merge_exact(db3)
+                    _append_log(run_id, "info",
+                                f"Автослияние дублей: групп {_res['groups']}, сшито треков {_res['merged']}")
+            except Exception as e_dd:  # noqa: BLE001 — не валим сканирование
+                _append_log(run_id, "warn", f"Автослияние дублей пропущено: {e_dd}")
             _finish_run(run_id, "success")
             combined = dict(result)
             combined["disk_tracks"] = disk["tracks"]
@@ -1658,6 +1674,87 @@ def collab_build(*args, **kwargs):
         return {"status": "success", **res, "user_playlists": user_playlists}
     except Exception as e:  # noqa: BLE001
         logger.exception("collab_build failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
+def refresh_tastes(*args, **kwargs):
+    """Ночное автообновление вкусов по запомненным паролям (opt-in vault).
+
+    Для каждого UserCredential: расшифровать (ключ TASTE_VAULT_KEY) и прогнать
+    import_user_tastes. Без ключа — мягкий успех с пометкой (фича выключена).
+    """
+    run_id = args[0] if args else None
+    try:
+        from app.db.models import MediaUser, UserCredential
+        from app.services import vault as _vault
+        from app.services.taste_import import import_user_tastes
+
+        with session_scope() as db:
+            pairs = [(str(r.user_id), bytes(r.enc_password))
+                     for r in db.query(UserCredential).all()]
+        if run_id:
+            with session_scope() as db:
+                run = db.get(ScanRun, run_id)
+                if run:
+                    run.total_items = max(1, len(pairs))
+                    run.processed_items = 0
+        if not pairs:
+            msg = "Нет запомненных паролей — автообновление нечего делать (opt-in в карточке пользователя)"
+            if run_id:
+                _append_log(run_id, "info", msg)
+                _finish_run(run_id, "success")
+            return {"status": "success", "users": 0, "ok": 0, "note": msg}
+        if not _vault.vault_available():
+            msg = "TASTE_VAULT_KEY не задан — автообновление пропущено (пароли не расшифровать)"
+            if run_id:
+                _append_log(run_id, "warn", msg)
+                _finish_run(run_id, "success")
+            return {"status": "success", "users": len(pairs), "ok": 0, "note": msg}
+        ok = fail = 0
+        for idx, (uid, blob) in enumerate(pairs):
+            if _is_cancelled(run_id):
+                break
+            try:
+                password = _vault.decrypt_password(blob)
+            except Exception as e:
+                if run_id:
+                    _append_log(run_id, "warn", f"Сейф {uid[:8]} не открылся ({e}) — пропустите/перезапомните пароль")
+                fail += 1
+                continue
+            with session_scope() as db:
+                u = db.get(MediaUser, uid)
+                if not u:
+                    fail += 1
+                    continue
+                uname, sid = u.external_id, str(u.server_id)
+            try:
+                res = import_user_tastes(sid, uname, password)
+            except Exception as e:  # noqa: BLE001
+                res = {"status": "failure", "error": str(e)}
+            if res.get("status") == "success":
+                ok += 1
+                if run_id:
+                    _append_log(run_id, "info",
+                                f"{uname}: ★ всего {res.get('favorites_total')}, плейлистов {res.get('playlists')}")
+            else:
+                fail += 1
+                if run_id:
+                    _append_log(run_id, "warn", f"{uname}: {res.get('error')}")
+            if run_id:
+                with session_scope() as db:
+                    run = db.get(ScanRun, run_id)
+                    if run:
+                        run.processed_items = idx + 1
+        summary = f"Автообновление вкусов: ок {ok}, ошибок {fail} (пользователей {len(pairs)})"
+        if run_id:
+            _append_log(run_id, "info", summary)
+            _finish_run(run_id, "success")
+        return {"status": "success", "users": len(pairs), "ok": ok, "failed": fail}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("refresh_tastes failed: {}", e)
         if run_id:
             _append_log(run_id, "error", str(e))
             _finish_run(run_id, "failure", str(e))
