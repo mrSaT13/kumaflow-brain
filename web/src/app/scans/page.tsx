@@ -78,6 +78,7 @@ export default function ScansPage() {
   });
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [tab, setTab] = useState<"active" | "history" | "logs">("active");
 
   async function cancel(id: string) {
     if (!confirm("Отменить задачу? Воркер остановится на ближайшем чекпоинте.")) return;
@@ -127,97 +128,109 @@ export default function ScansPage() {
         }
       />
 
-      <Section title="Текущая задача">
-        <Card>
-          {(() => {
-            const cur = current?.current ?? null;
-            if (!cur) return <EmptyState message="Нет активных задач." />;
-            return (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-sm flex-wrap">
-                  <Activity className="w-4 h-4 text-muted" />
-                  <span className="font-medium">{PHASE_LABELS[cur.phase] ?? cur.phase}</span>
-                  <Badge tone={STATUS_TONE[cur.status]}>{STATUS_LABELS[cur.status]}</Badge>
-                  <span className="ml-auto text-xs text-muted">старт {fmtDate(cur.started_at)}</span>
-                  <Button
-                    variant="ghost"
-                    className="!text-rose-600 !border-rose-300"
-                    onClick={() => cancel(cur.id)}
-                    disabled={cancelling === cur.id}
-                  >
-                    <XCircle className="w-4 h-4" />
-                    {cancelling === cur.id ? "Отмена…" : "Отменить задание"}
-                  </Button>
-                </div>
-                <ProgressBar value={cur.processed_items} total={cur.total_items} />
-                <div className="text-xs text-muted">
-                  {cur.processed_items} / {cur.total_items}
-                </div>
-                {cur.error && (
-                  <div className="text-xs text-rose-600">{cur.error}</div>
-                )}
-              </div>
-            );
-          })()}
-        </Card>
-      </Section>
+      <div className="flex gap-1 mb-4 border-b border-border">
+        {(["active", "history", "logs"] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm border-b-2 -mb-px ${tab === t ? "border-accent text-text" : "border-transparent text-muted hover:text-text"}`}>
+            {t === "active" ? "Активные" : t === "history" ? "История" : "Логи"}
+          </button>
+        ))}
+      </div>
 
-      <Section title="История">
-        <div className="kuma-card overflow-hidden">
-          <div className="overflow-x-auto">
-          {(runs?.runs ?? []).length === 0 ? (
-            <EmptyState message="Задач ещё не было." />
-          ) : (
-            <table className="kuma-table w-full">
-              <thead>
-                <tr>
-                  <th>Фаза</th>
-                  <th>Статус</th>
-                  <th>Прогресс</th>
-                  <th>Старт</th>
-                  <th>Финиш</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs!.runs.map((r) => (
-                  <tr key={r.id} className={selectedRun === r.id ? "bg-surface" : ""}>
-                    <td className="font-medium">{PHASE_LABELS[r.phase] ?? r.phase}</td>
-                    <td>
-                      <Badge tone={STATUS_TONE[r.status]}>{STATUS_LABELS[r.status]}</Badge>
-                    </td>
-                    <td className="tabular-nums text-muted">
-                      {r.processed_items} / {r.total_items}
-                    </td>
-                    <td className="text-muted text-xs">{fmtDate(r.started_at)}</td>
-                    <td className="text-muted text-xs">{fmtDate(r.finished_at)}</td>
-                    <td className="text-right whitespace-nowrap">
-                      <button className="kuma-pill hover:text-text" onClick={() => setSelectedRun(r.id)}>
-                        <FileText className="w-3 h-3" /> логи
-                      </button>
-                      {(r.status === "queued" || r.status === "running") && (
-                        <button
-                          className="kuma-pill hover:text-rose-600 !border-rose-300 ml-2"
-                          onClick={() => cancel(r.id)}
-                          disabled={cancelling === r.id}
-                        >
-                          <XCircle className="w-3 h-3" />
-                          {cancelling === r.id ? "отмена…" : "отменить"}
-                        </button>
-                      )}
-                    </td>
+      {tab === "active" && (
+        <Section title="Текущая задача">
+          <Card>
+            {(() => {
+              const cur = current?.current ?? null;
+              if (!cur) return <EmptyState message="Нет активных задач." />;
+              return (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-sm flex-wrap">
+                    <Activity className="w-4 h-4 text-muted" />
+                    <span className="font-medium">{PHASE_LABELS[cur.phase] ?? cur.phase}</span>
+                    <Badge tone={STATUS_TONE[cur.status]}>{STATUS_LABELS[cur.status]}</Badge>
+                    <span className="ml-auto text-xs text-muted">старт {fmtDate(cur.started_at)}</span>
+                    <Button
+                      variant="ghost"
+                      className="!text-rose-600 !border-rose-300"
+                      onClick={() => cancel(cur.id)}
+                      disabled={cancelling === cur.id}
+                    >
+                      <XCircle className="w-4 h-4" />
+                      {cancelling === cur.id ? "Отмена…" : "Отменить задание"}
+                    </Button>
+                  </div>
+                  <ProgressBar value={cur.processed_items} total={cur.total_items} />
+                  <div className="text-xs text-muted">
+                    {cur.processed_items} / {cur.total_items}
+                  </div>
+                  {cur.error && <div className="text-xs text-rose-600">{cur.error}</div>}
+                </div>
+              );
+            })()}
+          </Card>
+        </Section>
+      )}
+
+      {tab === "history" && (
+        <Section title="История">
+          <div className="kuma-card overflow-hidden">
+            <div className="overflow-x-auto">
+            {(runs?.runs ?? []).length === 0 ? (
+              <EmptyState message="Задач ещё не было." />
+            ) : (
+              <table className="kuma-table w-full">
+                <thead>
+                  <tr>
+                    <th>Фаза</th>
+                    <th>Статус</th>
+                    <th>Прогресс</th>
+                    <th>Старт</th>
+                    <th>Финиш</th>
+                    <th></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+                </thead>
+                <tbody>
+                  {runs!.runs.map((r) => (
+                    <tr key={r.id} className={selectedRun === r.id ? "bg-surface" : ""}>
+                      <td className="font-medium">{PHASE_LABELS[r.phase] ?? r.phase}</td>
+                      <td>
+                        <Badge tone={STATUS_TONE[r.status]}>{STATUS_LABELS[r.status]}</Badge>
+                      </td>
+                      <td className="tabular-nums text-muted">
+                        {r.processed_items} / {r.total_items}
+                      </td>
+                      <td className="text-muted text-xs">{fmtDate(r.started_at)}</td>
+                      <td className="text-muted text-xs">{fmtDate(r.finished_at)}</td>
+                      <td className="text-right whitespace-nowrap">
+                        <button className="kuma-pill hover:text-text" onClick={() => { setSelectedRun(r.id); setTab("logs"); }}>
+                          <FileText className="w-3 h-3" /> логи
+                        </button>
+                        {(r.status === "queued" || r.status === "running") && (
+                          <button
+                            className="kuma-pill hover:text-rose-600 !border-rose-300 ml-2"
+                            onClick={() => cancel(r.id)}
+                            disabled={cancelling === r.id}
+                          >
+                            <XCircle className="w-3 h-3" />
+                            {cancelling === r.id ? "отмена…" : "отменить"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            </div>
           </div>
-        </div>
-      </Section>
+        </Section>
+      )}
 
-      <Section title="Логи">
-        <LogView runId={selectedRun} />
-      </Section>
+      {tab === "logs" && (
+        <Section title="Логи">
+          <LogView runId={selectedRun} />
+        </Section>
+      )}
     </>
   );
 }

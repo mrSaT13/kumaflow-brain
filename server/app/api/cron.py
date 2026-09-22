@@ -9,9 +9,25 @@ from app.services.queue import enqueue
 
 router = APIRouter()
 
+import uuid
+from datetime import datetime
+
+
+def _ensure_defaults(db: Session):
+    if db.query(CronJob).count() > 0:
+        return
+    for name, kind, expr in [
+        ("Daily per-user", "daily", "0 3 * * *"),
+        ("CLAP embed", "clap", "0 4 * * *"),
+        ("Cover GC 7d", "covers_gc", "0 5 * * 0"),
+    ]:
+        db.add(CronJob(id=str(uuid.uuid4()), name=name, kind=kind, cron_expr=expr, enabled=True))
+    db.commit()
+
 
 @router.get("/")
 def list_jobs(db: Session = Depends(get_db)):
+    _ensure_defaults(db)
     rows = db.query(CronJob).all()
     return {
         "jobs": [
@@ -28,10 +44,70 @@ def list_jobs(db: Session = Depends(get_db)):
     }
 
 
+@router.post("/")
+def create_job(payload: dict, db: Session = Depends(get_db)):
+    j = CronJob(
+        id=str(uuid.uuid4()),
+        name=payload.get("name") or payload.get("kind") or "job",
+        kind=payload.get("kind") or "custom",
+        cron_expr=payload.get("cron_expr") or "0 3 * * *",
+        enabled=bool(payload.get("enabled", True)),
+        payload=payload.get("payload"),
+    )
+    db.add(j)
+    db.commit()
+    return {"ok": True, "id": str(j.id)}
+
+
+@router.put("/{job_id}")
+def update_job(job_id: str, payload: dict, db: Session = Depends(get_db)):
+    j = db.get(CronJob, job_id)
+    if not j:
+        from fastapi import HTTPException
+        raise HTTPException(404, "not found")
+    for k in ("name", "kind", "cron_expr", "enabled", "payload"):
+        if k in payload:
+            setattr(j, k, payload[k])
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/{job_id}")
+def delete_job(job_id: str, db: Session = Depends(get_db)):
+    j = db.get(CronJob, job_id)
+    if j:
+        db.delete(j)
+        db.commit()
+    return {"ok": True}
+
+
 @router.post("/{job_id}/run")
 def run_now(job_id: str, db: Session = Depends(get_db)):
     j = db.get(CronJob, job_id)
     if not j:
         return {"queued": False, "error": "not found"}
+    # диспетчер по kind
+    kind = (j.kind or "").lower()
+    if kind == "daily":
+        from app.workers.tasks import daily_per_user
+
+        job = enqueue(daily_per_user, job_timeout=3600)
+        j.last_run_at = datetime.utcnow()
+        db.commit()
+        return {"queued": True, "job_id": job}
+    if kind == "clap":
+        from app.workers.tasks import clap_embed
+
+        job = enqueue(clap_embed, str(j.id), job_timeout=3600)
+        j.last_run_at = datetime.utcnow()
+        db.commit()
+        return {"queued": True, "job_id": job}
+    if kind == "covers_gc":
+        from app.services.covers import clear_expired
+
+        clear_expired()
+        j.last_run_at = datetime.utcnow()
+        db.commit()
+        return {"queued": True, "cleared": True}
     job = enqueue(lambda: None)
     return {"queued": True, "job_id": job}

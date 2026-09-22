@@ -5,7 +5,8 @@ Self-hosted music intelligence layer for your media server (Navidrome, Jellyfin,
 Индексирует библиотеку, делает настоящий sonic-анализ реальных аудиофайлов
 (темп, тональность, энергия, танцевальность, настроение — движок librosa,
 файлы берутся с диска worker'а или стримом из Navidrome),
-подтягивает тексты из открытых источников и генерирует ежедневные плейлисты.
+подтягивает тексты из открытых источников, CLAP-поиск по смыслу, Yandex-обогащение
+и генерирует ежедневные плейлисты per-user (копия логики мобильного KumaFlow: холодный старт, AI генератор, оркестратор волной).
 
 ## Структура
 
@@ -166,6 +167,14 @@ docker compose up -d --build
 
 ---
 
+## Что нового (копия с мобильного без вырезания)
+
+* **CLAP** `server/ml/download_clap.py` `laion/larger_clap_general 512-dim ~350MB` build-cache, `POST /api/scan/clap` backfill `TrackEmbedding`, `POST /api/analysis/search-by-text` `mode:embedding` (`voyager HNSW`) иначе `keyword`.
+* **Per-user cold start** `GET /api/analysis/cold-start?user_id=&n=30` `PlayHistory/Favorite` как `ml_store.dart` + `0.6 floor`, `POST /api/playlists/generate-daily {user_id,query}` волна `orchestrator.py` + `POST /api/playlists/ai-generate {query}` (копия `ai_mix_service.dart`).
+* **Крон** `CronJob 0 3 * * * daily per-user` `APScheduler` в `rq_worker`, `GET/POST /api/cron`, `cover GC`, `clap`.
+* **Картинки как на мобиле** `covers.py` `size-aware` `ETag Cache-Control 7d max 2GB LRU magic bytes` `web prefetch batch 8` `ImageCacheService` style.
+* **Ollama Cloud parity** `server/app/services/ai.py` `api/chat Bearer` как `ai_service.dart:209` + `/api/tags` + `POST /api/settings/ai/pull`.
+
 ## Переменные окружения
 
 | Файл | Назначение |
@@ -173,6 +182,8 @@ docker compose up -d --build
 | `.env` (корень) | весь стек в `docker-compose.yml` на сервере |
 | `server/.env` | только локальный запуск без Docker и `deploy/docker-compose.yml` |
 | `web/.env.local` | только локальный `npm run dev` (по умолчанию не нужен — работает прокси `/api → backend`) |
+
+Новые: `MUTAGEN_WRITEBACK` (писать mood в файлы), `YANDEX_MUSIC_TOKEN/THROTTLE`, `CLAP_ENABLED`, `ANALYSIS_MAX_TRACKS_PER_RUN=0` (пачками всю).
 
 В контейнерах Postgres используется принудительно (`DB_URL_OVERRIDE=""`),
 sqlite-файл в Docker не используется — данные живут в volume `pgdata`.

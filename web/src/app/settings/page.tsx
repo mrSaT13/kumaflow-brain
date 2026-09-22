@@ -222,13 +222,21 @@ export default function SettingsPage() {
     }
   }
 
+  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "diag">("connections");
   const rt = (data?.runtime ?? {}) as Record<string, unknown>;
 
   return (
     <>
       <PageHeader title="Настройки" subtitle="Подключения, токены и провайдеры" />
+      <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
+        {(["connections", "ai", "bridge", "diag"] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm border-b-2 -mb-px whitespace-nowrap ${tab === t ? "border-accent text-text" : "border-transparent text-muted hover:text-text"}`}>
+            {t === "connections" ? "Подключения" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : "Диагностика"}
+          </button>
+        ))}
+      </div>
 
-      <Section title="Медиа-сервер">
+      {tab === "connections" && <Section title="Медиа-сервер">
         <Card>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <label className="block">
@@ -269,8 +277,9 @@ export default function SettingsPage() {
           </div>
         </Card>
       </Section>
+      )}
 
-      <Section title="AI — провайдер и модели">
+      {tab === "ai" && <Section title="AI — провайдер и модели">
         <Card>
           <div className="text-sm text-muted mb-3">
             Статус:{" "}
@@ -372,8 +381,9 @@ export default function SettingsPage() {
           )}
         </Card>
       </Section>
+      )}
 
-      <Section title="Диагностика">
+      {tab === "diag" && <Section title="Диагностика">
         <Card>
           {!data ? (
             <div className="text-sm text-muted">Загрузка… (если висит — проверьте, что backend доступен через /api)</div>
@@ -400,9 +410,9 @@ export default function SettingsPage() {
             </div>
           )}
         </Card>
-      </Section>
+      </Section>}
 
-      <Section title="Мост метаданных (MusicBrainz / Last.fm)">
+      {tab === "bridge" && <Section title="Мост метаданных (MusicBrainz / Last.fm)">
         <Card>
           <div className="text-sm text-muted mb-3">
             Статус:{" "}

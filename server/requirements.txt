@@ -26,6 +26,7 @@ voyager==2.0.1
 huggingface_hub==0.26.2
 transformers==4.46.3
 tokenizers==0.20.3
+apscheduler==3.10.4
 
 beautifulsoup4==4.12.3
 requests==2.32.3

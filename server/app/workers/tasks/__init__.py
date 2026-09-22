@@ -1529,6 +1529,93 @@ def clap_embed(*args, **kwargs):
         return {"status": "failure", "error": str(e)}
 
 
+def daily_per_user(*args, **kwargs):
+    """Крон 03:00 per-user: генерирует KumaFlow Daily для каждого MediaUser (копия mobile daily)."""
+    run_id = args[0] if args else None
+    try:
+        from app.db.models import MediaUser, Playlist, PlaylistTrack
+        from app.services.ml import cold_start_playlist
+        from app.services.orchestrator import create_energy_wave
+        from app.services.media_server import resolve_active_server
+
+        with session_scope() as db:
+            server = resolve_active_server(db)
+            users = db.query(MediaUser).filter_by(server_id=server.id).all()
+            db.commit()
+        total = max(1, len(users))
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            if run:
+                run.total_items = total
+                run.processed_items = 0
+        ok = 0
+        for idx, u in enumerate(users):
+            if _is_cancelled(run_id):
+                break
+            try:
+                # используем API логику generate-daily per-user
+                from datetime import date, datetime
+                import uuid as _uuid
+
+                today = date.today()
+                with session_scope() as db:
+                    # удалить старый daily этого юзера
+                    old = db.query(Playlist).filter(Playlist.is_auto_generated.is_(True), Playlist.server_id == users[0].server_id, Playlist.owner_user_id == u.id).all()
+                    for p in old:
+                        if p.generated_for_date and p.generated_for_date.date() >= today:
+                            db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
+                            db.delete(p)
+                    db.flush()
+                    p = Playlist(id=str(_uuid.uuid4()), server_id=u.server_id, owner_user_id=u.id, name=f"KumaFlow Daily · {today.isoformat()}", is_auto_generated=True, generated_for_date=datetime.combine(today, datetime.min.time()))
+                    db.add(p)
+                    db.flush()
+                    res = cold_start_playlist(str(u.server_id), n=30, user_id=str(u.id))
+                    tids = res.get("tracks") or []
+                    # волна
+                    try:
+                        tracks = [db.get(Track, tid) for tid in tids]
+                        tracks = [t for t in tracks if t]
+                        waved = create_energy_wave(tracks)
+                        order = {str(t.id): i for i, t in enumerate(waved)}
+                        tids = sorted(tids, key=lambda tid: order.get(tid, 999))
+                    except Exception:
+                        pass
+                    for pos, tid in enumerate(tids):
+                        db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+                    ok += 1
+                _append_log(run_id, "info", f"Daily {u.username}: {len(tids)} треков")
+            except Exception as e:
+                _append_log(run_id, "warn", f"Daily {u.username} fail: {e}")
+            with session_scope() as db:
+                run = db.get(ScanRun, run_id) if run_id else None
+                if run:
+                    run.processed_items = idx + 1
+        # fallback если юзеров нет — один глобальный daily
+        if not users:
+            with session_scope() as db:
+                server = resolve_active_server(db)
+                from datetime import date, datetime
+                import uuid as _uuid
+
+                today = date.today()
+                p = Playlist(id=str(_uuid.uuid4()), server_id=server.id, name=f"KumaFlow Daily · {today.isoformat()}", is_auto_generated=True, generated_for_date=datetime.combine(today, datetime.min.time()))
+                db.add(p)
+                db.flush()
+                res = cold_start_playlist(str(server.id), n=30)
+                for pos, tid in enumerate(res.get("tracks") or []):
+                    db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+                ok = 1
+        _append_log(run_id, "info", f"Daily per-user готово: {ok}/{total}")
+        _finish_run(run_id, "success")
+        return {"status": "success", "users": total, "ok": ok}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("daily_per_user failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
 def collab_build(*args, **kwargs):
     """Коллаборативный проход: синхронизация пользователей Navidrome.
 

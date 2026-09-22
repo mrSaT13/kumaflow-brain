@@ -14,15 +14,22 @@ import {
   Activity,
 } from "lucide-react";
 
-const items = [
-  { href: "/", label: "Главная", icon: LayoutDashboard },
-  { href: "/library", label: "Библиотека", icon: Library },
-  { href: "/playlists", label: "Плейлисты", icon: ListMusic },
-  { href: "/scans", label: "Задачи и логи", icon: Activity },
-  { href: "/users", label: "Пользователи", icon: Users },
-  { href: "/settings", label: "Настройки", icon: Cog },
-  { href: "/history", label: "История", icon: History },
+const sections: { title: string; items: typeof items }[] = [
+  { title: "Библиотека", items: [
+    { href: "/", label: "Главная", icon: LayoutDashboard },
+    { href: "/library", label: "Библиотека", icon: Library },
+    { href: "/playlists", label: "Плейлисты", icon: ListMusic },
+  ]},
+  { title: "Задачи", items: [
+    { href: "/scans", label: "Задачи и логи", icon: Activity },
+    { href: "/history", label: "История", icon: History },
+  ]},
+  { title: "Управление", items: [
+    { href: "/users", label: "Пользователи", icon: Users },
+    { href: "/settings", label: "Настройки", icon: Cog },
+  ]},
 ];
+const items = sections.flatMap(s => s.items);
 
 export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => void } = {}) {
   // usePathname() может вернуть null на первом клиентском рендере —
@@ -43,24 +50,31 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
           <div className="text-[11px] text-muted">brain · v0.1.0</div>
         </div>
       </div>
-      <nav suppressHydrationWarning className="flex-1 px-3 space-y-1">
-        {items.map((it) => {
-          const active = mounted ? pathname === it.href || (it.href !== "/" && pathname.startsWith(it.href)) : false;
-          const Icon = it.icon;
-          return (
-            <Link
-              key={it.href}
-              href={it.href as any}
-              className={clsx(
-                "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors",
-                active ? "bg-surface text-text" : "text-muted hover:text-text hover:bg-surface/60",
-              )}
-            >
-              <Icon className="w-4 h-4" />
-              {it.label}
-            </Link>
-          );
-        })}
+      <nav suppressHydrationWarning className="flex-1 px-3 space-y-3 overflow-y-auto">
+        {sections.map((sec) => (
+          <div key={sec.title}>
+            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted">{sec.title}</div>
+            <div className="space-y-1">
+              {sec.items.map((it) => {
+                const active = mounted ? pathname === it.href || (it.href !== "/" && pathname.startsWith(it.href)) : false;
+                const Icon = it.icon;
+                return (
+                  <Link
+                    key={it.href}
+                    href={it.href as any}
+                    className={clsx(
+                      "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors",
+                      active ? "bg-surface text-text" : "text-muted hover:text-text hover:bg-surface/60",
+                    )}
+                  >
+                    <Icon className="w-4 h-4" />
+                    {it.label}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </nav>
       <div className="px-6 py-4 text-[11px] text-muted">made with ♥ для аудиофилов</div>
     </aside>
@@ -77,25 +91,32 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
               </div>
               <button onClick={onClose} className="ml-auto kuma-pill text-xs">✕</button>
             </div>
-            <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-              {items.map((it) => {
-                const active = mounted ? pathname === it.href || (it.href !== "/" && pathname.startsWith(it.href)) : false;
-                const Icon = it.icon;
-                return (
-                  <Link
-                    key={it.href}
-                    href={it.href as any}
-                    onClick={onClose}
-                    className={clsx(
-                      "flex items-center gap-3 px-3 py-3 rounded-lg text-[15px] transition-colors",
-                      active ? "bg-surface text-text" : "text-muted hover:text-text hover:bg-surface/60",
-                    )}
-                  >
-                    <Icon className="w-5 h-5" />
-                    {it.label}
-                  </Link>
-                );
-              })}
+            <nav className="flex-1 px-3 py-4 space-y-4 overflow-y-auto">
+              {sections.map((sec) => (
+                <div key={sec.title}>
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted">{sec.title}</div>
+                  <div className="space-y-1">
+                    {sec.items.map((it) => {
+                      const active = mounted ? pathname === it.href || (it.href !== "/" && pathname.startsWith(it.href)) : false;
+                      const Icon = it.icon;
+                      return (
+                        <Link
+                          key={it.href}
+                          href={it.href as any}
+                          onClick={onClose}
+                          className={clsx(
+                            "flex items-center gap-3 px-3 py-3 rounded-lg text-[15px] transition-colors",
+                            active ? "bg-surface text-text" : "text-muted hover:text-text hover:bg-surface/60",
+                          )}
+                        >
+                          <Icon className="w-5 h-5" />
+                          {it.label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </nav>
           </aside>
         </div>

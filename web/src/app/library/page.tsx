@@ -60,6 +60,19 @@ export default function LibraryPage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  // prefetch обложек как на мобиле batch 8 (SafeImageCacheManager warm)
+  useEffect(() => {
+    if (!data?.items?.length) return;
+    const ids = data.items.slice(0, 20).map((t: Track) => t.id);
+    // тихо префетчим track covers (server кэширует + 304)
+    ids.forEach((id) => {
+      const img = new Image();
+      img.src = api.trackCoverUrl(id, 100);
+    });
+    // также дергаем server prefetch для артистов (фон)
+    api.prefetchCovers().catch(() => {});
+  }, [data?.items]);
+
   async function syncReal() {
     if (isRunning) {
       alert(`Уже выполняется: ${current?.current?.phase} — подождите`);
