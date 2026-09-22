@@ -51,6 +51,7 @@ export type Playlist = {
   in_navidrome?: boolean;
   is_public: boolean;
   is_auto_generated: boolean;
+  is_hidden?: boolean;
   generated_for_date?: string | null;
   track_count: number;
   created_at: string;
@@ -180,9 +181,11 @@ export const api = {
       `/api/playlists/ai-generate`,
       { method: "POST", body: JSON.stringify({ query, n, user_id }) },
     ),
-  listPlaylists: () => http<{ playlists: Playlist[] }>(`/api/playlists/`),
+  listPlaylists: (show_hidden = false) => http<{ playlists: Playlist[]; hidden_count?: number }>(`/api/playlists/${show_hidden ? "?show_hidden=true" : ""}`),
   getPlaylist: (id: string) => http<Playlist & { tracks: PlaylistTrackDetail[] }>(`/api/playlists/${id}`),
   deletePlaylist: (id: string) => http<{ ok: boolean }>(`/api/playlists/${id}`, { method: "DELETE" }),
+  hidePlaylist: (id: string) => http<{ ok: boolean }>(`/api/playlists/${id}/hide`, { method: "POST" }),
+  unhidePlaylist: (id: string) => http<{ ok: boolean }>(`/api/playlists/${id}/unhide`, { method: "POST" }),
   exportPlaylist: (id: string) =>
     http<{ ok: boolean; navidrome_id?: string; exported?: number; skipped?: number; error?: string }>(
       `/api/playlists/${id}/export`,

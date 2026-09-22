@@ -3,19 +3,32 @@
 import useSWR from "swr";
 import Link from "next/link";
 import { useState } from "react";
-import { ListMusic, Play, RefreshCw, Send, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { ListMusic, Play, RefreshCw, Send, Sparkles, Trash2, Wand2, Eye, EyeOff, Search } from "lucide-react";
 import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/components/ui";
 import { api } from "@/lib/api";
 import { fmtDate } from "@/lib/format";
 
 export default function PlaylistsPage() {
-  const { data, mutate } = useSWR("/api/playlists", () => api.listPlaylists(), { refreshInterval: 4000 });
+  const [showHidden, setShowHidden] = useState(false);
+  const { data, mutate } = useSWR(["/api/playlists", showHidden], () => api.listPlaylists(showHidden), { refreshInterval: 4000 });
   const { data: usersData } = useSWR("/api/users", () => api.listUsers());
   const [busy, setBusy] = useState(false);
   const [coldUser, setColdUser] = useState("");
   const [coldN, setColdN] = useState(30);
   const [aiQuery, setAiQuery] = useState("");
+  const [plQuery, setPlQuery] = useState("");
+  const [plFilter, setPlFilter] = useState<"all" | "auto" | "manual" | "hidden">("all");
   const [lastSteps, setLastSteps] = useState<{ step: number; name: string; items: number }[] | null>(null);
+
+  const visiblePlaylists = (data?.playlists ?? []).filter((p) => {
+    if (plFilter === "auto" && !p.is_auto_generated) return false;
+    if (plFilter === "manual" && p.is_auto_generated) return false;
+    if (plFilter === "hidden" && !p.is_hidden) return false;
+    if (plFilter !== "hidden" && !showHidden && p.is_hidden) return false;
+    const q = plQuery.trim().toLowerCase();
+    if (q && !p.name.toLowerCase().includes(q)) return false;
+    return true;
+  });
 
   async function generate() {
     setBusy(true);
@@ -75,6 +88,16 @@ export default function PlaylistsPage() {
   async function del(id: string) {
     if (!confirm("Удалить плейлист? (копия в Navidrome тоже будет удалена, если выгружалась)")) return;
     await api.deletePlaylist(id);
+    mutate();
+  }
+
+  async function hide(id: string) {
+    await api.hidePlaylist(id);
+    mutate();
+  }
+
+  async function unhide(id: string) {
+    await api.unhidePlaylist(id);
     mutate();
   }
 
@@ -202,13 +225,29 @@ export default function PlaylistsPage() {
         </Card>
       </Section>
 
-      <Section title={`Всего плейлистов: ${data?.playlists.length ?? 0}`}>
-        {(data?.playlists ?? []).length === 0 ? (
-          <EmptyState message="Плейлистов ещё нет. Нажмите «Пройти холодный старт»." />
+      <Section title={`Всего плейлистов: ${data?.playlists.length ?? 0}${(data?.hidden_count ?? 0) > 0 ? ` · скрыто ${data?.hidden_count}` : ""}`}>
+        <div className="flex flex-col sm:flex-row gap-2 mb-3">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+            <Input className="pl-9" placeholder="Поиск плейлиста…" value={plQuery} onChange={(e) => setPlQuery(e.target.value)} />
+          </div>
+          <select className="kuma-input kuma-input-inline sm:w-44" value={plFilter} onChange={(e) => setPlFilter(e.target.value as typeof plFilter)}>
+            <option value="all">Все типы</option>
+            <option value="auto">Только auto</option>
+            <option value="manual">Только manual</option>
+            <option value="hidden">Только скрытые</option>
+          </select>
+          <label className="flex items-center gap-2 text-sm text-muted whitespace-nowrap">
+            <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
+            показать скрытые
+          </label>
+        </div>
+        {visiblePlaylists.length === 0 ? (
+          <EmptyState message={(data?.playlists ?? []).length === 0 ? "Плейлистов ещё нет. Нажмите «Пройти холодный старт»." : "Ничего не найдено — поменяйте поиск или фильтр."} />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {(data?.playlists ?? []).map((p) => (
-              <Card key={p.id} className="flex flex-col gap-3">
+            {visiblePlaylists.map((p) => (
+              <Card key={p.id} className={`flex flex-col gap-3 ${p.is_hidden ? "opacity-60" : ""}`}>
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="font-medium flex items-center gap-2">
@@ -224,6 +263,7 @@ export default function PlaylistsPage() {
                       {p.is_auto_generated ? "auto" : "manual"}
                     </Badge>
                     {p.in_navidrome && <Badge tone="ok">в Navidrome</Badge>}
+                    {p.is_hidden && <Badge tone="warn">скрыт</Badge>}
                   </div>
                 </div>
                 <div className="flex gap-2 flex-wrap">
@@ -233,6 +273,15 @@ export default function PlaylistsPage() {
                   <button className="kuma-pill hover:text-text" onClick={() => exportOne(p.id, p.name)} disabled={busy}>
                     <Send className="w-3 h-3" /> {p.in_navidrome ? "обновить в Navidrome" : "в Navidrome"}
                   </button>
+                  {p.is_hidden ? (
+                    <button className="kuma-pill hover:text-text" onClick={() => unhide(p.id)}>
+                      <Eye className="w-3 h-3" /> показать
+                    </button>
+                  ) : (
+                    <button className="kuma-pill hover:text-text" onClick={() => hide(p.id)}>
+                      <EyeOff className="w-3 h-3" /> скрыть
+                    </button>
+                  )}
                   <button className="kuma-pill hover:text-text" onClick={() => del(p.id)}>
                     <Trash2 className="w-3 h-3" /> удалить
                   </button>

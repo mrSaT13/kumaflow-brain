@@ -24,6 +24,16 @@ class GenerateIn(BaseModel):
     query: str | None = None  # если указан — AI генератор (копия mobile ai_mix_service)
 
 
+def _hidden_ids(db: Session) -> set[str]:
+    """Скрытые плейлисты (AppSetting, без миграции — id списком)."""
+    from app.db.models import AppSetting
+
+    row = db.get(AppSetting, "hidden_playlists")
+    val = row.value if row and isinstance(row.value, dict) else {}
+    ids = val.get("ids") or []
+    return {str(x) for x in ids if x}
+
+
 def _to_dict(p: Playlist, db: Session) -> dict:
     count = (
         db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).count()
@@ -40,14 +50,59 @@ def _to_dict(p: Playlist, db: Session) -> dict:
         ),
         "track_count": count,
         "created_at": p.created_at.isoformat() if p.created_at else None,
+        "is_hidden": str(p.id) in _hidden_ids(db),
     }
 
 
 @router.get("", include_in_schema=False)
 @router.get("/")
-def list_playlists(db: Session = Depends(get_db)):
-    rows = db.query(Playlist).order_by(Playlist.created_at.desc()).limit(100).all()
-    return {"playlists": [_to_dict(p, db) for p in rows]}
+def list_playlists(show_hidden: bool = False, db: Session = Depends(get_db)):
+    rows = db.query(Playlist).order_by(Playlist.created_at.desc()).limit(200).all()
+    hidden = _hidden_ids(db)
+    items = [_to_dict(p, db) for p in rows]
+    if not show_hidden:
+        items = [it for it in items if it["id"] not in hidden]
+    return {"playlists": items, "hidden_count": len(hidden)}
+
+
+@router.post("/{playlist_id}/hide")
+def hide_playlist(playlist_id: str, db: Session = Depends(get_db)):
+    """Скрыть из списка (не удаляет, открывает по прямой ссылке)."""
+    from app.db.models import AppSetting
+
+    try:
+        uuid.UUID(playlist_id)
+    except ValueError:
+        raise HTTPException(400, "invalid id")
+    if not db.get(Playlist, playlist_id):
+        raise HTTPException(404, "not found")
+    row = db.get(AppSetting, "hidden_playlists")
+    ids = {str(playlist_id)} | _hidden_ids(db)
+    value = {"ids": sorted(ids)}
+    if row is None:
+        db.add(AppSetting(key="hidden_playlists", value=value))
+    else:
+        row.value = value
+    db.commit()
+    return {"ok": True, "is_hidden": True}
+
+
+@router.post("/{playlist_id}/unhide")
+def unhide_playlist(playlist_id: str, db: Session = Depends(get_db)):
+    from app.db.models import AppSetting
+
+    try:
+        uuid.UUID(playlist_id)
+    except ValueError:
+        raise HTTPException(400, "invalid id")
+    row = db.get(AppSetting, "hidden_playlists")
+    ids = _hidden_ids(db) - {str(playlist_id)}
+    if row is None:
+        db.add(AppSetting(key="hidden_playlists", value={"ids": sorted(ids)}))
+    else:
+        row.value = {"ids": sorted(ids)}
+    db.commit()
+    return {"ok": True, "is_hidden": False}
 
 
 @router.get("/{playlist_id}")
