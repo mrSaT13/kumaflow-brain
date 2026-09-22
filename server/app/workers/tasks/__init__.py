@@ -1476,6 +1476,59 @@ def yandex_enrich(*args, **kwargs):
         return {"status": "failure", "error": str(e)}
 
 
+def clap_embed(*args, **kwargs):
+    """Backfill CLAP эмбеддингов: текст -> TrackEmbedding (для search-by-text).
+
+    Если модели нет — тихо skip (keyword fallback остаётся). Пишет 512-дим vec в TrackEmbedding.
+    """
+    run_id = args[0] if args else None
+    try:
+        from app.db.models import TrackEmbedding
+        from app.services.clap import get_text_embedding, is_available
+
+        if not is_available():
+            msg = "CLAP модель не найдена (server/ml/models/*.onnx) — пропуск, keyword поиск работает. Запустите python ml/download_clap.py"
+            _append_log(run_id, "warn", msg)
+            _finish_run(run_id, "success")
+            return {"status": "success", "skipped": True, "reason": msg}
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            total = db.query(Track).count()
+            if run:
+                run.total_items = total
+                run.processed_items = 0
+            have = db.query(TrackEmbedding.track_id).filter(TrackEmbedding.model == "clap_text").subquery()
+            todos = db.query(Track).filter(~Track.id.in_(db.query(have.c.track_id))).all()
+            _append_log(run_id, "info", f"CLAP embed: {len(todos)}/{total} без эмбеддингов (512-dim)")
+            ok = 0
+            for idx, t in enumerate(todos):
+                if _is_cancelled(run_id):
+                    break
+                text = f"{t.artist_name or ''} {t.title or ''} {t.genre or ''}".strip()
+                vec = get_text_embedding(text)
+                if vec:
+                    import struct
+
+                    blob = np.array(vec, dtype=np.float32).tobytes()  # type: ignore
+                    db.add(TrackEmbedding(track_id=t.id, model="clap_text", dim=len(vec), vector=blob))
+                    ok += 1
+                if run:
+                    run.processed_items = idx + 1
+                if (idx + 1) % 100 == 0:
+                    _append_log(run_id, "info", f"CLAP {idx+1}/{len(todos)} ok:{ok}")
+                    db.commit()
+            db.commit()
+        _append_log(run_id, "info", f"CLAP готово ok:{ok}")
+        _finish_run(run_id, "success")
+        return {"status": "success", "ok": ok}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("clap_embed failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
 def collab_build(*args, **kwargs):
     """Коллаборативный проход: синхронизация пользователей Navidrome.
 

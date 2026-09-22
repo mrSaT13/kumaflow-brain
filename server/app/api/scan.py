@@ -21,6 +21,7 @@ from app.workers.tasks import (
     lyrics_fetch,
     cluster_build,
     collab_build,
+    clap_embed,
 )
 
 logger = get_logger("api.scan")
@@ -130,6 +131,12 @@ def start_clusters(db: Session = Depends(get_db)):
 @router.post("/collab")
 def start_collab(db: Session = Depends(get_db)):
     run = _start_run("collab", collab_build, db, job_timeout=900)
+    return {"queued": True, "run_id": str(run.id)}
+
+
+@router.post("/clap")
+def start_clap(db: Session = Depends(get_db)):
+    run = _start_run("clap", clap_embed, db, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 

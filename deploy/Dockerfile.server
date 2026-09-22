@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Сначала только зависимости — слой кэшируется, пока не меняется requirements.
 COPY server/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+# CLAP модель кэшируем отдельно (build-cache): если ml/models уже скачана — skip
+COPY server/ml /app/ml
+RUN python -m ml.download_clap || echo "clap download skipped (offline build)"
 
 # Затем код. Мусор (.venv, *.db, логи, кэш) отсекается корневым .dockerignore.
 COPY server/app /app/app

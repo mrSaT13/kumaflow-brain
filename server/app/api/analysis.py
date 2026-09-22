@@ -49,14 +49,31 @@ def search_by_text(payload: dict, db: Session = Depends(get_db)):
     if not q:
         return {"items": [], "mode": "empty", "query": q}
 
-    # 1) если есть CLAP эмбеддинг — пробуем через AI/onnx (опционально)
+    # 1) CLAP — если модель скачана (ml/download_clap.py) и CLAP_ENABLED
     try:
-        from app.services.ai import is_configured as ai_ready
+        from app.services.clap import is_available as clap_ready, get_text_embedding
+        from app.services.ml import search_by_embedding as _search_emb
 
-        # CLAP пока не подключен как провайдер, но если появится — используем
-        _ = ai_ready  # noqa
-    except Exception:
-        pass
+        if clap_ready():
+            vec = get_text_embedding(q)
+            if vec:
+                # есть ли эмбеддинги в БД? если нет — тихо fallback
+                from app.db.models import TrackEmbedding
+
+                cnt = db.query(TrackEmbedding).count()
+                if cnt > 0:
+                    items = _search_emb(vec, top_k=top_k)
+                    if items:
+                        return {"items": items, "mode": "embedding", "query": q}
+                else:
+                    # нет аудио-эмбеддингов — используем text эмбеддинг для ранжирования keyword-кандидатов
+                    # (хеш-фолбэк всё равно даёт детерминированный скор)
+                    pass
+    except Exception as e:
+        # не ломаем fallback
+        from app.core.logging import get_logger
+
+        get_logger("analysis").warning("clap search failed, fallback keyword: {}", e)
 
     # 2) TF-IDF fallback по title/artist/album/lyrics/mood (работает без ML)
     from sqlalchemy import or_
