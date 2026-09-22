@@ -5,9 +5,10 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { FileText, Sparkles } from "lucide-react";
-import { Badge, Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
+import { Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
 import { api, type Track } from "@/lib/api";
 import { fmtDuration } from "@/lib/format";
+import { moodLook } from "@/lib/moodStyle";
 
 export default function TrackPage() {
   const params = useParams<{ id: string }>();
@@ -128,13 +129,27 @@ export default function TrackPage() {
         </Card>
 
         <Card className="lg:col-span-1">
-          <div className="text-xs uppercase tracking-wider text-muted mb-2">Настроение</div>
+          <div className="text-xs uppercase tracking-wider text-muted mb-3">Настроение</div>
           {data.moods && data.moods.length ? (
-            <div className="flex flex-wrap gap-2">
-              {data.moods.map((m) => (
-                <Badge key={m} tone="info">{m}</Badge>
-              ))}
-            </div>
+            <>
+              <div className="flex flex-wrap gap-2">
+                {data.moods.map((m) => {
+                  const look = moodLook(m);
+                  const MIcon = look.icon;
+                  return (
+                    <span
+                      key={m}
+                      className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-white shadow-sm"
+                      style={{ background: look.bg }}
+                    >
+                      <MIcon className="w-4 h-4" />
+                      {m}
+                    </span>
+                  );
+                })}
+              </div>
+              <MoodMeters features={f} />
+            </>
           ) : (
             <EmptyState message="Настроение появится после AI-анализа текста." />
           )}
@@ -182,6 +197,34 @@ export default function TrackPage() {
         </Card>
       </div>
     </>
+  );
+}
+
+function MoodMeters({ features }: { features: Record<string, number | string | null> }) {
+  const meters = [
+    { key: "energy", label: "Энергия", bar: "linear-gradient(90deg,#f59e0b,#ef4444)" },
+    { key: "valence", label: "Позитив", bar: "linear-gradient(90deg,#34d399,#fbbf24)" },
+    { key: "danceability", label: "Танцевальность", bar: "linear-gradient(90deg,#ec4899,#8b5cf6)" },
+  ].map((m) => {
+    const raw = features[m.key];
+    return { ...m, value: typeof raw === "number" ? Math.min(1, Math.max(0, raw)) : null };
+  }).filter((m) => m.value !== null);
+  if (meters.length === 0) return null;
+  return (
+    <div className="mt-4 space-y-2.5">
+      <div className="text-xs uppercase tracking-wider text-muted">Характер трека</div>
+      {meters.map((m) => (
+        <div key={m.key}>
+          <div className="flex items-center justify-between text-xs mb-1">
+            <span className="text-muted">{m.label}</span>
+            <span className="tabular-nums font-medium">{Math.round((m.value ?? 0) * 100)}%</span>
+          </div>
+          <div className="h-2 rounded-full bg-border overflow-hidden">
+            <div className="h-full rounded-full transition-all" style={{ width: `${Math.round((m.value ?? 0) * 100)}%`, background: m.bar }} />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
