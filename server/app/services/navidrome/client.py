@@ -208,6 +208,23 @@ class SubsonicClient:
         )
         return (r.get("songsByGenre") or {}).get("song", []) or []
 
+    async def get_similar_songs2(self, song_id: str, count: int = 20) -> list[dict[str, Any]]:
+        """Похожие песни через ID3 (как mobile getSimilarSongs2).
+
+        Требует Last.fm на стороне Navidrome — без него сервер отвечает
+        ошибкой или пусто (иногда после долгого ожидания). Пусто/ошибка —
+        возвращаем [], вызывающий код решает (таймаут + негативный кэш).
+        Ответ: similarSongs2.song (список либо один объект).
+        """
+        try:
+            r = await self._call("getSimilarSongs2", {"id": song_id, "count": count})
+        except SubsonicError:
+            return []
+        songs = (r.get("similarSongs2") or {}).get("song", []) or []
+        if isinstance(songs, dict):
+            return [songs]
+        return [s for s in songs if isinstance(s, dict)]
+
     async def get_starred2(self, music_folder_id: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if music_folder_id:

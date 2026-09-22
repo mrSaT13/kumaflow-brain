@@ -98,16 +98,14 @@ def ai_test(payload: dict | None = None):
 @router.get("/ai/models")
 def ai_models():
     """Список моделей (если поддерживается провайдером)."""
-    s = get_settings()
+    from app.services.ai_config import effective_ai
+
+    eff = effective_ai()
     models = ai.available_models()
+    provider = (eff.get("provider") or "NONE").upper()
     return {
-        "provider": s.ai_provider,
-        "configured_model": (
-            s.ollama_cloud_model if s.ai_provider == "OLLAMA_CLOUD"
-            else s.ollama_model_name if s.ai_provider == "OLLAMA"
-            else s.openai_model_name if s.ai_provider == "OPENAI"
-            else ""
-        ),
+        "provider": provider,
+        "configured_model": eff.get("model") or "",
         "available": models,
     }
 

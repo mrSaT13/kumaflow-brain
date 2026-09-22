@@ -117,3 +117,10 @@ body {
   .kuma-card { border-radius: 12px; }
   .kuma-table th, .kuma-table td { padding: 10px 12px; font-size: 13px; }
 }
+/* инлайн-инпуты в шапках (Библиотека и т.п.): не растягивать на всю строку.
+   .kuma-input по умолчанию width:100% — в flex-шапке каждый такой элемент
+   занимал бы отдельную строку (баг «библиотека съехала»). */
+.kuma-input-inline { width: auto !important; flex: 0 1 auto; min-width: 0; }
+@media (max-width: 768px) {
+  .kuma-input-inline { width: 100% !important; flex: 1 1 100%; }
+}

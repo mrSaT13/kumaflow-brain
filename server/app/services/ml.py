@@ -46,18 +46,24 @@ logger = get_logger("ml")
 def _feature_vector(t: Track, f: TrackFeatures | None):
     if not _HAS_NP or f is None:
         return None
-    vals = [
-        float(f.tempo_bpm or 0.0) / 200.0,
-        float(f.energy or 0.0),
-        float(f.danceability or 0.0),
-        float(f.valence or 0.0),
-        float(f.arousal or 0.0),
-        (float(f.loudness_db) + 30.0) / 30.0,
-        float(f.spectral_centroid or 0.0) / 4000.0,
-        float(f.spectral_rolloff or 0.0) / 7000.0,
-        float(f.zero_crossing_rate or 0.0) / 0.15,
-    ]
-    return np.array(vals, dtype=np.float32)
+    try:
+        vals = [
+            float(f.tempo_bpm if f.tempo_bpm is not None else 0.0) / 200.0,
+            float(f.energy if f.energy is not None else 0.0),
+            float(f.danceability if f.danceability is not None else 0.0),
+            float(f.valence if f.valence is not None else 0.0),
+            float(f.arousal if f.arousal is not None else 0.0),
+            (float(f.loudness_db if f.loudness_db is not None else -20.0) + 30.0) / 30.0,
+            float(f.spectral_centroid if f.spectral_centroid is not None else 0.0) / 4000.0,
+            float(f.spectral_rolloff if f.spectral_rolloff is not None else 0.0) / 7000.0,
+            float(f.zero_crossing_rate if f.zero_crossing_rate is not None else 0.0) / 0.15,
+        ]
+    except (TypeError, ValueError):
+        return None
+    arr = np.array(vals, dtype=np.float32)
+    # защита от NaN/inf в фичах (иначе KMeans падает с float() ... not 'NoneType'/nan)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+    return arr
 
 
 def _cosine(a, b) -> float:
@@ -484,13 +490,18 @@ def build_clusters(server_id: str | None = None, k: int = 8) -> dict[str, Any]:
         return {"status": f"sklearn не установлен: {e}"}
 
     with session_scope() as db:
-        tracks = db.query(Track).all()
+        # bulk-загрузка: только треки с фичами (иначе на 150k+ треков — N+1 запросов
+        # и минуты ожидания; раньше тут был db.get() в цикле по всем трекам).
+        feat_rows: list[TrackFeatures] = db.query(TrackFeatures).all()
+        if len(feat_rows) < k:
+            return {"status": "not enough data", "tracks": len(feat_rows)}
         feats: list[tuple[str, np.ndarray]] = []
-        for t in tracks:
-            f = db.get(TrackFeatures, t.id)
-            v = _feature_vector(t, f)
+        for f in feat_rows:
+            # нужен существующий трек (фичи-сироты пропускаем тихо)
+            t = db.get(Track, f.track_id)
+            v = _feature_vector(t, f) if t is not None else _feature_vector(None, f)  # type: ignore[arg-type]
             if v is not None:
-                feats.append((str(t.id), v))
+                feats.append((str(f.track_id), v))
         if len(feats) < k:
             return {"status": "not enough data", "tracks": len(feats)}
 

@@ -21,6 +21,15 @@ def _provider() -> str:
     return (_eff().get("provider") or "NONE").upper()
 
 
+def _cloud_base(e: dict) -> str:
+    """Базовый URL для Ollama Cloud. Важно: дефолт env — http://localhost:11434,
+    он НЕ должен утекать в CLOUD-ветку (иначе Connection refused в docker)."""
+    base = (e.get("ollama_server_url") or "").strip().rstrip("/")
+    if not base or "localhost" in base or "127.0.0.1" in base or base.startswith("http://host.docker.internal"):
+        return "https://ollama.com"
+    return base
+
+
 def is_configured() -> bool:
     e = _eff()
     p = (e.get("provider") or "NONE").upper()
@@ -55,7 +64,7 @@ def chat(
     if provider == "OLLAMA_CLOUD":
         # как на мобиле: https://ollama.com/api/chat с Bearer, options num_predict
         return _ollama_local(
-            e.get("ollama_server_url") or "https://ollama.com",
+            _cloud_base(e),
             model or e.get("model") or e.get("ollama_cloud_model") or "gpt-oss:20b",
             messages,
             temperature,
@@ -173,7 +182,7 @@ def available_models() -> list[str]:
     out: list[str] = []
     if provider == "OLLAMA_CLOUD":
         # как на мобиле: /api/tags с Bearer
-        bases = [e.get("ollama_server_url") or "https://ollama.com", "https://ollama.com"]
+        bases = [_cloud_base(e)]
         for b in bases:
             try:
                 base = b.rstrip("/")

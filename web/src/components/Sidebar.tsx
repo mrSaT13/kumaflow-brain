@@ -9,6 +9,7 @@ import {
   Library,
   History,
   ListMusic,
+  Sparkles,
   Users,
   Settings as Cog,
   Activity,
@@ -21,6 +22,7 @@ const sections: { title: string; items: NavItem[] }[] = [
     { href: "/", label: "Главная", icon: LayoutDashboard },
     { href: "/library", label: "Библиотека", icon: Library },
     { href: "/playlists", label: "Плейлисты", icon: ListMusic },
+    { href: "/cold-start", label: "Холодный старт", icon: Sparkles },
   ]},
   { title: "Задачи", items: [
     { href: "/scans", label: "Задачи и логи", icon: Activity },

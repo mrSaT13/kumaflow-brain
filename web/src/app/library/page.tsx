@@ -114,13 +114,13 @@ export default function LibraryPage() {
         actions={
           <>
             <Input
-              className="w-64"
+              className="w-64 kuma-input-inline"
               placeholder="Поиск по названию, артисту…"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
             <select
-              className="kuma-input w-40"
+              className="kuma-input kuma-input-inline w-40"
               value={genre}
               onChange={(e) => setGenre(e.target.value)}
             >
@@ -132,7 +132,7 @@ export default function LibraryPage() {
               ))}
             </select>
             <select
-              className="kuma-input w-36"
+              className="kuma-input kuma-input-inline w-36"
               value={source}
               onChange={(e) => setSource(e.target.value)}
               title="Источник треков"

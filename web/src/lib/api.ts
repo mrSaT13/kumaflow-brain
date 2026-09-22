@@ -62,6 +62,14 @@ export type MediaUser = {
   last_seen_at?: string | null;
 };
 
+export type ArtistEntry = {
+  name: string;
+  track_count: number;
+  top_genres: string[];
+  cover_track_id?: string | null;
+  cover_art_id?: string | null;
+};
+
 const BASE = process.env.NEXT_PUBLIC_KUMAFLOW_API ?? "";
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
@@ -97,6 +105,24 @@ export const api = {
       "/api/library/servers",
     ),
   genres: () => http<{ genres: string[] }>("/api/library/genres"),
+  artists: (params: { q?: string; genre?: string[]; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    (params.genre ?? []).forEach((g) => qs.append("genre", g));
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    const s = qs.toString();
+    return http<{ items: ArtistEntry[]; total: number; limit: number; offset: number }>(
+      `/api/library/artists${s ? `?${s}` : ""}`,
+    );
+  },
+  similarArtists: (name: string, limit = 6) =>
+    http<{ items: ArtistEntry[]; server_used: boolean }>(`/api/library/artists/similar?name=${encodeURIComponent(name)}&limit=${limit}`),
+  seedTaste: (userId: string, body: { genres: string[]; artists: string[]; track_ids?: string[] }) =>
+    http<{ ok: boolean; favorites_added: number; history_added: number; favorites_total: number; error?: string }>(
+      `/api/users/${userId}/seed-taste`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
 
   listTracks: (params: Record<string, string | number | undefined>) => {
     const qs = new URLSearchParams(
@@ -133,10 +159,15 @@ export const api = {
   cancelRun: (id: string) =>
     http<{ ok: boolean; error?: string }>(`/api/scan/runs/${id}/cancel`, { method: "POST" }),
 
-  generateDailyPlaylist: (n = 30) =>
+  generateDailyPlaylist: (n = 30, user_id?: string) =>
     http<{ queued: boolean; playlist_id: string; tracks: number; steps: { step: number; name: string; items: number }[] }>(
       `/api/playlists/generate-daily`,
-      { method: "POST", body: JSON.stringify({ n }) },
+      { method: "POST", body: JSON.stringify(user_id ? { n, user_id } : { n }) },
+    ),
+  aiGenerate: (query: string, n = 30, user_id?: string) =>
+    http<{ playlist_id: string; name: string; comment?: string; tracks: number; from_fallback?: boolean }>(
+      `/api/playlists/ai-generate`,
+      { method: "POST", body: JSON.stringify({ query, n, user_id }) },
     ),
   listPlaylists: () => http<{ playlists: Playlist[] }>(`/api/playlists/`),
   getPlaylist: (id: string) => http<Playlist & { tracks: Track[] }>(`/api/playlists/${id}`),
@@ -145,6 +176,20 @@ export const api = {
   listUsers: () => http<{ users: MediaUser[] }>(`/api/users/`),
   createUser: (body: { external_id: string; username: string; is_admin?: boolean }) =>
     http<{ user: MediaUser }>(`/api/users`, { method: "POST", body: JSON.stringify(body) }),
+  createUserByCredentials: (body: { username: string; password: string }) =>
+    http<{ ok: boolean; user?: MediaUser; import?: Record<string, unknown>; error?: string }>(
+      `/api/users/by-credentials`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  importTastes: (id: string, password: string) =>
+    http<{ ok: boolean; favorites_total?: number; favorites_added?: number; playlists?: number; error?: string }>(
+      `/api/users/${id}/import-tastes`,
+      { method: "POST", body: JSON.stringify({ password }) },
+    ),
+  userTastes: (id: string) =>
+    http<{ user_id: string; favorites: number; playlists: number; playlist_tracks: number }>(
+      `/api/users/${id}/tastes`,
+    ),
   updateUser: (id: string, body: { username?: string; is_admin?: boolean }) =>
     http<{ user: MediaUser }>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (id: string) => http<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),

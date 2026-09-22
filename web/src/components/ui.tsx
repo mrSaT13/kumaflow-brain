@@ -59,7 +59,7 @@ export function Section({
 }) {
   return (
     <section className="mb-8">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         <h2 className="text-sm font-medium uppercase tracking-wider text-muted">{title}</h2>
         {action}
       </div>
