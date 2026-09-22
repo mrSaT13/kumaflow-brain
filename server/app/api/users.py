@@ -648,3 +648,24 @@ def take_drift_snapshot(user_id: str, db: Session = Depends(get_db)):
 
     u = _require_user(db, user_id)
     return _drift.take_snapshot(db, str(u.id))
+
+
+@router.get("/{user_id}/activity")
+def year_activity(user_id: str, year: int | None = None, db: Session = Depends(get_db)):
+    """Активность за год для тепловой карты: {days: {'2026-09-01': n}, total}."""
+    from collections import Counter
+    from datetime import datetime as _dt
+
+    from app.db.models import PlayHistory as _PH
+
+    u = _require_user(db, user_id)
+    y = int(year or 0) or _dt.utcnow().year
+    rows = db.query(_PH.played_at).filter(
+        _PH.user_id == str(u.id), _PH.played_at.is_not(None)).all()
+    days: Counter = Counter()
+    for (when,) in rows:
+        if when and when.year == y:
+            days[when.date().isoformat()] += 1
+    return {"ok": True, "user_id": str(u.id), "year": y,
+            "days": dict(days), "total": sum(days.values()),
+            "active_days": len(days)}

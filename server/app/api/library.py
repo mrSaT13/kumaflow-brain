@@ -90,6 +90,52 @@ def overview(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/health")
+def library_health(db: Session = Depends(get_db)):
+    """Здоровье библиотеки: что чинить (битрейт, обложки, тексты, анализ, дубли, жанры)."""
+    from sqlalchemy import or_
+
+    from app.db.models import Lyrics
+    from app.services import dedup as _dd
+
+    total = db.query(Track).count()
+    low_bitrate = db.query(Track).filter(
+        Track.bitrate.is_not(None), Track.bitrate < 192).count()
+    no_cover = db.query(Track).filter(
+        or_(Track.cover_art_id.is_(None), Track.cover_art_id == "")).count()
+    with_lyrics = db.query(Lyrics.track_id).distinct().count()
+    analyzed = db.query(TrackFeatures).count()
+    no_genre = db.query(Track).filter(
+        or_(Track.genre.is_(None), Track.genre == "")).count()
+    groups = _dd.find_duplicate_groups(db, limit_groups=10000)
+    dup_tracks = sum(len(g["tracks"]) - 1 for g in groups)
+
+    def _brief(rows):
+        return [{"track_id": str(t.id), "title": t.title,
+                 "artist_name": t.artist_name} for t in rows]
+
+    low_br_sample = _brief(db.query(Track).filter(
+        Track.bitrate.is_not(None), Track.bitrate < 192).limit(5).all())
+    no_lyr_sample = _brief(db.query(Track).outerjoin(
+        Lyrics, Lyrics.track_id == Track.id).filter(
+        Lyrics.track_id.is_(None)).limit(5).all())
+
+    return {
+        "ok": True, "total": total,
+        "low_bitrate": low_bitrate,
+        "no_cover": no_cover,
+        "no_lyrics": max(0, total - with_lyrics),
+        "not_analyzed": max(0, total - analyzed),
+        "no_genre": no_genre,
+        "duplicate_groups": len(groups),
+        "duplicate_tracks": dup_tracks,
+        "samples": {
+            "low_bitrate": low_br_sample,
+            "no_lyrics": no_lyr_sample,
+        },
+    }
+
+
 @router.get("/servers")
 def list_servers(db: Session = Depends(get_db)):
     rows = db.query(MediaServer).all()

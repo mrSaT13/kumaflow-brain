@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { FileText, Sparkles } from "lucide-react";
-import { Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
+import { Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import { api, type Track } from "@/lib/api";
 import { fmtDuration } from "@/lib/format";
 import { moodLook } from "@/lib/moodStyle";
@@ -48,7 +48,16 @@ export default function TrackPage() {
     }
   }
 
-  if (isLoading) return <div className="text-sm text-muted">Загрузка…</div>;
+  if (isLoading) return (
+    <div className="space-y-4">
+      <Skeleton className="h-16" />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <Skeleton className="h-64" />
+        <Skeleton className="h-64" />
+        <Skeleton className="h-64" />
+      </div>
+    </div>
+  );
   if (error || !data) return <EmptyState message="Трек не найден или бэкенд недоступен." />;
 
   const f = data.features ?? {};
@@ -132,7 +141,7 @@ export default function TrackPage() {
           <div className="text-xs uppercase tracking-wider text-muted mb-3">Настроение</div>
           {data.moods && data.moods.length ? (
             <>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-2 kuma-fade-in">
                 {data.moods.map((m) => {
                   const look = moodLook(m);
                   const MIcon = look.icon;

@@ -3,7 +3,7 @@
 import useSWR from "swr";
 import Link from "next/link";
 import { Activity, Disc3, ListMusic, Sparkles, Users, Library, Scan } from "lucide-react";
-import { Badge, Card, PageHeader, Section, Stat, Button } from "@/components/ui";
+import { Badge, Card, PageHeader, Section, Stat, Button, CountUp } from "@/components/ui";
 import { api } from "@/lib/api";
 import { fmtNumber, PHASE_LABELS, STATUS_LABELS, STATUS_TONE, fmtDate } from "@/lib/format";
 
@@ -25,14 +25,14 @@ export default function HomePage() {
       />
 
       <Section title="Обзор">
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <Stat label="Треков" value={fmtNumber(overview?.tracks)} icon={<Library className="w-3 h-3" />}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 kuma-fade-in">
+          <Stat label="Треков" value={<CountUp value={overview?.tracks ?? 0} format={fmtNumber} />} icon={<Library className="w-3 h-3" />}
             hint={overview ? `проанализировано ${fmtNumber(analyzed)} · ${analyzedPct}%` : undefined} />
-          <Stat label="Альбомов" value={fmtNumber(overview?.albums)} />
-          <Stat label="Артистов" value={fmtNumber(overview?.artists)} />
+          <Stat label="Альбомов" value={<CountUp value={overview?.albums ?? 0} format={fmtNumber} />} />
+          <Stat label="Артистов" value={<CountUp value={overview?.artists ?? 0} format={fmtNumber} />} />
           <Stat
             label="Пользователей"
-            value={fmtNumber(overview?.users)}
+            value={<CountUp value={overview?.users ?? 0} format={fmtNumber} />}
             hint="источник для коллаборативной фильтрации"
             icon={<Users className="w-3 h-3" />}
           />

@@ -5,7 +5,7 @@ import useSWR from "swr";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
-import { Badge, Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
+import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
 import { moodLook } from "@/lib/moodStyle";
 
@@ -17,6 +17,60 @@ function colorFor(s: string) {
 }
 
 const DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+function ActivityHeatmap({ days, year, total, activeDays }: { days: Record<string, number>; year: number; total: number; activeDays: number }) {
+  const max = Math.max(1, ...Object.values(days));
+  const weeks: (string | null)[][] = [];
+  let cur: (string | null)[] = [];
+  const jan1 = new Date(year, 0, 1);
+  // выравниваем первую неделю: Пн..Вс (JS getDay: 0=Вс)
+  const lead = (jan1.getDay() + 6) % 7;
+  for (let i = 0; i < lead; i++) cur.push(null);
+  for (let d = new Date(jan1); d.getFullYear() === year; d.setDate(d.getDate() + 1)) {
+    const key = `${year}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    cur.push(key);
+    if (cur.length === 7) {
+      weeks.push(cur);
+      cur = [];
+    }
+  }
+  if (cur.length > 0) {
+    while (cur.length < 7) cur.push(null);
+    weeks.push(cur);
+  }
+  return (
+    <div>
+      <div className="text-xs text-muted mb-2">Прослушиваний: {total} · активных дней: {activeDays}</div>
+      <div className="overflow-x-auto pb-1">
+        <div className="flex gap-[3px] min-w-max">
+          {weeks.map((w, wi) => (
+            <div key={wi} className="flex flex-col gap-[3px]">
+              {w.map((day, di) => {
+                const n = day ? (days[day] ?? 0) : 0;
+                const t = day ? n / max : 0;
+                return (
+                  <div
+                    key={di}
+                    title={day ? `${day} — ${n}` : ""}
+                    className="w-3 h-3 rounded-[3px]"
+                    style={{ background: !day ? "transparent" : n === 0 ? "var(--border)" : `color-mix(in srgb, var(--accent) ${Math.round(25 + 75 * t)}%, transparent)` }}
+                  />
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="flex items-center gap-1 mt-2 text-[10px] text-muted">
+        <span>меньше</span>
+        {[0, 0.25, 0.5, 0.75, 1].map((t) => (
+          <span key={t} className="w-3 h-3 rounded-[3px]" style={{ background: t === 0 ? "var(--border)" : `color-mix(in srgb, var(--accent) ${Math.round(25 + 75 * t)}%, transparent)` }} />
+        ))}
+        <span>больше</span>
+      </div>
+    </div>
+  );
+}
 
 function DriftList({ up, down }: { up: { name: string; old: number; new: number; delta: number }[]; down: { name: string; old: number; new: number; delta: number }[] }) {
   if (up.length === 0 && down.length === 0) return <div className="text-xs text-muted">Без изменений.</div>;
@@ -45,6 +99,8 @@ export default function UserProfilePage() {
   const { data: collab } = useSWR(["collab", id], () => api.collabSimilar(id));
   const { data: collabRec } = useSWR(["collabRec", id], () => api.collabRecommend(id, 12));
   const { data: drift, mutate: mutateDrift } = useSWR(["drift", id], () => api.drift(id));
+  const curYear = new Date().getFullYear();
+  const { data: activity } = useSWR(["activity", id], () => api.userActivity(id, curYear));
   const [busy, setBusy] = useState(false);
   const [waveMood, setWaveMood] = useState("");
 
@@ -84,7 +140,16 @@ export default function UserProfilePage() {
     }, "Запомнено ✓ — вкусы будут обновляться ночью сами");
   }
 
-  if (isLoading) return <div className="text-sm text-muted">Загрузка профиля…</div>;
+  if (isLoading) return (
+    <div className="space-y-4">
+      <Skeleton className="h-16" />
+      <Skeleton className="h-48" />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Skeleton className="h-64" />
+        <Skeleton className="h-64" />
+      </div>
+    </div>
+  );
   if (!data?.ok) return <EmptyState message="Пользователь не найден." />;
 
   const genres = data.genres ?? [];
@@ -128,7 +193,7 @@ export default function UserProfilePage() {
                 {" · "}{((positives[0].weight / sumW) * 100).toFixed(0)}% веса вкуса
                 {" · "}{positives[0].likes} ♥ · {positives[0].plays} ▶
               </div>
-              <div className="flex flex-wrap items-center justify-center gap-2.5 py-2">
+              <div className="flex flex-wrap items-center justify-center gap-2.5 py-2 kuma-fade-in">
                 {positives.slice(0, 30).map((g, i) => {
                   const t = Math.max(0, g.weight) / maxW;
                   const share = ((g.weight / sumW) * 100).toFixed(0);
@@ -184,7 +249,7 @@ export default function UserProfilePage() {
                   <div key={a.name} className="flex items-center gap-2 text-sm">
                     <span className="w-40 truncate" title={a.name}>{a.banned ? "⛔ " : ""}{a.name}</span>
                     <div className="flex-1 h-2 rounded-full bg-border overflow-hidden">
-                      <div className="h-full rounded-full" style={{ width: `${Math.max(2, (Math.max(a.weight, 0) / maxA) * 100)}%`, background: colorFor(a.name) }} />
+                      <div className="h-full rounded-full kuma-bar-anim" style={{ width: `${Math.max(2, (Math.max(a.weight, 0) / maxA) * 100)}%`, background: colorFor(a.name) }} />
                     </div>
                     <span className="text-xs text-muted tabular-nums w-16 text-right">{a.likes}♥ {a.plays}▶</span>
                     {!a.banned ? (
@@ -204,7 +269,7 @@ export default function UserProfilePage() {
             <div className="text-xs text-muted mb-2">Часы</div>
             <div className="flex items-end gap-[3px] h-20">
               {(data.hours ?? []).map((h, i) => (
-                <div key={i} className="flex-1 rounded-t" title={`${i}:00 — ${h}`}
+                <div key={i} className="flex-1 rounded-t kuma-bar-anim" title={`${i}:00 — ${h}`}
                   style={{ height: `${Math.max(3, (h / maxH) * 100)}%`, background: "var(--accent)", opacity: 0.35 + 0.65 * (h / maxH) }} />
               ))}
             </div>
@@ -221,7 +286,7 @@ export default function UserProfilePage() {
                   <div key={i} className="flex-1 flex flex-col items-center gap-1">
                     <div className="w-full rounded-t" title={`${DAYS[i]} — ${d}`}
                       style={{ height: 48, position: "relative" }}>
-                      <div className="absolute bottom-0 w-full rounded-t" style={{ height: `${Math.max(4, (d / mx) * 48)}px`, background: colorFor(DAYS[i]) }} />
+                      <div className="absolute bottom-0 w-full rounded-t kuma-bar-anim" style={{ height: `${Math.max(4, (d / mx) * 48)}px`, background: colorFor(DAYS[i]) }} />
                     </div>
                     <span className="text-[10px] text-muted">{DAYS[i]}</span>
                   </div>
@@ -259,6 +324,12 @@ export default function UserProfilePage() {
               </div>
             </>
           )}
+        </Card>
+      </Section>
+
+      <Section title={`Активность · ${curYear}`}>
+        <Card>
+          <ActivityHeatmap days={activity?.days ?? {}} year={curYear} total={activity?.total ?? 0} activeDays={activity?.active_days ?? 0} />
         </Card>
       </Section>
 

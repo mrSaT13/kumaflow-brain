@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { useState } from "react";
 import useSWR from "swr";
 import { CalendarDays, Disc3, Heart, MoonStar, Sparkles } from "lucide-react";
-import { Badge, Card, EmptyState, PageHeader, Section, Stat } from "@/components/ui";
+import { Badge, Card, EmptyState, PageHeader, Section, Skeleton, Stat } from "@/components/ui";
 import { api } from "@/lib/api";
 
 const MONTHS_RU = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
@@ -39,7 +39,17 @@ export default function WrappedPage() {
   const m = sel ? Number(sel.split("-")[1]) : undefined;
   const { data, isLoading } = useSWR(["wrapped", id, sel], () => api.wrapped(id, y, m));
 
-  if (isLoading) return <div className="text-sm text-muted">Считаю итоги…</div>;
+  if (isLoading) return (
+    <div className="space-y-4">
+      <Skeleton className="h-16" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Skeleton className="h-24" />
+        <Skeleton className="h-24" />
+        <Skeleton className="h-24" />
+        <Skeleton className="h-24" />
+      </div>
+    </div>
+  );
   if (!data?.ok) return <EmptyState message="Нет данных." />;
 
   const cur = sel ?? data.month;
@@ -64,7 +74,7 @@ export default function WrappedPage() {
       ) : (
         <>
           <Section title="Цифры месяца">
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 kuma-fade-in">
               <Stat label="Прослушиваний" value={data.plays} icon={<Disc3 className="w-3 h-3" />} hint={`${data.minutes} мин музыки`} />
               <Stat label="Активных дней" value={data.active_days} icon={<CalendarDays className="w-3 h-3" />} hint={`пик в ${data.peak_hour}:00`} />
               <Stat label="Открытий" value={data.discoveries} icon={<Sparkles className="w-3 h-3" />} hint="треков впервые" />

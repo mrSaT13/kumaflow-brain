@@ -1,5 +1,31 @@
 import clsx from "clsx";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+
+export function CountUp({ value, format }: { value: number; format?: (n: number) => string }) {
+  const [shown, setShown] = useState(0);
+  const raf = useRef(0);
+  useEffect(() => {
+    const from = 0;
+    const to = value;
+    const t0 = performance.now();
+    const dur = 700;
+    cancelAnimationFrame(raf.current);
+    const tick = (t: number) => {
+      const k = Math.min(1, (t - t0) / dur);
+      const eased = 1 - Math.pow(1 - k, 3);
+      setShown(Math.round(from + (to - from) * eased));
+      if (k < 1) raf.current = requestAnimationFrame(tick);
+    };
+    raf.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf.current);
+  }, [value]);
+  return <>{format ? format(shown) : shown.toLocaleString("ru-RU")}</>;
+}
+
+export function Skeleton({ className }: { className?: string }) {
+  return <div className={clsx("kuma-skeleton", className)} />;
+}
 
 export function PageHeader({
   title,

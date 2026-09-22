@@ -16,6 +16,16 @@ const SOURCE_LABELS: Record<string, string> = {
   demo: "Демо",
 };
 
+function HealthStat({ label, value, hint }: { label: string; value: number; hint: string }) {
+  return (
+    <div className="kuma-card p-4">
+      <div className="text-xs uppercase tracking-wider text-muted">{label}</div>
+      <div className="mt-1 text-2xl font-semibold tabular-nums">{value.toLocaleString("ru-RU")}</div>
+      <div className="text-xs text-muted">{hint}</div>
+    </div>
+  );
+}
+
 export default function LibraryPage() {
   const [q, setQ] = useState("");
   const [qDebounced, setQDebounced] = useState("");
@@ -51,6 +61,7 @@ export default function LibraryPage() {
   const { data: genresData } = useSWR("/api/library/genres", () => api.genres());
   const { data: media } = useSWR("/api/settings/media-server", () => api.getMediaServer());
   const { data: overview } = useSWR("/api/library/overview", () => api.overview());
+  const { data: health } = useSWR("/api/library/health", () => api.libraryHealth());
 
   const isReal = Boolean(media?.url && media.url !== "http://localhost" && media.url !== "https://localhost" && media.url.trim() !== "");
   const [busy, setBusy] = useState(false);
@@ -155,6 +166,19 @@ export default function LibraryPage() {
           </>
         }
       />
+
+      {health && (
+        <Section title="Здоровье библиотеки">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 kuma-fade-in">
+            <HealthStat label="Низкий битрейт" value={health.low_bitrate} hint="<192 kbps" />
+            <HealthStat label="Без обложки" value={health.no_cover} hint="треков" />
+            <HealthStat label="Без текста" value={health.no_lyrics} hint="треков" />
+            <HealthStat label="Без анализа" value={health.not_analyzed} hint="sonic" />
+            <HealthStat label="Без жанра" value={health.no_genre} hint="треков" />
+            <HealthStat label="Дубли" value={health.duplicate_tracks} hint={`${health.duplicate_groups} групп`} />
+          </div>
+        </Section>
+      )}
 
       <Section
         title={`Треков: ${total} · страница ${page + 1} из ${totalPages}`}

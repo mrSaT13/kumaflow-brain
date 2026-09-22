@@ -124,3 +124,34 @@ body {
 @media (max-width: 768px) {
   .kuma-input-inline { width: 100% !important; flex: 1 1 100%; }
 }
+
+/* Появление блоков (облака, карточки): мягко снизу-вверх */
+@keyframes kuma-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.kuma-fade-in { animation: kuma-rise 0.45s ease both; }
+.kuma-fade-in-1 { animation: kuma-rise 0.45s 0.05s ease both; }
+.kuma-fade-in-2 { animation: kuma-rise 0.45s 0.1s ease both; }
+.kuma-fade-in-3 { animation: kuma-rise 0.45s 0.15s ease both; }
+
+/* Скелетоны вместо «Загрузка…» */
+@keyframes kuma-shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.kuma-skeleton {
+  border-radius: 10px;
+  min-height: 20px;
+  background: linear-gradient(90deg, var(--border) 25%, var(--surface) 50%, var(--border) 75%);
+  background-size: 800px 100%;
+  animation: kuma-shimmer 1.4s linear infinite;
+}
+
+/* Бары (часы, топы): плавный рост ширины */
+.kuma-bar-anim { transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1), height 0.6s cubic-bezier(0.22, 1, 0.36, 1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .kuma-fade-in, .kuma-fade-in-1, .kuma-fade-in-2, .kuma-fade-in-3,
+  .kuma-skeleton, .kuma-bar-anim { animation: none; transition: none; }
+}

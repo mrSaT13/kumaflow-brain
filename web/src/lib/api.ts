@@ -117,6 +117,13 @@ export const api = {
       "/api/library/servers",
     ),
   genres: () => http<{ genres: string[] }>("/api/library/genres"),
+  libraryHealth: () =>
+    http<{
+      ok: boolean; total: number; low_bitrate: number; no_cover: number;
+      no_lyrics: number; not_analyzed: number; no_genre: number;
+      duplicate_groups: number; duplicate_tracks: number;
+      samples: { low_bitrate: { track_id: string; title: string; artist_name?: string }[]; no_lyrics: { track_id: string; title: string; artist_name?: string }[] };
+    }>(`/api/library/health`),
   artists: (params: { q?: string; genre?: string[]; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
@@ -245,6 +252,10 @@ export const api = {
     }>(`/api/users/${id}/drift?weeks_ago=${weeks_ago}`),
   takeDriftSnapshot: (id: string) =>
     http<{ ok: boolean; week?: string }>(`/api/users/${id}/drift/snapshot`, { method: "POST" }),
+  userActivity: (id: string, year?: number) =>
+    http<{ ok: boolean; user_id: string; year: number; days: Record<string, number>; total: number; active_days: number }>(
+      `/api/users/${id}/activity${year ? `?year=${year}` : ""}`,
+    ),
   rateTrack: (userId: string, track_id: string, like: boolean | null) =>
     http<{ ok: boolean; auto_banned_artist?: string | null }>(
       `/api/users/${userId}/rate`,
