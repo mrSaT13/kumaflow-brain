@@ -53,13 +53,14 @@ def chat(
     if provider == "OLLAMA":
         return _ollama_local(e.get("ollama_server_url") or "", model or e.get("model") or e.get("ollama_model") or "", messages, temperature, max_tokens)
     if provider == "OLLAMA_CLOUD":
-        return _openai_compatible(
-            "https://ollama.com/v1/chat/completions",
-            e.get("ollama_cloud_api_key") or "",
-            model or e.get("model") or e.get("ollama_cloud_model") or "",
+        # как на мобиле: https://ollama.com/api/chat с Bearer, options num_predict
+        return _ollama_local(
+            e.get("ollama_server_url") or "https://ollama.com",
+            model or e.get("model") or e.get("ollama_cloud_model") or "gpt-oss:20b",
             messages,
             temperature,
             max_tokens,
+            api_key=e.get("ollama_cloud_api_key") or "",
         )
     if provider == "OPENAI":
         return _openai_compatible(
@@ -128,8 +129,13 @@ def _ollama_local(
     messages: list[dict[str, str]],
     temperature: float,
     max_tokens: int,
+    api_key: str = "",
 ) -> str:
-    url = base.rstrip("/") + "/api/chat"
+    base = (base or "http://localhost:11434").rstrip("/")
+    url = base + "/api/chat"
+    headers = {"content-type": "application/json"}
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key.strip()}"
     payload = {
         "model": model,
         "messages": messages,
@@ -137,13 +143,28 @@ def _ollama_local(
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
     try:
-        r = httpx.post(url, json=payload, timeout=120.0)
+        r = httpx.post(url, headers=headers, json=payload, timeout=120.0)
     except httpx.HTTPError as e:
         raise AIUnavailable(f"network error: {e}") from e
+    if r.status_code == 401:
+        raise AIUnavailable(f"401 Unauthorized — проверьте токен/baseUrl ({base})")
     if r.status_code >= 400:
-        raise AIUnavailable(f"{r.status_code}: {r.text[:200]}")
+        # fallback на /api/generate как на мобиле (только для local без токена пробуем)
+        if not api_key:
+            try:
+                gen_url = base + "/api/generate"
+                gen_payload = {"model": model, "prompt": "\n".join(m.get("content","") for m in messages), "stream": False, "options": {"temperature": temperature, "num_predict": max_tokens}}
+                rg = httpx.post(gen_url, headers=headers, json=gen_payload, timeout=120.0)
+                if rg.status_code == 200:
+                    return (rg.json().get("response") or "").strip()
+            except Exception:
+                pass
+        raise AIUnavailable(f"{r.status_code}: {r.text[:300]}")
     data = r.json()
-    return (data.get("message") or {}).get("content", "").strip()
+    # /api/chat -> message.content, /api/generate -> response
+    if "message" in data:
+        return (data.get("message") or {}).get("content", "").strip()
+    return (data.get("response") or "").strip()
 
 
 def available_models() -> list[str]:
@@ -151,19 +172,39 @@ def available_models() -> list[str]:
     provider = (e.get("provider") or "NONE").upper()
     out: list[str] = []
     if provider == "OLLAMA_CLOUD":
-        try:
-            r = httpx.get(
-                "https://ollama.com/v1/models",
-                headers={"authorization": f"Bearer {e.get('ollama_cloud_api_key')}"},
-                timeout=30,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                for m in data.get("data", []):
-                    if isinstance(m, dict) and m.get("id"):
-                        out.append(m["id"])
-        except httpx.HTTPError as exc:
-            logger.warning("ollama cloud models fetch failed: {}", exc)
+        # как на мобиле: /api/tags с Bearer
+        bases = [e.get("ollama_server_url") or "https://ollama.com", "https://ollama.com"]
+        for b in bases:
+            try:
+                base = b.rstrip("/")
+                r = httpx.get(
+                    f"{base}/api/tags",
+                    headers={"authorization": f"Bearer {e.get('ollama_cloud_api_key')}"} if e.get("ollama_cloud_api_key") else {},
+                    timeout=30,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    for m in data.get("models", []) or []:
+                        name = m.get("name") if isinstance(m, dict) else None
+                        if name:
+                            out.append(name)
+                    if out:
+                        break
+                # fallback OpenAI-compat
+                r2 = httpx.get(
+                    "https://ollama.com/v1/models",
+                    headers={"authorization": f"Bearer {e.get('ollama_cloud_api_key')}"},
+                    timeout=30,
+                )
+                if r2.status_code == 200:
+                    data = r2.json()
+                    for m in data.get("data", []):
+                        if isinstance(m, dict) and m.get("id"):
+                            out.append(m["id"])
+                    if out:
+                        break
+            except httpx.HTTPError as exc:
+                logger.warning("ollama cloud models fetch failed: {}", exc)
     elif provider == "OLLAMA":
         # локальная Ollama: список установленных моделей
         try:
