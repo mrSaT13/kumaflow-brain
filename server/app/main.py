@@ -17,6 +17,7 @@ from app.api import (
     yandex,
     collab,
     cron,
+    wave,
     settings as settings_api,
     status,
     covers,
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(playlists.router, prefix="/api/playlists", tags=["playlists"])
     app.include_router(users.router, prefix="/api/users", tags=["users"])
     app.include_router(collab.router, prefix="/api/collab", tags=["collab"])
+    app.include_router(wave.router, prefix="/api/wave", tags=["wave"])
     app.include_router(lyrics.router, prefix="/api/lyrics", tags=["lyrics"])
     app.include_router(yandex.router, prefix="/api/yandex", tags=["yandex"])
     app.include_router(cron.router, prefix="/api/cron", tags=["cron"])

@@ -100,7 +100,6 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
         cluster_map = cluster_map_all
 
         scored: list[tuple] = []
-        no_features = v_t is None
         for r in rows:
             if str(r.id) == str(target.id):
                 continue
@@ -108,9 +107,10 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
             v_r = _feature_vector(r, f_r)
             if v_t is not None and v_r is not None:
                 sim = _cosine(v_t, v_r)
-            elif no_features:
-                # У цели нет фич (не проанализирован): честный мета-скоринг
-                # вместо ничьи 0.08 за жанр. Тот же артист — максимально похоже.
+            else:
+                # Фичей нет у цели ИЛИ у кандидата (не проанализирован):
+                # честный мета-скоринг вместо плоских 0.0/0.08.
+                # Иначе все непроанализированные слипаются в «8% за жанр».
                 sim = 0.0
                 if target.artist_name and r.artist_name:
                     if r.artist_name == target.artist_name:
@@ -138,8 +138,6 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
                         sim -= min(abs(int(target.year) - int(r.year)) * 0.004, 0.08)
                     except (TypeError, ValueError):
                         pass
-            else:
-                sim = 0.0
             # тот же исполнитель — бонус и в sonic-режиме
             if target.artist_name and r.artist_name and r.artist_name == target.artist_name:
                 sim += 0.25
