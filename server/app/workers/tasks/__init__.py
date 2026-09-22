@@ -1751,6 +1751,40 @@ def smart_playlists(*args, **kwargs):
         return {"status": "failure", "error": str(e)}
 
 
+def taste_snapshots(*args, **kwargs):
+    """Недельные слепки вкуса (крон по понедельникам): тихо, без уведомлений."""
+    run_id = args[0] if args else None
+    try:
+        from app.db.models import MediaUser
+        from app.services import drift as _drift
+        from app.services.media_server import resolve_active_server
+
+        with session_scope() as db:
+            server = resolve_active_server(db)
+            users = db.query(MediaUser).filter_by(server_id=server.id).all()
+            db.commit()
+        ok = 0
+        for u in users:
+            try:
+                with session_scope() as db:
+                    res = _drift.take_snapshot(db, str(u.id))
+                    if res.get("ok"):
+                        ok += 1
+            except Exception as e:  # noqa: BLE001
+                if run_id:
+                    _append_log(run_id, "warn", f"Snapshot {u.username} fail: {e}")
+        if run_id:
+            _append_log(run_id, "info", f"Слепки вкуса: {ok}/{len(users)}")
+            _finish_run(run_id, "success")
+        return {"status": "success", "users": len(users), "ok": ok}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("taste_snapshots failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
 def collab_build(*args, **kwargs):
     """Коллаборативный проход: синхронизация пользователей Navidrome.
 

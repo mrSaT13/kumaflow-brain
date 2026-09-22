@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, Callable
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -436,3 +437,21 @@ class Notification(Base):
     link: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class TasteSnapshot(Base):
+    """Недельный слепок вкуса (понедельник): веса жанров/артистов + счётчики.
+
+    Для дрейфа («ушёл из рока в эмбиент»). Снимает крон по понедельникам.
+    """
+
+    __tablename__ = "taste_snapshots"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    week: Mapped[date] = mapped_column(Date, primary_key=True)
+    genres: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    artists: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    counts: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

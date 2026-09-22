@@ -18,6 +18,25 @@ function colorFor(s: string) {
 
 const DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
+function DriftList({ up, down }: { up: { name: string; old: number; new: number; delta: number }[]; down: { name: string; old: number; new: number; delta: number }[] }) {
+  if (up.length === 0 && down.length === 0) return <div className="text-xs text-muted">Без изменений.</div>;
+  const row = (m: { name: string; old: number; new: number; delta: number }, tone: "up" | "down") => (
+    <div key={m.name} className="flex items-center gap-2 text-sm py-0.5">
+      <span className={`tabular-nums font-bold w-12 ${tone === "up" ? "text-green-600" : "text-red-500"}`}>
+        {m.delta > 0 ? `+${m.delta}` : m.delta}
+      </span>
+      <span className="flex-1 truncate" title={`${m.old} → ${m.new}`}>{m.name}</span>
+      <span className="text-[11px] text-muted tabular-nums">{m.old} → {m.new}</span>
+    </div>
+  );
+  return (
+    <div className="space-y-0.5">
+      {up.map((m) => row(m, "up"))}
+      {down.map((m) => row(m, "down"))}
+    </div>
+  );
+}
+
 export default function UserProfilePage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
@@ -25,6 +44,7 @@ export default function UserProfilePage() {
   const { data: vault, mutate: mutateVault } = useSWR(["vault", id], () => api.vaultStatus(id));
   const { data: collab } = useSWR(["collab", id], () => api.collabSimilar(id));
   const { data: collabRec } = useSWR(["collabRec", id], () => api.collabRecommend(id, 12));
+  const { data: drift, mutate: mutateDrift } = useSWR(["drift", id], () => api.drift(id));
   const [busy, setBusy] = useState(false);
   const [waveMood, setWaveMood] = useState("");
 
@@ -211,6 +231,36 @@ export default function UserProfilePage() {
           </Card>
         </Section>
       </div>
+
+      <Section title="Дрейф вкуса" action={
+        <Button variant="ghost" onClick={() => act(async () => { await api.takeDriftSnapshot(id); mutateDrift(); return { ok: true }; }, "Слепок снят")} disabled={busy}>
+          Снять слепок
+        </Button>
+      }>
+        <Card>
+          {!drift ? (
+            <div className="text-sm text-muted">Считаю…</div>
+          ) : (drift.weeks ?? []).length === 0 ? (
+            <div className="text-sm text-muted text-center py-4">
+              {drift.hint ?? "Снапшотов пока нет."} Нажмите «Снять слепок» — через неделю будет с чем сравнить.
+            </div>
+          ) : (
+            <>
+              {drift.summary && <div className="text-base font-medium text-center mb-3">{drift.summary} <span className="text-xs text-muted font-normal">(с недели {drift.snapshot_week})</span></div>}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-muted mb-2">Жанры вверх / вниз</div>
+                  <DriftList up={drift.genres_up ?? []} down={drift.genres_down ?? []} />
+                </div>
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-muted mb-2">Артисты вверх / вниз</div>
+                  <DriftList up={drift.artists_up ?? []} down={drift.artists_down ?? []} />
+                </div>
+              </div>
+            </>
+          )}
+        </Card>
+      </Section>
 
       <Section title={`Топ треков по скору · формула мобильного`}>
         <Card>

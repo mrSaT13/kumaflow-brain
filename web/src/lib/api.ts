@@ -234,6 +234,17 @@ export const api = {
       artistDislikeCounts: Record<string, number>;
       counts: { likes: number; dislikes: number; banned: number; events: number; plays: number };
     }>(`/api/users/${id}/profile`),
+  drift: (id: string, weeks_ago = 4) =>
+    http<{
+      ok: boolean; summary?: string | null; snapshot_week?: string; weeks: string[];
+      genres_up: { name: string; old: number; new: number; delta: number }[];
+      genres_down: { name: string; old: number; new: number; delta: number }[];
+      artists_up: { name: string; old: number; new: number; delta: number }[];
+      artists_down: { name: string; old: number; new: number; delta: number }[];
+      hint?: string;
+    }>(`/api/users/${id}/drift?weeks_ago=${weeks_ago}`),
+  takeDriftSnapshot: (id: string) =>
+    http<{ ok: boolean; week?: string }>(`/api/users/${id}/drift/snapshot`, { method: "POST" }),
   rateTrack: (userId: string, track_id: string, like: boolean | null) =>
     http<{ ok: boolean; auto_banned_artist?: string | null }>(
       `/api/users/${userId}/rate`,

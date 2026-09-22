@@ -629,3 +629,22 @@ def wrapped(user_id: str, year: int | None = None, month: int | None = None,
             y, m = now.year, now.month
     return {**_w.month_summary(db, str(u.id), y, m), "months": months,
             "user_id": str(u.id)}
+
+
+@router.get("/{user_id}/drift")
+def taste_drift(user_id: str, weeks_ago: int = 4, db: Session = Depends(get_db)):
+    """Дрейф вкуса: текущий профиль vs снапшот N недель назад + фраза."""
+    from app.services import drift as _drift
+
+    u = _require_user(db, user_id)
+    return {**_drift.compare(db, str(u.id), weeks_ago=max(1, min(12, int(weeks_ago or 4)))),
+            "user_id": str(u.id)}
+
+
+@router.post("/{user_id}/drift/snapshot")
+def take_drift_snapshot(user_id: str, db: Session = Depends(get_db)):
+    """Снять слепок вкуса вручную (иначе — крон по понедельникам)."""
+    from app.services import drift as _drift
+
+    u = _require_user(db, user_id)
+    return _drift.take_snapshot(db, str(u.id))
