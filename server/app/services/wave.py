@@ -83,8 +83,18 @@ def apply_delta(db, user_id: str, ratings_delta: list[dict] | None,
             norm_e.append({'track_id': tid, 'action': e.get('action'),
                            'position_sec': e.get('position_sec')})
         if norm_e:
+            from datetime import datetime as _dt
+
+            from app.db.models import PlayHistory as _PH
+
             res = _taste.record_events(db, user_id, norm_e, limit=500)
             applied_e = int(res.get('stored', 0) or 0)
+            # play-события — ещё и в историю (память мозга для GET history)
+            for e in norm_e:
+                if str(e.get('action') or '') == 'play':
+                    db.add(_PH(user_id=user_id, track_id=str(e['track_id']),
+                               played_at=_dt.utcnow()))
+            db.commit()
     return {'ratings_applied': applied_r, 'events_applied': applied_e}
 
 

@@ -17,6 +17,118 @@ function TasteBadge({ id }: { id: string }) {
   );
 }
 
+const PALETTE = ["#FF3B30", "#007AFF", "#34C759", "#5856D6", "#AF52DE", "#FF9500", "#FF2D55", "#5AC8FA", "#00C7BE", "#FF9F0A"];
+function colorFor(s: string) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
+
+function CompareSection({ ids, users, onClear }: { ids: string[]; users: { id: string; username: string }[]; onClear: () => void }) {
+  const { data, isLoading } = useSWR(ids.length >= 2 ? ["compare", ...ids] : null, () => api.collabCompare(ids));
+  const nameOf = (uid: string) => users.find((u) => u.id === uid)?.username ?? uid.slice(0, 8);
+  return (
+    <Section title={`Сравнение вкусов · ${ids.length}`}>
+      <Card>
+        <div className="flex items-center gap-2 flex-wrap text-sm mb-3">
+          {ids.map((id) => (
+            <span key={id} className="kuma-pill">{nameOf(id)}</span>
+          ))}
+          <span className="flex-1" />
+          <Button variant="ghost" onClick={onClear}>Сбросить выбор</Button>
+        </div>
+        {isLoading && <div className="text-sm text-muted">Считаю пересечения…</div>}
+        {data && (
+          <>
+            <div className="flex gap-2 flex-wrap mb-4">
+              {data.pairwise.map((p) => (
+                <Badge key={`${p.a}-${p.b}`} tone={p.similarity > 0 ? "ok" : undefined}>
+                  {p.a_name} ↔ {p.b_name}: {(p.similarity * 100).toFixed(0)}% · общих ♥ {p.shared_likes}
+                </Badge>
+              ))}
+            </div>
+            {data.shared_genres.length === 0 && data.shared_artists.length === 0 ? (
+              <div className="text-sm text-muted text-center py-4">Общего пока нет — пересекающихся жанров и артистов с весом &gt; 0 не найдено.</div>
+            ) : (
+              <>
+                {data.shared_genres.length > 0 && (
+                  <div className="mb-4">
+                    <div className="text-xs uppercase tracking-wider text-muted mb-2">Общие жанры · {data.shared_genres.length} — тот же цвет, что в облаках ниже</div>
+                    <div className="flex flex-wrap items-center justify-center gap-2.5">
+                      {data.shared_genres.slice(0, 24).map((g) => {
+                        const t = Math.min(1, g.avg / Math.max(1, data.shared_genres[0].avg));
+                        const c = colorFor(g.name);
+                        return (
+                          <span key={g.name} title={ids.map((id) => `${nameOf(id)}: ${g.weights[id] ?? 0}`).join(" · ")}
+                            className="rounded-full text-white font-semibold border border-white/20"
+                            style={{ fontSize: 12 + Math.round(t * 16), padding: `${6 + t * 6}px ${12 + t * 10}px`, background: c, opacity: 0.75 + 0.25 * t }}>
+                            {g.name}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {data.shared_artists.length > 0 && (
+                  <div className="mb-4">
+                    <div className="text-xs uppercase tracking-wider text-muted mb-2">Общие артисты · {data.shared_artists.length}</div>
+                    <div className="flex flex-wrap gap-2 justify-center">
+                      {data.shared_artists.slice(0, 24).map((a) => (
+                        <span key={a.name} className="kuma-pill" title={ids.map((id) => `${nameOf(id)}: ${a.weights[id] ?? 0}`).join(" · ")}>
+                          {a.name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+            {data.shared_tracks.length > 0 && (
+              <div className="mb-4">
+                <div className="text-xs uppercase tracking-wider text-muted mb-2">Общие лайки · {data.shared_tracks.length}</div>
+                <div className="flex flex-wrap gap-2">
+                  {data.shared_tracks.slice(0, 12).map((t) => (
+                    <span key={t.track_id} className="kuma-pill" title={`Лайкнули: ${t.liked_by.join(", ")}`}>
+                      {t.artist_name ? `${t.artist_name} — ` : ""}{t.title} <span className="text-muted">· {t.liked_by.join(", ")}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(ids.length, 3)}, minmax(0, 1fr))` }}>
+              {data.users.map((u) => {
+                const maxW = Math.max(1, ...u.genres_top.map((g) => g.weight));
+                return (
+                  <div key={u.user_id} className="kuma-card !p-3">
+                    <Link href={`/users/${u.user_id}` as never} className="kuma-link font-medium text-sm">{u.username}</Link>
+                    <span className="text-xs text-muted"> · ♥ {u.likes}</span>
+                    <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+                      {u.genres_top.slice(0, 14).map((g) => {
+                        const shared = data.shared_genres.some((s) => s.name === g.name);
+                        const t = Math.max(0, g.weight) / maxW;
+                        const c = colorFor(g.name);
+                        return (
+                          <span key={g.name} title={`${g.weight}`}
+                            className={`rounded-full text-white font-semibold ${shared ? "border-2 border-white/70" : "border border-white/20"}`}
+                            style={{ fontSize: 11 + Math.round(t * 10), padding: `${4 + t * 5}px ${8 + t * 8}px`, background: c, opacity: shared ? 1 : 0.55 + 0.3 * t }}>
+                            {g.name}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {u.genres_top.length === 0 && <div className="text-xs text-muted mt-2">Нет жанров с весом &gt; 0.</div>}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="text-[11px] text-muted mt-3 text-center">Одинаковый жанр — одинаковый цвет везде. Белой рамкой подсвечено общее.</div>
+          </>
+        )}
+      </Card>
+    </Section>
+  );
+}
+
 export default function UsersPage() {
   const { data, mutate } = useSWR("/api/users", () => api.listUsers());
   const [externalId, setExternalId] = useState("");
@@ -27,6 +139,11 @@ export default function UsersPage() {
   const [navPassword, setNavPassword] = useState("");
   const [rememberPwd, setRememberPwd] = useState(true);
   const [importBusy, setImportBusy] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev.slice(0, 9), id]);
+  }
 
   async function create() {
     if (!externalId.trim() || !username.trim()) return alert("Заполните ID и имя");
@@ -178,11 +295,21 @@ export default function UsersPage() {
         {(data?.users ?? []).length === 0 ? (
           <EmptyState message="Пользователей ещё нет." />
         ) : (
+          <>
+          {selected.length >= 2 && (
+            <div className="mb-4">
+              <CompareSection ids={selected} users={data?.users ?? []} onClear={() => setSelected([])} />
+            </div>
+          )}
+          {selected.length > 0 && selected.length < 2 && (
+            <div className="text-xs text-muted mb-2">Отметьте ещё хотя бы одного пользователя галочкой — покажу общие жанры, артисты и лайки.</div>
+          )}
           <div className="kuma-card overflow-hidden">
             <div className="overflow-x-auto">
             <table className="kuma-table w-full min-w-[720px]">
               <thead>
                 <tr>
+                  <th></th>
                   <th>Имя</th>
                   <th>external_id</th>
                   <th>Вкусы</th>
@@ -193,6 +320,7 @@ export default function UsersPage() {
               <tbody>
                 {(data?.users ?? []).map((u) => (
                   <tr key={u.id}>
+                    <td><input type="checkbox" checked={selected.includes(u.id)} onChange={() => toggleSelect(u.id)} title="Выбрать для сравнения" /></td>
                     <td className="font-medium"><Link href={`/users/${u.id}` as never} className="kuma-link">{u.username}</Link></td>
                     <td className="text-muted text-xs font-mono">{u.external_id}</td>
                     <td><TasteBadge id={u.id} /></td>
@@ -220,6 +348,7 @@ export default function UsersPage() {
             </table>
             </div>
           </div>
+          </>
         )}
       </Section>
     </>

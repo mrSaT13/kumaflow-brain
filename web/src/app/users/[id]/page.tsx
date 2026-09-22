@@ -67,7 +67,10 @@ export default function UserProfilePage() {
   if (!data?.ok) return <EmptyState message="Пользователь не найден." />;
 
   const genres = data.genres ?? [];
-  const maxW = Math.max(1, ...genres.map((g) => g.weight));
+  const positives = genres.filter((g) => g.weight > 0 && g.name !== "—");
+  const unknownCount = genres.filter((g) => g.name === "—").reduce((s, g) => s + g.likes + g.plays, 0);
+  const sumW = positives.reduce((s, g) => s + g.weight, 0) || 1;
+  const maxW = Math.max(1, ...positives.map((g) => g.weight));
   const maxH = Math.max(1, ...(data.hours ?? []));
   const maxA = Math.max(1, ...(data.artists ?? []).slice(0, 10).map((a) => Math.max(a.weight, 0.1)));
 
@@ -92,28 +95,40 @@ export default function UserProfilePage() {
         }
       />
 
-      <Section title={`Облако жанров · ${genres.length}`}>
+      <Section title={`Облако жанров · ${positives.length}`}>
         <Card>
-          {genres.length === 0 ? (
+          {positives.length === 0 ? (
             <div className="text-sm text-muted text-center py-8">Пока пусто — пройдите визард или импортируйте вкусы.</div>
           ) : (
-            <div className="flex flex-wrap items-center justify-center gap-3 py-2">
-              {genres.slice(0, 30).map((g) => {
-                const t = Math.max(0, g.weight) / maxW;
-                const fs = 12 + Math.round(t * 20);
-                const c = colorFor(g.name);
-                return (
-                  <span
-                    key={g.name}
-                    title={`${g.likes} ♥ · ${g.plays} ▶ · вес ${g.weight}`}
-                    className="rounded-full text-white font-semibold transition-transform hover:scale-110 cursor-default"
-                    style={{ fontSize: fs, padding: `${6 + t * 8}px ${12 + t * 12}px`, background: c, boxShadow: `0 4px 14px ${c}55` }}
-                  >
-                    {g.name}
-                  </span>
-                );
-              })}
-            </div>
+            <>
+              <div className="text-xs text-muted text-center mb-3">
+                Топ: <span className="font-semibold text-text">{positives[0].name}</span>
+                {" · "}{((positives[0].weight / sumW) * 100).toFixed(0)}% веса вкуса
+                {" · "}{positives[0].likes} ♥ · {positives[0].plays} ▶
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2.5 py-2">
+                {positives.slice(0, 30).map((g, i) => {
+                  const t = Math.max(0, g.weight) / maxW;
+                  const share = ((g.weight / sumW) * 100).toFixed(0);
+                  const fs = 12 + Math.round(t * 18);
+                  const c = colorFor(g.name);
+                  return (
+                    <span
+                      key={g.name}
+                      title={`${g.name}: ${share}% веса · ${g.likes} ♥ · ${g.plays} ▶ · вес ${g.weight}`}
+                      className="rounded-full text-white font-semibold transition-transform hover:scale-105 cursor-default border border-white/20"
+                      style={{ fontSize: fs, padding: `${6 + t * 8}px ${12 + t * 12}px`, background: c, opacity: 0.6 + 0.4 * t, boxShadow: i < 3 ? `0 4px 16px ${c}66` : `0 2px 8px ${c}44` }}
+                    >
+                      {i < 3 ? `${i + 1}. ` : ""}{g.name}
+                      <span className="opacity-80 font-normal"> {share}%</span>
+                    </span>
+                  );
+                })}
+              </div>
+              {unknownCount > 0 && (
+                <div className="text-[11px] text-muted text-center mt-2">Без жанра: {unknownCount} сигналов — проставьте теги для точности облака.</div>
+              )}
+            </>
           )}
           {(data.moods ?? []).length > 0 && (
             <div className="mt-3 flex gap-2 flex-wrap justify-center">

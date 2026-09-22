@@ -253,6 +253,15 @@ export const api = {
     http<{ items: { track_id: string; title: string; artist_name?: string; score: number; because_of: string[] }[] }>(
       `/api/collab/recommend/${userId}?n=${n}`,
     ),
+  collabCompare: (user_ids: string[], top_n = 12) =>
+    http<{
+      ok: boolean;
+      users: { user_id: string; username: string; likes: number; genres_top: { name: string; weight: number }[]; artists_top: { name: string; weight: number }[] }[];
+      shared_genres: { name: string; weights: Record<string, number>; avg: number }[];
+      shared_artists: { name: string; weights: Record<string, number>; avg: number }[];
+      shared_tracks: { track_id: string; title: string; artist_name?: string; liked_by: string[] }[];
+      pairwise: { a: string; b: string; a_name: string; b_name: string; similarity: number; shared_likes: number }[];
+    }>(`/api/collab/compare`, { method: "POST", body: JSON.stringify({ user_ids, top_n }) }),
   duplicates: () =>
     http<{ groups: { key: string; keep_id: string; tracks: { id: string; title: string; artist_name?: string; album_name?: string; duration_sec?: number; play_count: number; starred: boolean; source: string }[] }[]; group_count: number; duplicate_tracks: number }>(
       `/api/library/duplicates`,

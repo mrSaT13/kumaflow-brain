@@ -502,3 +502,109 @@ def refresh_now(user_id: str, db: Session = Depends(get_db)):
     if res.get("status") != "success":
         return {"ok": False, "error": res.get("error")}
     return {"ok": True, **res}
+
+
+def _resolve_track(db: Session, raw: str):
+    """Наш uuid как есть, иначе external_id (мобильный id) -> трек."""
+    from app.db.models import Track
+
+    s = (raw or '').strip()
+    if not s:
+        return None
+    t = db.get(Track, s)
+    if t is not None:
+        return t
+    return db.query(Track).filter(Track.external_id == s).first()
+
+
+@router.post("/{user_id}/history")
+def log_history(user_id: str, payload: dict, db: Session = Depends(get_db)):
+    """Память мозга: клиент сообщает «сыграл трек».
+
+    Body: {track_id (наш uuid или external_id), played_at? ISO, source?}.
+    Пишет PlayHistory + PlayEvent(play) + TrackStat.plays/last_played —
+    это и кормит волну, и отдаётся в GET history.
+    """
+    from datetime import datetime
+
+    from app.db.models import PlayEvent as _PE
+    from app.db.models import PlayHistory as _PH
+    from app.db.models import TrackStat as _TS
+
+    u = _require_user(db, user_id)
+    t = _resolve_track(db, str((payload or {}).get('track_id') or ''))
+    if t is None:
+        raise HTTPException(404, 'track not found')
+    played_at = None
+    raw_ts = (payload or {}).get('played_at')
+    if raw_ts:
+        try:
+            played_at = datetime.fromisoformat(str(raw_ts).replace('Z', ''))
+        except (TypeError, ValueError):
+            played_at = None
+    now = played_at or datetime.utcnow()
+    db.add(_PH(user_id=str(u.id), track_id=str(t.id), played_at=now))
+    db.add(_PE(user_id=str(u.id), track_id=str(t.id), action='play',
+               hour=now.hour, day_of_week=now.isoweekday() % 7))
+    st = db.get(_TS, {'user_id': str(u.id), 'track_id': str(t.id)})
+    if st is None:
+        st = _TS(user_id=str(u.id), track_id=str(t.id))
+        db.add(st)
+    st.plays = (st.plays or 0) + 1
+    if not st.last_played or now > st.last_played:
+        st.last_played = now
+    db.commit()
+    return {'ok': True, 'track_id': str(t.id)}
+
+
+@router.get("/{user_id}/history")
+def get_history(user_id: str, limit: int = 50, offset: int = 0,
+                db: Session = Depends(get_db)):
+    """Последние прослушивания, новые первые: [{track_id, title, artist, played_at}]."""
+    from app.db.models import PlayHistory as _PH
+    from app.db.models import Track as _T
+
+    u = _require_user(db, user_id)
+    limit = max(1, min(200, int(limit or 50)))
+    offset = max(0, int(offset or 0))
+    rows = (db.query(_PH, _T)
+            .join(_T, _T.id == _PH.track_id)
+            .filter(_PH.user_id == str(u.id))
+            .order_by(_PH.played_at.desc())
+            .offset(offset).limit(limit).all())
+    total = db.query(_PH).filter(_PH.user_id == str(u.id)).count()
+    return {'ok': True, 'user_id': str(u.id), 'total': total,
+            'items': [{'track_id': str(ph.track_id), 'title': t.title,
+                       'artist_name': t.artist_name, 'album_name': t.album_name,
+                       'genre': t.genre,
+                       'played_at': ph.played_at.isoformat() if ph.played_at else None}
+                      for ph, t in rows]}
+
+
+@router.get("/{user_id}/recent-events")
+def recent_events(user_id: str, limit: int = 50, db: Session = Depends(get_db)):
+    """Свежие события плеера для динамической волны клиента (play/skip/replay/...)."""
+    from app.db.models import PlayEvent as _PE
+
+    u = _require_user(db, user_id)
+    limit = max(1, min(200, int(limit or 50)))
+    rows = (db.query(_PE).filter(_PE.user_id == str(u.id))
+            .order_by(_PE.created_at.desc()).limit(limit).all())
+    return {'ok': True, 'user_id': str(u.id),
+            'items': [{'track_id': str(r.track_id), 'action': r.action,
+                       'position_sec': r.position_sec,
+                       'created_at': r.created_at.isoformat() if r.created_at else None}
+                      for r in rows]}
+
+
+@router.delete("/{user_id}/history")
+def clear_history(user_id: str, db: Session = Depends(get_db)):
+    """Стереть память прослушиваний (лайки/дизлайки/баны не трогаем)."""
+    from app.db.models import PlayEvent as _PE
+    from app.db.models import PlayHistory as _PH
+
+    u = _require_user(db, user_id)
+    h = db.query(_PH).filter(_PH.user_id == str(u.id)).delete()
+    e = db.query(_PE).filter(_PE.user_id == str(u.id)).delete()
+    db.commit()
+    return {'ok': True, 'cleared_history': h, 'cleared_events': e}
