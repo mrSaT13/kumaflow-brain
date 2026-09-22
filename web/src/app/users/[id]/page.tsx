@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
 import { api } from "@/lib/api";
+import { moodLook } from "@/lib/moodStyle";
 
 const PALETTE = ["#FF3B30", "#007AFF", "#34C759", "#5856D6", "#AF52DE", "#FF9500", "#FF2D55", "#5AC8FA", "#00C7BE", "#FF9F0A"];
 function colorFor(s: string) {
@@ -132,9 +133,20 @@ export default function UserProfilePage() {
           )}
           {(data.moods ?? []).length > 0 && (
             <div className="mt-3 flex gap-2 flex-wrap justify-center">
-              {(data.moods ?? []).map((m) => (
-                <Badge key={m.name} tone="info">{m.name} · {m.count}</Badge>
-              ))}
+              {(data.moods ?? []).map((m) => {
+                const look = moodLook(m.name);
+                const MIcon = look.icon;
+                return (
+                  <span
+                    key={m.name}
+                    className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-medium text-white shadow-sm"
+                    style={{ background: look.bg }}
+                  >
+                    <MIcon className="w-3.5 h-3.5" />
+                    {m.name} · {m.count}
+                  </span>
+                );
+              })}
             </div>
           )}
         </Card>

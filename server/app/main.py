@@ -18,6 +18,7 @@ from app.api import (
     collab,
     cron,
     wave,
+    notifications,
     settings as settings_api,
     status,
     covers,
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router, prefix="/api/users", tags=["users"])
     app.include_router(collab.router, prefix="/api/collab", tags=["collab"])
     app.include_router(wave.router, prefix="/api/wave", tags=["wave"])
+    app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
     app.include_router(lyrics.router, prefix="/api/lyrics", tags=["lyrics"])
     app.include_router(yandex.router, prefix="/api/yandex", tags=["yandex"])
     app.include_router(cron.router, prefix="/api/cron", tags=["cron"])

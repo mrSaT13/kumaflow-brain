@@ -791,6 +791,14 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
         logger.exception("library_scan failed: {}", e)
         _append_log(run_id, "error", str(e))
         _finish_run(run_id, "failure", str(e))
+        try:
+            from app.services import notify as _notify
+
+            with session_scope() as db:
+                _notify.notify(db, "error", "Сканирование библиотеки упало",
+                               str(e)[:300], link="/scans")
+        except Exception:
+            pass
         return {"status": "failure", "error": str(e)}
 
 
@@ -1752,10 +1760,28 @@ def refresh_tastes(*args, **kwargs):
         if run_id:
             _append_log(run_id, "info", summary)
             _finish_run(run_id, "success")
+        try:
+            from app.services import notify as _notify
+
+            with session_scope() as db:
+                _notify.notify(db, "success" if fail == 0 else "warn",
+                               "Ночное обновление вкусов",
+                               summary, link="/scans")
+                _notify.prune(db)
+        except Exception:
+            pass
         return {"status": "success", "users": len(pairs), "ok": ok, "failed": fail}
     except Exception as e:  # noqa: BLE001
         logger.exception("refresh_tastes failed: {}", e)
         if run_id:
             _append_log(run_id, "error", str(e))
             _finish_run(run_id, "failure", str(e))
+        try:
+            from app.services import notify as _notify
+
+            with session_scope() as db:
+                _notify.notify(db, "error", "Ночное обновление вкусов упало",
+                               str(e)[:300], link="/scans")
+        except Exception:
+            pass
         return {"status": "failure", "error": str(e)}

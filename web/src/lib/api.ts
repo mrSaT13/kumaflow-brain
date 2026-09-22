@@ -349,4 +349,14 @@ export const api = {
     }),
   bridgeStatus: () =>
     http<{ enabled: boolean; url: string; reachable: boolean; error?: string }>(`/api/bridge/status`),
+
+  notifications: (limit = 50) =>
+    http<{ notifications: { id: string; user_id?: string | null; kind: string; title: string; body?: string | null; link?: string | null; created_at?: string | null; read_at?: string | null }[] }>(
+      `/api/notifications/?limit=${limit}`,
+    ),
+  unreadCount: () => http<{ unread: number }>(`/api/notifications/unread-count`),
+  markNotificationRead: (id: string) =>
+    http<{ ok: boolean }>(`/api/notifications/${id}/read`, { method: "POST" }),
+  markAllNotificationsRead: () =>
+    http<{ ok: boolean; marked: number }>(`/api/notifications/read-all`, { method: "POST" }),
 };
