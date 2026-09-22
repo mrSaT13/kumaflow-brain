@@ -1640,6 +1640,117 @@ def daily_per_user(*args, **kwargs):
         return {"status": "failure", "error": str(e)}
 
 
+def smart_playlists(*args, **kwargs):
+    """Умные автоплейлисты для КАЖДОГО пользователя (открытия/забытые/ночь/спорт).
+
+    Старый плейлист того же вида у пользователя заменяется (не копим).
+    Каждому пользователю — уведомление в колокол со ссылкой на плейлисты.
+    """
+    run_id = args[0] if args else None
+    try:
+        from datetime import date, datetime
+        import uuid as _uuid
+
+        from app.db.models import MediaUser, Playlist, PlaylistTrack, Track
+        from app.services import smart as _smart
+        from app.services.media_server import resolve_active_server
+        from app.services.orchestrator import create_energy_wave
+
+        with session_scope() as db:
+            server = resolve_active_server(db)
+            users = db.query(MediaUser).filter_by(server_id=server.id).all()
+            db.commit()
+        total = max(1, len(users))
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            if run:
+                run.total_items = total * len(_smart.KINDS)
+                run.processed_items = 0
+        done = 0
+        today = date.today()
+        for idx, u in enumerate(users):
+            if _is_cancelled(run_id):
+                break
+            made: list[str] = []
+            for kind, label in _smart.KINDS.items():
+                try:
+                    with session_scope() as db:
+                        old = db.query(Playlist).filter(
+                            Playlist.is_auto_generated.is_(True),
+                            Playlist.server_id == u.server_id,
+                            Playlist.owner_user_id == u.id,
+                            Playlist.name.like(f"{label} %")).all()
+                        for p in old:
+                            db.query(PlaylistTrack).filter(
+                                PlaylistTrack.playlist_id == p.id).delete()
+                            db.delete(p)
+                        db.flush()
+                        tids = _smart.GENERATORS[kind](db, str(u.id), n=30)
+                        if not tids:
+                            continue
+                        try:
+                            tracks = [t for t in
+                                      (db.get(Track, tid) for tid in tids) if t]
+                            waved = create_energy_wave(tracks)
+                            order = {str(t.id): i for i, t in enumerate(waved)}
+                            tids = sorted(tids, key=lambda tid: order.get(tid, 999))
+                        except Exception:
+                            pass
+                        p = Playlist(
+                            id=str(_uuid.uuid4()), server_id=u.server_id,
+                            owner_user_id=u.id,
+                            name=f"{label} · {today.isoformat()}",
+                            is_auto_generated=True,
+                            generated_for_date=datetime.combine(
+                                today, datetime.min.time()))
+                        db.add(p)
+                        db.flush()
+                        for pos, tid in enumerate(tids):
+                            db.add(PlaylistTrack(playlist_id=p.id, track_id=tid,
+                                                 position=pos))
+                        made.append(f"{label} ({len(tids)})")
+                except Exception as e:  # noqa: BLE001 — один вид не валит остальных
+                    if run_id:
+                        _append_log(run_id, "warn", f"Smart {u.username}/{kind} fail: {e}")
+                with session_scope() as db:
+                    run = db.get(ScanRun, run_id) if run_id else None
+                    if run:
+                        run.processed_items = (run.processed_items or 0) + 1
+            if made:
+                done += 1
+                if run_id:
+                    _append_log(run_id, "info", f"Smart {u.username}: {', '.join(made)}")
+                try:
+                    from app.services import notify as _notify
+
+                    with session_scope() as db:
+                        _notify.notify(db, "success", "Умные плейлисты готовы",
+                                       f"{u.username}: {', '.join(made)}",
+                                       user_id=str(u.id), link="/playlists")
+                except Exception:
+                    pass
+        summary = f"Smart-плейлисты: пользователей {done}/{total}"
+        if run_id:
+            _append_log(run_id, "info", summary)
+            _finish_run(run_id, "success")
+        try:
+            from app.services import notify as _notify
+
+            with session_scope() as db:
+                _notify.notify(db, "success", "Умные плейлисты обновлены",
+                               summary, link="/playlists")
+                _notify.prune(db)
+        except Exception:
+            pass
+        return {"status": "success", "users": total, "ok": done}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("smart_playlists failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
 def collab_build(*args, **kwargs):
     """Коллаборативный проход: синхронизация пользователей Navidrome.
 

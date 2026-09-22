@@ -18,6 +18,7 @@ def _ensure_defaults(db: Session):
         ("Daily per-user", "daily", "0 3 * * *"),
         ("Taste refresh", "refresh_tastes", "30 4 * * *"),
         ("CLAP embed", "clap", "0 4 * * *"),
+        ("Smart playlists", "smart", "0 6 * * *"),
         ("Cover GC 7d", "covers_gc", "0 5 * * 0"),
     ]
     # upsert по kind — подтягивает новые задачи и на старых базах
@@ -116,6 +117,13 @@ def run_now(job_id: str, db: Session = Depends(get_db)):
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job, "run_id": str(run.id)}
+    if kind == "smart":
+        from app.workers.tasks import smart_playlists
+
+        job = enqueue(smart_playlists, job_timeout=3600)
+        j.last_run_at = datetime.utcnow()
+        db.commit()
+        return {"queued": True, "job_id": job}
     if kind == "clap":
         from app.workers.tasks import clap_embed
 

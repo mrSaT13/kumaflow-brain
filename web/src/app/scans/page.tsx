@@ -94,11 +94,12 @@ export default function ScansPage() {
     }
   }
 
-  async function start(kind: "library" | "analysis" | "lyrics" | "clusters") {
+  async function start(kind: "library" | "analysis" | "lyrics" | "clusters" | "smart") {
     let res: { run_id: string };
     if (kind === "library") res = await api.startLibraryScan();
     else if (kind === "analysis") res = await api.startAnalysis();
     else if (kind === "lyrics") res = await api.startLyrics();
+    else if (kind === "smart") res = await api.startSmart();
     else res = await api.startClusters();
     setSelectedRun(res.run_id);
     refreshRuns();
@@ -123,6 +124,9 @@ export default function ScansPage() {
             </Button>
             <Button onClick={() => start("clusters")}>
               <Zap className="w-4 h-4" /> Кластеры
+            </Button>
+            <Button variant="ghost" onClick={() => start("smart")}>
+              <Sparkles className="w-4 h-4" /> Умные плейлисты
             </Button>
           </div>
         }

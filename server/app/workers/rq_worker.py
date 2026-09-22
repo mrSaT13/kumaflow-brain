@@ -40,6 +40,9 @@ def main() -> int:
                         if j.kind == "daily":
                             enqueue(__import__("app.workers.tasks", fromlist=["daily_per_user"]).daily_per_user, job_timeout=3600)
                             j.last_run_at = __import__("datetime").datetime.utcnow()
+                        elif j.kind == "smart":
+                            enqueue(__import__("app.workers.tasks", fromlist=["smart_playlists"]).smart_playlists, job_timeout=3600)
+                            j.last_run_at = __import__("datetime").datetime.utcnow()
                         elif j.kind == "refresh_tastes":
                             import uuid as _uuid
 

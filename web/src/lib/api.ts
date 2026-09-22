@@ -165,6 +165,7 @@ export const api = {
   startLyrics: () => http<{ queued: boolean; run_id: string }>(`/api/scan/lyrics`, { method: "POST" }),
   startClusters: () => http<{ queued: boolean; run_id: string }>(`/api/scan/clusters`, { method: "POST" }),
   startCollab: () => http<{ queued: boolean; run_id: string }>(`/api/scan/collab`, { method: "POST" }),
+  startSmart: () => http<{ queued: boolean; run_id: string }>(`/api/scan/smart`, { method: "POST" }),
   listRuns: () => http<{ runs: ScanRun[] }>(`/api/scan/runs`),
   currentRun: () => http<{ current: ScanRun | null }>(`/api/scan/runs/current`),
   runLogs: (id: string) => http<{ logs: LogLine[] }>(`/api/scan/runs/${id}/logs`),
