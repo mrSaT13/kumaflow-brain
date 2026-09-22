@@ -109,6 +109,7 @@ export const api = {
       active_server?: string | null;
       disk_tracks?: number;
       navidrome_tracks?: number;
+      analyzed_tracks?: number;
     }>("/api/library/overview"),
   servers: () =>
     http<{ servers: { id: string; type: string; name: string; url: string; enabled: boolean }[] }>(

@@ -14,6 +14,9 @@ export default function HomePage() {
     refreshInterval: 2000,
   });
 
+  const analyzed = overview?.analyzed_tracks ?? 0;
+  const analyzedPct = overview?.tracks ? Math.round((analyzed / overview.tracks) * 100) : 0;
+
   return (
     <>
       <PageHeader
@@ -23,7 +26,8 @@ export default function HomePage() {
 
       <Section title="Обзор">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <Stat label="Треков" value={fmtNumber(overview?.tracks)} icon={<Library className="w-3 h-3" />} />
+          <Stat label="Треков" value={fmtNumber(overview?.tracks)} icon={<Library className="w-3 h-3" />}
+            hint={overview ? `проанализировано ${fmtNumber(analyzed)} · ${analyzedPct}%` : undefined} />
           <Stat label="Альбомов" value={fmtNumber(overview?.albums)} />
           <Stat label="Артистов" value={fmtNumber(overview?.artists)} />
           <Stat

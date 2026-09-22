@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.db import get_db, models
-from app.db.models import MediaServer, Track, Album, Artist, MediaUser
+from app.db.models import MediaServer, Track, Album, Artist, MediaUser, TrackFeatures
 
 logger = get_logger("api.library")
 
@@ -86,6 +86,7 @@ def overview(db: Session = Depends(get_db)):
         "active_server": active,
         "disk_tracks": disk_tracks,
         "navidrome_tracks": navidrome_tracks,
+        "analyzed_tracks": db.query(TrackFeatures).count(),
     }
 
 
