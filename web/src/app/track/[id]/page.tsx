@@ -61,8 +61,10 @@ export default function TrackPage() {
           <div className="flex items-center gap-2 flex-wrap">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={api.trackCoverUrl(id)}
+              src={api.trackCoverUrl(id, 80)}
               alt="Обложка"
+              loading="lazy"
+              decoding="async"
               className="w-10 h-10 rounded-lg object-cover border border-border"
               onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
             />
@@ -86,8 +88,10 @@ export default function TrackPage() {
           <div className="flex items-start gap-3 mb-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={api.trackCoverUrl(id)}
+              src={api.trackCoverUrl(id, 300)}
               alt="Обложка трека"
+              loading="lazy"
+              decoding="async"
               className="w-24 h-24 rounded-xl object-cover border border-border shrink-0"
               onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
             />

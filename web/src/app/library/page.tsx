@@ -210,9 +210,10 @@ export default function LibraryPage() {
                         <div className="flex items-center gap-2 min-w-0">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
-                            src={api.trackCoverUrl(t.id)}
+                            src={api.trackCoverUrl(t.id, 100)}
                             alt=""
                             loading="lazy"
+                            decoding="async"
                             className="w-8 h-8 rounded object-cover border border-border shrink-0"
                             onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
                           />
