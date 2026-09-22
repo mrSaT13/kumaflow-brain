@@ -210,6 +210,17 @@ export const api = {
     http<{ user_id: string; favorites: number; playlists: number; playlist_tracks: number }>(
       `/api/users/${id}/tastes`,
     ),
+  wrapped: (id: string, year?: number, month?: number) =>
+    http<{
+      ok: boolean; month: string; months: string[]; user_id: string;
+      plays: number; minutes: number; active_days: number; peak_hour: number; hours: number[];
+      top_tracks: { track_id: string; title: string; artist_name?: string; plays: number }[];
+      top_artists: { name: string; plays: number }[];
+      top_genres: { name: string; plays: number }[];
+      discoveries: number; discoveries_sample: { track_id: string; title: string; artist_name?: string }[];
+      new_likes: number; new_dislikes: number; new_bans: number;
+      skips: number; replays: number; completes: number;
+    }>(`/api/users/${id}/wrapped${year && month ? `?year=${year}&month=${month}` : ""}`),
   userProfile: (id: string) =>
     http<{
       ok: boolean; username: string;

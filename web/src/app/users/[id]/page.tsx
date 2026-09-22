@@ -91,6 +91,7 @@ export default function UserProfilePage() {
             <Button onClick={myWave} disabled={busy}>
               <Play className="w-4 h-4" /> Моя волна
             </Button>
+            <Link href={`/users/${id}/wrapped` as never} className="kuma-link text-sm">Итоги месяца →</Link>
             <Link href="/users" className="kuma-link text-sm">← Все</Link>
           </div>
         }

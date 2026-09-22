@@ -608,3 +608,24 @@ def clear_history(user_id: str, db: Session = Depends(get_db)):
     e = db.query(_PE).filter(_PE.user_id == str(u.id)).delete()
     db.commit()
     return {'ok': True, 'cleared_history': h, 'cleared_events': e}
+
+
+@router.get("/{user_id}/wrapped")
+def wrapped(user_id: str, year: int | None = None, month: int | None = None,
+            db: Session = Depends(get_db)):
+    """Итоги месяца (self-hosted Wrapped): топы, открытия, часы, лайки."""
+    from datetime import datetime as _dt
+
+    from app.services import wrapped as _w
+
+    u = _require_user(db, user_id)
+    months = _w.available_months(db, str(u.id))
+    now = _dt.utcnow()
+    y, m = int(year or 0), int(month or 0)
+    if not (1 <= m <= 12 and 2000 <= y <= 2100):
+        if months:
+            y, m = int(months[0][:4]), int(months[0][5:7])
+        else:
+            y, m = now.year, now.month
+    return {**_w.month_summary(db, str(u.id), y, m), "months": months,
+            "user_id": str(u.id)}
