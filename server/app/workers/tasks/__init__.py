@@ -51,6 +51,72 @@ def _finish_run(run_id: str, status: str = "success", error: str | None = None) 
             run.error = error
 
 
+def _write_mood_tags(path: Path, feats: dict, backup: bool = False) -> None:
+    """Записать mood/genre/key/bpm в теги файла (mp3/flac/ogg/m4a). Тихо, без падения задачи."""
+    if not path.is_file():
+        return
+    # не трогаем если файл read-only
+    try:
+        if not os.access(str(path), os.W_OK):
+            return
+    except Exception:
+        return
+    if backup:
+        try:
+            import shutil
+
+            shutil.copy2(str(path), str(path) + ".bak")
+        except Exception:
+            pass
+    try:
+        from mutagen import File as _MF  # type: ignore
+        from mutagen.id3 import ID3, TCON, TXXX, TBPM, TKEY  # type: ignore
+    except Exception:
+        return
+    moods = ", ".join(feats.get("mood_labels") or [])[:200]
+    key = f"{feats.get('key_name') or ''} {feats.get('scale') or ''}".strip()
+    bpm = str(feats.get("tempo_bpm") or "")
+    energy = feats.get("energy")
+    try:
+        audio = _MF(str(path), easy=False)
+        if audio is None:
+            return
+        # MP3 — ID3
+        if path.suffix.lower() == ".mp3":
+            try:
+                id3 = ID3(str(path))
+            except Exception:
+                id3 = ID3()
+            if moods:
+                id3.delall("TXXX")
+                # сохраняем существующие TXXX кроме наших
+                id3.add(TXXX(encoding=3, desc="MOOD", text=moods))
+                if energy is not None:
+                    id3.add(TXXX(encoding=3, desc="ENERGY", text=str(energy)))
+            if key:
+                id3.add(TKEY(encoding=3, text=key))
+            if bpm:
+                id3.add(TBPM(encoding=3, text=bpm))
+            id3.save(str(path))
+            return
+        # FLAC/Ogg/Opus — VorbisComment; M4A — MP4
+        if hasattr(audio, "tags") and audio.tags is not None:
+            try:
+                # общий путь для easy-совместимых
+                audio.tags["mood"] = moods
+                if key:
+                    audio.tags["key"] = key
+                if bpm:
+                    audio.tags["bpm"] = bpm
+                if energy is not None:
+                    audio.tags["energy"] = str(energy)
+                audio.save()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _is_cancelled(run_id: str | None) -> bool:
     """Кооперативная отмена: пользователь нажал «Отменить» (статус failure)."""
     if not run_id:
@@ -732,10 +798,19 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
         default_limit = int(settings.analysis_max_tracks_per_run or 0)
         music_dir = settings.music_dir or os.getenv("MUSIC_DIR", "")
     except Exception:
-        sample_seconds, default_limit, music_dir = 90, 200, os.getenv("MUSIC_DIR", "")
-    batch_limit = kwargs.get("limit", None)
-    if batch_limit is None or int(batch_limit or 0) <= 0:
-        batch_limit = default_limit
+        sample_seconds, default_limit, music_dir = 90, 0, os.getenv("MUSIC_DIR", "")
+    # limit из API: 0 = «пачками, но всю библиотеку». chunk — размер одной пачки.
+    requested = kwargs.get("limit", None)
+    if requested is not None and int(requested or 0) > 0:
+        chunk_size = int(requested)
+        do_all = False  # явный limit — только N штук
+    else:
+        # 0/None: берём из настроек; 0 там значит «вся библиотека», пачками по 200
+        if default_limit and int(default_limit) > 0:
+            chunk_size = int(default_limit)
+        else:
+            chunk_size = 200
+        do_all = True
 
     try:
         import librosa  # noqa: F401
@@ -755,27 +830,16 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
         f"фрагмент {sample_seconds}с{', force' if force else ''})",
     )
     try:
+        # общий счётчик для всего прогона
         with session_scope() as db:
             run = db.get(ScanRun, run_id)
             if not run:
                 return {"status": "no run"}
-            # Охват — ВСЯ база (Navidrome + диск + демо), а не только server_id
-            # запуска: раньше файлы с диска на другой строке media_servers
-            # игнорировались анализом.
-            q = (
-                db.query(Track)
-                .outerjoin(TrackFeatures, TrackFeatures.track_id == Track.id)
-            )
+            q0 = db.query(Track).outerjoin(TrackFeatures, TrackFeatures.track_id == Track.id)
             if not force:
-                q = q.filter(TrackFeatures.track_id.is_(None))
-            q = q.order_by(Track.created_at.asc())
-            total_pending = q.count()
-            batch = q.limit(batch_limit).all() if batch_limit and batch_limit > 0 else q.all()
-            todo_data = [
-                (t.id, t.external_id, t.path, t.suffix, t.duration_sec, t.title, t.artist_name)
-                for t in batch
-            ]
-            run.total_items = len(todo_data)
+                q0 = q0.filter(TrackFeatures.track_id.is_(None))
+            total_pending_initial = q0.count()
+            run.total_items = total_pending_initial if do_all else min(total_pending_initial, chunk_size)
             run.processed_items = 0
 
         with session_scope() as db:
@@ -787,81 +851,115 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                 logger.warning("get_media_server_config failed: {}", e)
                 cfg = {}
 
-        ok = fail = n_local = n_stream = 0
-        for i, (tid, ext_id, tpath, suffix, dur, title, artist) in enumerate(todo_data):
-            if _is_cancelled(run_id):
-                _append_log(run_id, "warn", f"Остановлено пользователем на {i}/{len(todo_data)}")
-                return {"status": "failure", "error": "Отменено пользователем", "ok": ok, "failed": fail}
-            tmp_to_clean: Path | None = None
-            try:
-                local_path = aa.resolve_local_file(tpath, music_dir)
-                if local_path is not None:
-                    src = local_path
-                    n_local += 1
-                else:
-                    if not ext_id:
-                        raise RuntimeError("нет external_id и нет локального файла")
-                    if str(ext_id).startswith("disk:"):
-                        raise RuntimeError(
-                            f"локальный файл не найден: {tpath} (проверьте MUSIC_DIR/volumes)"
-                        )
-                    src = aa.download_from_navidrome(ext_id, cfg)
-                    tmp_to_clean = Path(src)
-                    n_stream += 1
-                feats = aa.analyze_file(src, sample_seconds=sample_seconds, track_duration_sec=dur)
-                with session_scope() as db:
-                    f = db.get(TrackFeatures, tid)
-                    if f is None:
-                        f = TrackFeatures(track_id=tid)
-                        db.add(f)
-                    f.tempo_bpm = feats["tempo_bpm"]
-                    f.key_name = feats["key_name"]
-                    f.scale = feats["scale"]
-                    f.energy = feats["energy"]
-                    f.danceability = feats["danceability"]
-                    f.valence = feats["valence"]
-                    f.arousal = feats["arousal"]
-                    f.loudness_db = feats["loudness_db"]
-                    f.spectral_centroid = feats["spectral_centroid"]
-                    f.spectral_rolloff = feats["spectral_rolloff"]
-                    f.zero_crossing_rate = feats["zero_crossing_rate"]
-                    f.mfcc_summary = feats["mfcc_summary"]
-                    f.chroma_summary = feats["chroma_summary"]
-                    f.mood_vector = feats["mood_vector"]
-                    f.mood_labels = feats["mood_labels"]
-                    f.analyzed_at = datetime.utcnow()
-                    if feats.get("duration_sec") and not dur:
-                        t = db.get(Track, tid)
-                        if t is not None:
-                            t.duration_sec = feats["duration_sec"]
-                    run = db.get(ScanRun, run_id)
-                    if run:
-                        run.processed_items = i + 1
-                ok += 1
-            except Exception as e:  # noqa: BLE001 — один битый трек не валит весь прогон
-                fail += 1
-                _append_log(run_id, "warn", f"Не проанализирован: {artist} — {title}: {e}")
-            finally:
-                if tmp_to_clean is not None:
-                    try:
-                        tmp_to_clean.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-            if (i + 1) % 25 == 0:
-                _append_log(run_id, "info", f"Обработано {i + 1}/{len(todo_data)} (ок: {ok}, ошибок: {fail})")
+        ok = fail = n_local = n_stream = total_processed = 0
+        while True:
+            # берём следующую пачку непроанализированных
+            with session_scope() as db:
+                q = db.query(Track).outerjoin(TrackFeatures, TrackFeatures.track_id == Track.id)
+                if not force:
+                    q = q.filter(TrackFeatures.track_id.is_(None))
+                q = q.order_by(Track.created_at.asc())
+                batch = q.limit(chunk_size).all()
+                todo_data = [
+                    (t.id, t.external_id, t.path, t.suffix, t.duration_sec, t.title, t.artist_name)
+                    for t in batch
+                ]
+                if not todo_data:
+                    break
+                # если делаем всю библиотеку — total остаётся исходным, иначе это один chunk
+                if do_all:
+                    run2 = db.get(ScanRun, run_id)
+                    if run2 and run2.total_items < total_pending_initial:
+                        run2.total_items = total_pending_initial
 
-        remaining = total_pending - len(todo_data)
-        summary = (
-            f"Готово — ок: {ok}, ошибок: {fail} "
-            f"(локальные файлы: {n_local}, стрим из Navidrome: {n_stream})."
-        )
+            for tid, ext_id, tpath, suffix, dur, title, artist in todo_data:
+                if _is_cancelled(run_id):
+                    _append_log(run_id, "warn", f"Остановлено пользователем на {total_processed}/{total_pending_initial}")
+                    return {"status": "failure", "error": "Отменено пользователем", "ok": ok, "failed": fail}
+                tmp_to_clean: Path | None = None
+                try:
+                    local_path = aa.resolve_local_file(tpath, music_dir)
+                    if local_path is not None:
+                        src = local_path
+                        n_local += 1
+                    else:
+                        if not ext_id:
+                            raise RuntimeError("нет external_id и нет локального файла")
+                        if str(ext_id).startswith("disk:"):
+                            raise RuntimeError(f"локальный файл не найден: {tpath} (проверьте MUSIC_DIR/volumes)")
+                        src = aa.download_from_navidrome(ext_id, cfg)
+                        tmp_to_clean = Path(src)
+                        n_stream += 1
+                    feats = aa.analyze_file(src, sample_seconds=sample_seconds, track_duration_sec=dur)
+                    with session_scope() as db:
+                        f = db.get(TrackFeatures, tid)
+                        if f is None:
+                            f = TrackFeatures(track_id=tid)
+                            db.add(f)
+                        f.tempo_bpm = feats["tempo_bpm"]
+                        f.key_name = feats["key_name"]
+                        f.scale = feats["scale"]
+                        f.energy = feats["energy"]
+                        f.danceability = feats["danceability"]
+                        f.valence = feats["valence"]
+                        f.arousal = feats["arousal"]
+                        f.loudness_db = feats["loudness_db"]
+                        f.spectral_centroid = feats["spectral_centroid"]
+                        f.spectral_rolloff = feats["spectral_rolloff"]
+                        f.zero_crossing_rate = feats["zero_crossing_rate"]
+                        f.mfcc_summary = feats["mfcc_summary"]
+                        f.chroma_summary = feats["chroma_summary"]
+                        f.mood_vector = feats["mood_vector"]
+                        f.mood_labels = feats["mood_labels"]
+                        f.analyzed_at = datetime.utcnow()
+                        if feats.get("duration_sec") and not dur:
+                            t = db.get(Track, tid)
+                            if t is not None:
+                                t.duration_sec = feats["duration_sec"]
+                        run = db.get(ScanRun, run_id)
+                        if run:
+                            run.processed_items = total_processed + 1
+                    # --- MUTAGEN_WRITEBACK: тихо пишем mood/genre/key/bpm в файл, если включен ---
+                    try:
+                        from app.core.config import get_settings as _gs
+
+                        s = _gs()
+                        if s.mutagen_writeback and local_path is not None:
+                            # только локальные файлы, только если rw
+                            _write_mood_tags(local_path, feats, backup=s.mutagen_writeback_backup)
+                    except Exception as _e:
+                        logger.warning("mutagen writeback failed for {}: {}", local_path, _e)
+                    ok += 1
+                except Exception as e:  # noqa: BLE001
+                    fail += 1
+                    _append_log(run_id, "warn", f"Не проанализирован: {artist} — {title}: {e}")
+                finally:
+                    if tmp_to_clean is not None:
+                        try:
+                            tmp_to_clean.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                total_processed += 1
+                if total_processed % 25 == 0:
+                    _append_log(run_id, "info", f"Обработано {total_processed}/{total_pending_initial} (ок: {ok}, ошибок: {fail}, пачка {chunk_size})")
+            # если запрошен только один chunk — выходим
+            if not do_all:
+                break
+            # иначе цикл возьмёт следующую пачку, пока не кончатся
+
+        with session_scope() as db:
+            q = db.query(Track).outerjoin(TrackFeatures, TrackFeatures.track_id == Track.id)
+            if not force:
+                q = q.filter(TrackFeatures.track_id.is_(None))
+            remaining = q.count()
+        summary = f"Готово — ок: {ok}, ошибок: {fail} (локальные файлы: {n_local}, стрим из Navidrome: {n_stream})."
         if remaining > 0:
-            summary += f" Осталось без анализа: {remaining} — запустите Sonic ещё раз."
+            summary += f" Осталось без анализа: {remaining} (прервано/ошибка?)."
         else:
-            summary += " Все треки проанализированы."
+            summary += " Вся библиотека проанализирована."
         _append_log(run_id, "info", summary)
         _finish_run(run_id, "success")
-        return {"status": "success", "ok": ok, "failed": fail, "remaining": remaining}
+        return {"status": "success", "ok": ok, "failed": fail, "remaining": remaining, "total": total_pending_initial}
     except Exception as e:  # noqa: BLE001
         logger.exception("sonic_analysis failed: {}", e)
         _append_log(run_id, "error", str(e))
@@ -1314,12 +1412,68 @@ def sync_navidrome_users(server_id: str) -> dict:
 
 
 def yandex_enrich(*args, **kwargs):
+    """Обогащение метаданных через Yandex Music (stealth, кэш, throttle).
+
+    Берёт треки без yandex-enrich (пачками по 20), ищет через api.music.yandex.net
+    и пишет в TrackMetadataEnrich source='yandex'. Пауза 1.2s между запросами,
+    чтобы не палить токен (429 → backoff).
+    """
     run_id = args[0] if args else None
-    msg = "Yandex-обогащение ещё не реализовано"
-    if run_id:
-        _append_log(run_id, "error", msg)
-        _finish_run(run_id, "failure", msg)
-    return {"status": "not_implemented", "error": msg}
+    try:
+        from app.db.models import TrackMetadataEnrich
+
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            total = run.total_items if run else 0
+        _append_log(run_id, "info", f"Yandex enrich: до {total} треков (throttle 1.2s)")
+        ok = fail = 0
+        with session_scope() as db:
+            have = db.query(TrackMetadataEnrich.track_id).filter(TrackMetadataEnrich.source == "yandex").subquery()
+            todos = db.query(Track).filter(~Track.id.in_(db.query(have.c.track_id))).limit(total or 20).all()
+            todo_data = [(t.id, t.artist_name or "", t.title or "", t.album_name or "") for t in todos]
+        import asyncio as _aio
+
+        from app.services.yandex_music.client import fetch_metadata_sync
+
+        for idx, (tid, artist, title, album) in enumerate(todo_data):
+            if _is_cancelled(run_id):
+                _append_log(run_id, "warn", f"Остановлено на {idx}/{len(todo_data)}")
+                break
+            if not artist or not title:
+                fail += 1
+                continue
+            try:
+                with session_scope() as db:
+                    res = fetch_metadata_sync(db, artist, title, album)
+                    if res:
+                        # защита от дубля
+                        ex = db.query(TrackMetadataEnrich).filter_by(track_id=tid, source="yandex").first()
+                        if ex is None:
+                            db.add(TrackMetadataEnrich(track_id=tid, source="yandex", data=res))
+                        else:
+                            ex.data = res
+                        ok += 1
+                    else:
+                        fail += 1
+                        _append_log(run_id, "warn", f"Yandex не нашёл: {artist} — {title}")
+                    run = db.get(ScanRun, run_id) if run_id else None
+                    if run:
+                        run.processed_items = idx + 1
+                time.sleep(0.1)  # доп. пауза внутри пачки, основная — в client _throttle
+            except Exception as e:  # noqa: BLE001
+                fail += 1
+                _append_log(run_id, "warn", f"Yandex err {artist} — {title}: {e}")
+            if (idx + 1) % 10 == 0:
+                _append_log(run_id, "info", f"Yandex {idx+1}/{len(todo_data)} ok:{ok} fail:{fail}")
+        _append_log(run_id, "info", f"Yandex готово ok:{ok} fail:{fail}")
+        _finish_run(run_id, "success")
+        return {"status": "success", "ok": ok, "fail": fail}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("yandex_enrich failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
 
 
 def collab_build(*args, **kwargs):

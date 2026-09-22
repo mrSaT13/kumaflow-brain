@@ -82,7 +82,13 @@ class Settings(BaseSettings):
     # Если не задан — worker тянет аудио стримом из Navidrome через Subsonic API.
     music_dir: str = ""
     analysis_sample_seconds: int = 90
-    analysis_max_tracks_per_run: int = 200
+    analysis_max_tracks_per_run: int = 0  # 0 = все непроанализированные за один прогон
+
+    mutagen_writeback: bool = False  # если True — пишет mood/genre/key/bpm в теги файлов (только локальные)
+    mutagen_writeback_backup: bool = False  # делать .bak копию перед записью
+
+    yandex_music_throttle_sec: float = 1.2  # задержка между запросами к api.music.yandex.net
+    yandex_music_cache_ttl_hours: int = 72
 
     lyrics_providers: list[str] = Field(default_factory=lambda: ["lyrics.ovh", "musixmatch"])
     lyrics_user_agent: str = "Mozilla/5.0 (compatible; KumaFlowBrain/0.1)"

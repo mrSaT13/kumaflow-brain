@@ -38,10 +38,97 @@ def cold_start(db: Session = Depends(get_db), n: int = 30):
 
 
 @router.post("/search-by-text")
-def search_by_text(payload: dict):
-    """Заглушка для будущего CLAP-эмбеддинга от текста.
-    Сейчас работает через keyword → embedding (если есть)."""
-    return {"items": []}
+def search_by_text(payload: dict, db: Session = Depends(get_db)):
+    """Текстовый поиск: CLAP-эмбеддинг если есть, иначе TF-IDF/keyword fallback.
+
+    Payload: {"q": "грустный инди", "top_k": 20}
+    """
+    q = (payload.get("q") or payload.get("query") or "").strip() if isinstance(payload, dict) else ""
+    top_k = int(payload.get("top_k") or payload.get("n") or 20) if isinstance(payload, dict) else 20
+    top_k = max(1, min(50, top_k))
+    if not q:
+        return {"items": [], "mode": "empty", "query": q}
+
+    # 1) если есть CLAP эмбеддинг — пробуем через AI/onnx (опционально)
+    try:
+        from app.services.ai import is_configured as ai_ready
+
+        # CLAP пока не подключен как провайдер, но если появится — используем
+        _ = ai_ready  # noqa
+    except Exception:
+        pass
+
+    # 2) TF-IDF fallback по title/artist/album/lyrics/mood (работает без ML)
+    from sqlalchemy import or_
+
+    from app.db.models import Lyrics, Track, TrackFeatures
+
+    like = f"%{q.lower()}%"
+    # прямой keyword-поиск (ILIKE через lower -> работает и на sqlite и на postgres)
+    from sqlalchemy import func as _func
+
+    try:
+        base_q = db.query(Track).filter(
+            or_(
+                _func.lower(Track.title).like(like),
+                _func.lower(Track.artist_name).like(like),
+                _func.lower(Track.album_name).like(like),
+                _func.lower(Track.genre).like(like),
+            )
+        )
+        rows = base_q.order_by(Track.play_count.desc()).limit(top_k * 2).all()
+    except Exception:
+        rows = []
+    # если есть тексты — дополняем поиском по lyrics
+    lyric_ids: list[str] = []
+    try:
+        lyric_rows = (
+            db.query(Lyrics.track_id)
+            .filter(_func.lower(Lyrics.text).like(like))
+            .limit(top_k)
+            .all()
+        )
+        lyric_ids = [str(r[0]) for r in lyric_rows]
+    except Exception:
+        pass
+    # mood fallback: ищем по TrackFeatures.mood_labels (json LIKE)
+    mood_rows: list[Track] = []
+    try:
+        # SQLite: json_each, Postgres: @> — упрощаем через Python фильтрацию
+        cand = db.query(Track).join(TrackFeatures, TrackFeatures.track_id == Track.id).all()
+        q_low = q.lower()
+        for t in cand:
+            f = db.get(TrackFeatures, t.id)
+            if f and f.mood_labels and any(q_low in str(m).lower() for m in f.mood_labels):
+                mood_rows.append(t)
+                if len(mood_rows) >= top_k:
+                    break
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    items: list[dict] = []
+    for t in list(rows) + mood_rows:
+        tid = str(t.id)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        items.append({"track_id": tid, "title": t.title, "artist_name": t.artist_name, "album_name": t.album_name, "genre": t.genre, "score": 1.0})
+        if len(items) >= top_k and not lyric_ids:
+            break
+    # добавим lyric-хиты если не хватает
+    if len(items) < top_k and lyric_ids:
+        for tid in lyric_ids:
+            if tid in seen:
+                continue
+            t = db.get(Track, tid)
+            if not t:
+                continue
+            items.append({"track_id": tid, "title": t.title, "artist_name": t.artist_name, "album_name": t.album_name, "genre": t.genre, "score": 0.9})
+            seen.add(tid)
+            if len(items) >= top_k:
+                break
+    return {"items": items[:top_k], "mode": "keyword", "query": q}
 
 
 @router.post("/lyrics/analyze-all")

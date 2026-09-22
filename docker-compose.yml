@@ -114,7 +114,7 @@ services:
       # тянется только из Navidrome через Subsonic API, а аудио для анализа —
       # стримом оттуда же.
       ANALYSIS_SAMPLE_SECONDS: 90
-      ANALYSIS_MAX_TRACKS_PER_RUN: 200
+      ANALYSIS_MAX_TRACKS_PER_RUN: 0  # 0 = весь остаток за раз
     # volumes:
     #   - /путь/к/музыке/на/хосте:/music:ro
     extra_hosts:

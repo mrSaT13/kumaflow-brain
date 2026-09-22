@@ -500,16 +500,61 @@ def build_clusters(server_id: str | None = None, k: int = 8) -> dict[str, Any]:
 # ---------- 4. ANN по эмбеддингам (если есть) ----------
 
 def search_by_embedding(query_vec: list[float], top_k: int = 20) -> list[dict[str, Any]]:
-    """Косинусный поиск по сохранённым эмбеддингам (CLAP/MuLan)."""
+    """Косинусный поиск по сохранённым эмбеддингам (CLAP/MuLan).
+
+    Если установлен voyager — использует HNSW-индекс в памяти, иначе
+    brute-force через numpy (для CPU/малых библиотек достаточно).
+    """
+    if not _HAS_NP:
+        return []
     q = np.array(query_vec, dtype=np.float32)
+    q_norm = float(np.linalg.norm(q))
+    if q_norm == 0:
+        return []
+    q = q / q_norm
     with session_scope() as db:
         rows = db.query(TrackEmbedding).all()
+        if not rows:
+            return []
+        # попытка voyager (опционально)
+        try:
+            import voyager  # type: ignore
+
+            dim = len(query_vec)
+            # voyager требует одинаковый dim
+            filtered = [(r, np.frombuffer(r.vector, dtype=np.float32)) for r in rows if np.frombuffer(r.vector, dtype=np.float32).shape[0] == dim]
+            if filtered:
+                vecs = np.vstack([v / (float(np.linalg.norm(v)) or 1.0) for _, v in filtered])
+                index = voyager.Index.Space.Cosine(dim)
+                index.add_items(vecs)
+                # voyager 2.x: query
+                ids, dists = index.query(q, k=min(top_k, len(filtered)))
+                id_map = {i: r for i, (r, _) in enumerate(filtered)}
+                out = []
+                for idx, dist in zip(ids, dists):
+                    r = id_map.get(int(idx))
+                    if r is None:
+                        continue
+                    t = db.get(Track, r.track_id)
+                    if t is None:
+                        continue
+                    # voyager возвращает косинусное расстояние (1 - cosine)
+                    score = 1.0 - float(dist)
+                    out.append({"track_id": str(t.id), "title": t.title, "artist_name": t.artist_name, "score": round(score, 4)})
+                return out
+        except Exception:
+            pass
         scored = []
         for r in rows:
             v = np.frombuffer(r.vector, dtype=np.float32)
             if v.shape[0] != q.shape[0]:
                 continue
-            s = _cosine(q, v)
+            # нормализуем заранее
+            vn = float(np.linalg.norm(v))
+            if vn == 0:
+                continue
+            v = v / vn
+            s = float(np.dot(q, v))
             t = db.get(Track, r.track_id)
             if t is None:
                 continue
