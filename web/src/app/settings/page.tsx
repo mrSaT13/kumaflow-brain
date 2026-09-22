@@ -277,7 +277,7 @@ export default function SettingsPage() {
           </div>
         </Card>
       </Section>
-      )}
+      }
 
       {tab === "ai" && <Section title="AI — провайдер и модели">
         <Card>
@@ -381,7 +381,7 @@ export default function SettingsPage() {
           )}
         </Card>
       </Section>
-      )}
+      }
 
       {tab === "diag" && <Section title="Диагностика">
         <Card>
@@ -457,6 +457,7 @@ export default function SettingsPage() {
           </div>
         </Card>
       </Section>
+      }
     </>
   );
 }

@@ -14,7 +14,9 @@ import {
   Activity,
 } from "lucide-react";
 
-const sections: { title: string; items: typeof items }[] = [
+type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
+
+const sections: { title: string; items: NavItem[] }[] = [
   { title: "Библиотека", items: [
     { href: "/", label: "Главная", icon: LayoutDashboard },
     { href: "/library", label: "Библиотека", icon: Library },
@@ -29,7 +31,7 @@ const sections: { title: string; items: typeof items }[] = [
     { href: "/settings", label: "Настройки", icon: Cog },
   ]},
 ];
-const items = sections.flatMap(s => s.items);
+const items: NavItem[] = sections.flatMap(s => s.items);
 
 export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => void } = {}) {
   // usePathname() может вернуть null на первом клиентском рендере —
