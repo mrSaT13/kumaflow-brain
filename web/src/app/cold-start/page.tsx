@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Heart, Loader2, Play, Sparkles } from "lucide-react";
 import { Button, Card, Input, PageHeader, Section } from "@/components/ui";
 import { api, type ArtistEntry } from "@/lib/api";
+import { genreIcon } from "@/lib/genreIcon";
 
 // Палитра как в мобильном (fallback по хэшу жанра)
 const PALETTE = ["#FF3B30", "#007AFF", "#34C759", "#5856D6", "#AF52DE", "#FF9500", "#FF2D55", "#5AC8FA"];
@@ -205,6 +206,7 @@ export default function ColdStartPage() {
               {filteredGenres.map((g) => {
                 const sel = selectedGenres.includes(g);
                 const color = genreColor(g);
+                const GIcon = genreIcon(g);
                 return (
                   <button key={g} onClick={() => toggleGenre(g)} className="flex flex-col items-center gap-2 group">
                     <span
@@ -217,7 +219,7 @@ export default function ColdStartPage() {
                         opacity: sel ? 1 : 0.92,
                       }}
                     >
-                      {sel ? <Check className="w-7 h-7" /> : g.slice(0, 1).toUpperCase()}
+                      {sel ? <Check className="w-7 h-7" /> : <GIcon className="w-7 h-7" />}
                     </span>
                     <span className="text-xs text-center leading-tight line-clamp-2" style={{ fontWeight: sel ? 700 : 500 }}>
                       {g}
