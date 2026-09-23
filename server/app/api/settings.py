@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -322,3 +322,147 @@ def tokens_delete(token_id: str, db: Session = Depends(get_db)):
 
         raise _HE(404, "not found")
     return {"ok": True}
+
+
+def _subsonic_auth_params(user: str, password: str) -> dict:
+    import hashlib as _hl
+    import secrets as _sec
+
+    salt = _sec.token_hex(6)
+    return {
+        "u": user,
+        "t": _hl.md5(f"{password}{salt}".encode()).hexdigest(),
+        "s": salt,
+        "v": "1.16.1",
+        "c": "KumaFlowBrain",
+        "f": "json",
+    }
+
+
+async def _navidrome_check(url: str, username: str, password: str) -> dict:
+    """Проверка логина/пароля в Navidrome + флаг админа.
+
+    Возвращает {ok, is_admin, error}. Пароль используется один раз и забывается.
+    Админ определяется через getUser (доступен только админам): получилось
+    и adminRole true — админ, иначе обычный юзер.
+    """
+    import httpx
+
+    base = (url or "").strip().rstrip("/")
+    if not base.startswith("http"):
+        base = "http://" + base
+    params = _subsonic_auth_params(username, password)
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.get(f"{base}/rest/ping.view", params=params)
+            try:
+                sr = r.json().get("subsonic-response", {})
+            except Exception:
+                return {"ok": False, "is_admin": False, "error": f"HTTP {r.status_code}"}
+            if sr.get("status") != "ok":
+                err = (sr.get("error") or {}).get("message") or "неверный логин или пароль"
+                return {"ok": False, "is_admin": False, "error": str(err)[:200]}
+            # пинг ок — пробуем getUser для флага админа
+            is_admin = False
+            try:
+                r2 = await client.get(f"{base}/rest/getUser.view",
+                                      params={**params, "username": username})
+                u = r2.json().get("subsonic-response", {}).get("user", {})
+                is_admin = bool(u.get("adminRole", False))
+            except Exception:
+                is_admin = False
+            return {"ok": True, "is_admin": is_admin, "error": ""}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "is_admin": False, "error": str(e)[:200]}
+
+
+@router.post("/login")
+async def login(payload: dict, db: Session = Depends(get_db)):
+    """Вход по логину/паролю Navidrome — в обмен выдаём API-токен.
+
+    Пароль используется один раз для проверки и НЕ хранится.
+    Админы Navidrome получают admin-токен, остальные — мобильный набор
+    (волна + синк + обложки + плейлисты), привязанный к их юзеру.
+    """
+    import uuid as _uuid
+
+    from app.db.models import MediaUser
+    from app.services import api_tokens as _tokens
+    from app.services.media_server import get_media_server_config
+
+    username = str((payload or {}).get("username") or "").strip()
+    password = str((payload or {}).get("password") or "")
+    device = str((payload or {}).get("device") or "web").strip()[:64] or "web"
+    if not username or not password:
+        return {"ok": False, "error": "Укажите логин и пароль"}
+    try:
+        cfg = get_media_server_config(db)
+    except Exception:
+        cfg = {}
+    url = (cfg.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "Медиа-сервер не настроен (сначала Настройки → Подключения)"}
+    chk = await _navidrome_check(url, username, password)
+    if not chk.get("ok"):
+        return {"ok": False, "error": chk.get("error") or "Navidrome отклонил логин/пароль"}
+    is_admin = bool(chk.get("is_admin"))
+    # find-or-create MediaUser без импорта вкусов (быстро)
+    from app.services.media_server import resolve_active_server
+
+    server = resolve_active_server(db)
+    db.commit()
+    u = db.query(MediaUser).filter_by(server_id=server.id, external_id=username[:128]).first()
+    if u is None:
+        u = MediaUser(id=str(_uuid.uuid4()), server_id=server.id,
+                      external_id=username[:128], username=username[:128],
+                      is_admin=is_admin)
+        db.add(u)
+        db.commit()
+        db.refresh(u)
+    scopes = ["admin"] if is_admin else list(_tokens.PRESETS["mobile"]["scopes"])
+    created = _tokens.create_token(db, str(u.id), f"{device} · {username}"[:128], scopes)
+    return {"ok": True, "token": created["token"], "user": {"id": str(u.id), "username": u.username},
+            "is_admin": is_admin, "scopes": created["scopes"]}
+
+
+@router.get("/whoami")
+def whoami(request: Request, db: Session = Depends(get_db)):
+    """Кто этот браузер: валиден ли сохранённый токен, закрыт ли API.
+
+    Всегда 200 (без 401) — gate в вебе решает, показывать ли окно логина.
+    """
+    from app.core.config import get_settings as _gs
+    from app.services import api_tokens as _tokens
+
+    env_token = (_gs().brain_api_token or "").strip()
+    total = _tokens.count_tokens(db)
+    locked = bool(env_token) or total > 0
+    got = ""
+    try:
+        auth = request.headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            got = auth[7:].strip()
+    except Exception:
+        got = ""
+    if got and env_token and got == env_token:
+        return {"ok": True, "logged_in": True, "is_admin": True,
+                "owner_user_id": None, "prefix": "env",
+                "locked": True, "tokens_exist": total > 0, "env_configured": True}
+    info = _tokens.verify(db, got) if got else None
+    if info is None:
+        return {"ok": True, "logged_in": False, "is_admin": False,
+                "owner_user_id": None, "prefix": "",
+                "locked": locked, "tokens_exist": total > 0,
+                "env_configured": bool(env_token)}
+    prefix = ""
+    try:
+        from app.db.models import ApiToken
+
+        r = db.get(ApiToken, info["token_id"])
+        prefix = (r.prefix or "") if r else ""
+    except Exception:
+        pass
+    return {"ok": True, "logged_in": True, "is_admin": bool(info.get("is_admin")),
+            "owner_user_id": info.get("owner_user_id"), "prefix": prefix,
+            "locked": locked, "tokens_exist": total > 0,
+            "env_configured": bool(env_token)}

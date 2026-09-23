@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "@/styles/globals.css";
 import { MobileShell } from "@/components/MobileShell";
 import { ToastProvider } from "@/components/toasts";
+import LoginGate from "@/components/LoginGate";
 
 export const metadata: Metadata = {
   title: "KumaFlow Brain",
@@ -19,7 +20,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
         <ToastProvider>
-          <MobileShell>{children}</MobileShell>
+          <LoginGate>
+            <MobileShell>{children}</MobileShell>
+          </LoginGate>
         </ToastProvider>
       </body>
     </html>

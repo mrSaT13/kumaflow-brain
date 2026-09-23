@@ -22,13 +22,15 @@ from app.core.config import get_settings
 
 _bearer = HTTPBearer(auto_error=False)
 
-# Пути, всегда открытые (health/docs + управление токенами из LAN-веба;
+# Пути, всегда открытые (health/docs + управление токенами и логин из LAN-веба;
 # сами токены защищают API, а не веб-морду).
 OPEN_PATHS = (
     "/api/health",
     "/api/docs",
     "/api/openapi.json",
     "/api/settings/tokens",
+    "/api/settings/login",
+    "/api/settings/whoami",
 )
 
 

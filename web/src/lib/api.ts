@@ -511,8 +511,7 @@ export const api = {
       scopes: Record<string, string>;
       presets: Record<string, { label: string; desc: string; scopes: string[] }>;
       env_token_configured: boolean; count: number;
-    }>(`/api/settings/tokens/meta`),
-  listTokens: (owner_user_id?: string) =>
+    }>(`/api/settings/tokens/meta`),  listTokens: (owner_user_id?: string) =>
     http<{ tokens: ApiToken[] }>(`/api/settings/tokens${owner_user_id ? `?owner_user_id=${encodeURIComponent(owner_user_id)}` : ""}`),
   createToken: (body: { owner_user_id?: string | null; name: string; scopes: string[] }) =>
     http<{ ok: boolean; id: string; name: string; prefix: string; scopes: string[]; owner_user_id?: string | null; token: string }>(
@@ -522,6 +521,18 @@ export const api = {
     http<{ ok: boolean; token: ApiToken }>(`/api/settings/tokens/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
   deleteToken: (id: string) =>
     http<{ ok: boolean }>(`/api/settings/tokens/${id}`, { method: "DELETE" }),
+
+  login: (body: { username: string; password: string; device?: string }) =>
+    http<{
+      ok: boolean; token?: string; user?: { id: string; username: string };
+      is_admin?: boolean; scopes?: string[]; error?: string;
+    }>(`/api/settings/login`, { method: "POST", body: JSON.stringify(body) }),
+  whoami: () =>
+    http<{
+      ok: boolean; logged_in: boolean; is_admin: boolean;
+      owner_user_id?: string | null; prefix?: string;
+      locked: boolean; tokens_exist: boolean; env_configured: boolean;
+    }>(`/api/settings/whoami`),
 };
 
 export type ApiToken = {
