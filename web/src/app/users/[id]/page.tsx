@@ -459,15 +459,17 @@ export default function UserProfilePage() {
           <div className="flex flex-col md:flex-row gap-3 md:items-center text-sm">
             <span className="flex items-center gap-2">
               <KeyRound className="w-4 h-4 text-muted" />
-              {vault?.stored ? "Пароль запомнен (шифр, ключ в compose)" : "Пароль не запомнен"}
-              {!vault?.available && <Badge tone="warn">TASTE_VAULT_KEY не задан</Badge>}
+              {vault?.stored ? "Пароль запомнен (шифр)" : "Пароль не запомнен"}
+              {vault && !vault.available && <Badge tone="warn">сейф пуст — нажми «Запомнить пароль», ключ создастся сам</Badge>}
+              {vault?.available && !vault?.stored && vault?.key_source === "db" && <Badge tone="ok">ключ: авто</Badge>}
+              {vault?.available && !vault?.stored && vault?.key_source === "env" && <Badge tone="ok">ключ: compose</Badge>}
             </span>
             {data.mobile?.synced_at && (
               <Badge tone="ok">мобила: {new Date(data.mobile.synced_at).toLocaleString("ru-RU")}</Badge>
             )}
             <span className="flex-1" />
             {!vault?.stored ? (
-              <Button variant="ghost" onClick={rememberPwd} disabled={busy || !vault?.available} title={!vault?.available ? "Сначала задайте TASTE_VAULT_KEY" : ""}>
+              <Button variant="ghost" onClick={rememberPwd} disabled={busy} title="Ключ создастся автоматически при первом сохранении">
                 Запомнить пароль
               </Button>
             ) : (
@@ -494,7 +496,7 @@ export default function UserProfilePage() {
               <RefreshCw className="w-4 h-4" /> Синк в фоне
             </Button>
           </div>
-          <div className="text-xs text-muted mt-2">Ночью (04:30) вкусы подтянутся сами. Пароль хранится только шифротекстом, ключ — в секретах compose, не в базе.</div>
+          <div className="text-xs text-muted mt-2">Ночью (04:30) вкусы подтянутся сами. Пароль хранится шифротекстом; ключ создаётся сам (в базе) или берётся из compose, если задан.</div>
         </Card>
       </Section>
       <PasswordDialog
@@ -505,7 +507,8 @@ export default function UserProfilePage() {
           if (pwd) void act(async () => {
             const r = await api.vaultStore(id, pwd);
             mutateVault();
-            return r;
+            if (!r.ok) return r;
+            return { ok: true };
           }, "Запомнено ✓ — вкусы будут обновляться ночью сами");
         }}
       />

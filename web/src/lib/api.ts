@@ -304,9 +304,9 @@ export const api = {
     http<{ ok: boolean }>(`/api/users/${userId}/ban-artist`, { method: "POST", body: JSON.stringify({ artist_name }) }),
   unbanArtist: (userId: string, artist_name: string) =>
     http<{ ok: boolean }>(`/api/users/${userId}/unban-artist`, { method: "POST", body: JSON.stringify({ artist_name }) }),
-  vaultStatus: (id: string) => http<{ stored: boolean; available: boolean }>(`/api/users/${id}/vault`),
+  vaultStatus: (id: string) => http<{ stored: boolean; available: boolean; key_source?: string }>(`/api/users/${id}/vault`),
   vaultStore: (id: string, password: string) =>
-    http<{ ok: boolean; error?: string }>(`/api/users/${id}/vault`, { method: "POST", body: JSON.stringify({ password }) }),
+    http<{ ok: boolean; stored?: boolean; key_created?: boolean; error?: string }>(`/api/users/${id}/vault`, { method: "POST", body: JSON.stringify({ password }) }),
   vaultForget: (id: string) => http<{ ok: boolean }>(`/api/users/${id}/vault`, { method: "DELETE" }),
   refreshNow: (id: string) =>
     http<{ ok: boolean; favorites_total?: number; playlists?: number; error?: string }>(

@@ -35,6 +35,10 @@ def list_settings(db: Session = Depends(get_db)):
         "database_url": (s.database_url.split("@")[-1] if "@" in s.database_url else s.database_url),
     }
     db_settings = {row.key: row.value for row in db.query(AppSetting).all()}
+    # секрет сейфа наружу не отдаём — только факт наличия
+    if isinstance(db_settings.get("taste_vault_key"), dict):
+        _v = db_settings["taste_vault_key"]
+        db_settings["taste_vault_key"] = {"configured": bool(_v.get("key")), "auto": bool(_v.get("auto"))}
     return {"runtime": runtime, "db": db_settings}
 
 

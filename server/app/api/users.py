@@ -177,6 +177,7 @@ def create_user_by_credentials(payload: TasteImportIn, db: Session = Depends(get
         from app.services import vault as _vault
 
         try:
+            _vault.ensure_vault_key()
             blob = _vault.encrypt_password(payload.password)
             row = db.query(_UC).filter_by(user_id=u.id).first()
             if row is None:
@@ -496,12 +497,13 @@ def vault_status(user_id: str, db: Session = Depends(get_db)):
 
     u = _require_user(db, user_id)
     stored = db.query(_UC).filter_by(user_id=u.id).first() is not None
-    return {"stored": stored, "available": _vault.vault_available()}
+    return {"stored": stored, "available": _vault.vault_available(),
+            "key_source": _vault.key_source()}
 
 
 @router.post("/{user_id}/vault")
 def vault_store(user_id: str, payload: VaultIn, db: Session = Depends(get_db)):
-    """Запомнить пароль (opt-in автообновление). Шифр Fernet, ключ в env."""
+    """Запомнить пароль (opt-in автообновление). Ключ создаётся сам при первом нажатии."""
     from app.db.models import UserCredential as _UC
     from app.services import vault as _vault
 
@@ -509,6 +511,7 @@ def vault_store(user_id: str, payload: VaultIn, db: Session = Depends(get_db)):
     if not (payload.password or "").strip():
         raise HTTPException(400, "password required")
     try:
+        _key, created = _vault.ensure_vault_key()
         blob = _vault.encrypt_password(payload.password)
     except RuntimeError as e:
         return {"ok": False, "error": str(e)}
@@ -518,7 +521,7 @@ def vault_store(user_id: str, payload: VaultIn, db: Session = Depends(get_db)):
     else:
         row.enc_password = blob
     db.commit()
-    return {"ok": True, "stored": True}
+    return {"ok": True, "stored": True, "key_created": bool(created)}
 
 
 @router.delete("/{user_id}/vault")
