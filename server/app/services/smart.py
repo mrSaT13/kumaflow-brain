@@ -81,10 +81,12 @@ def discoveries(db, user_id: str, n: int = 30) -> list[str]:
     else:
         cand = [str(r[0]) for r in q.limit(1500).all()]
     if bans and cand:
+        from app.services.artist_names import is_banned as _is_banned
+
         meta = {str(t.id): t for t in
                 db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
         cand = [c for c in cand
-                if not (meta.get(c) and meta[c].artist_name in bans)]
+                if not (meta.get(c) and _is_banned(meta[c].artist_name, bans))]
     if not cand:
         return []
     seeds = _wave.select_seeds(db, user_id, limit=5)
@@ -155,11 +157,13 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
                 pool.append((tid, bpm / 200.0 + en))
     # баны + сортировка: ночь — спокойнее выше, спорт — бодрее выше
     if bans and pool:
+        from app.services.artist_names import is_banned as _is_banned
+
         ids = [t for t, _ in pool]
         meta = {str(t.id): t for t in
                 db.query(Track).filter(Track.id.in_(ids[:2000])).all()}
         pool = [(t, s) for t, s in pool
-                if not (meta.get(t) and meta[t].artist_name in bans)]
+                if not (meta.get(t) and _is_banned(meta[t].artist_name, bans))]
     pool.sort(key=lambda kv: kv[1], reverse=(predicate == "sport"))
     if predicate == "night":
         pool.sort(key=lambda kv: kv[1])  # спокойнее — выше

@@ -105,8 +105,12 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
                     break
         except Exception:
             pass
+    try:
+        from app.services.artist_names import is_banned as _is_banned
+    except Exception:
+        _is_banned = lambda a, b: bool(a and a in b)  # noqa: E731
     pool = [t for t in pool if str(t.id) not in dis
-            and not (t.artist_name and t.artist_name in bans)]
+            and not _is_banned(t.artist_name, bans)]
     if not pool:
         return []
 
@@ -147,18 +151,27 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
                  TrackFeatures.track_id.in_([r["track_id"] for r in ranked[:n]] + [str(cur.id)])
              ).all()}
     cur_feat = feats.get(str(cur.id))
+    try:
+        from app.services.covers import resolve_track_cover_id as _resolve_cover
+    except Exception:
+        _resolve_cover = None  # noqa: F841
     out: list[dict] = []
     for r in ranked[:n]:
         tid = str(r.get("track_id") or "")
         t = meta.get(tid)
         if not t:
             continue
+        try:
+            cid = _resolve_cover(db, t) if _resolve_cover else (t.cover_art_id or None)
+        except Exception:
+            cid = t.cover_art_id or None
         out.append({
             "track_id": tid,
             "title": t.title,
             "artist_name": t.artist_name,
             "album_name": t.album_name,
             "genre": t.genre,
+            "cover_art_id": cid,
             "score": round(float(r.get("score", 0) or 0), 3),
             "reason": _explain(cur_feat, cur, t, feats.get(tid),
                                collab_map.get(tid, 0.0)),
@@ -246,6 +259,13 @@ def now_playing(user_id: str | None = None, n: int = 5, db: Session = Depends(ge
         "minutes_ago": picked.get("minutesAgo"),
         "player": picked.get("playerName") or picked.get("player"),
     }
+    if local is not None:
+        try:
+            from app.services.covers import resolve_track_cover_id as _rc
+
+            playing["cover_art_id"] = _rc(db, local)
+        except Exception:
+            playing["cover_art_id"] = None
     nxt: list[dict] = []
     if local is not None:
         try:

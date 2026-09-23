@@ -319,9 +319,25 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
     seeds = select_seeds(db, user_id,
                          characteristic=settings.get('characteristic'), limit=5)
+    cur_ids: list[str] = []
     if current_track_id:
         cur = _resolve_ids(db, [current_track_id])
+        cur_ids = cur
         seeds = (cur + seeds)[:5]
+
+    # Стартовое настроение — для плавного морфинга в целевое.
+    # Целевое: settings.mood (выбор юзера на странице «Моя волна»).
+    from app.db.models import TrackFeatures as _TF0
+
+    target_mood = (settings.get('mood') or '').strip().lower() or None
+    start_mood: str | None = None
+    if cur_ids:
+        try:
+            _cf = db.query(_TF0).filter(_TF0.track_id == cur_ids[0]).first()
+            start_mood = _mood_of(_cf)
+        except Exception:
+            start_mood = None
+    morphing = bool(target_mood and start_mood and target_mood != start_mood)
 
     # Исключения: очередь + дизлайки + баны
     dis = {str(r.track_id) for r in
@@ -348,21 +364,32 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     else:
         cand = [str(r[0]) for r in q.limit(2000).all()]
     cand = [c for c in cand if c not in played and c not in dis]
-    # Баны режем по мета (нужен artist) — батчем
+    # Баны режем по мета (нужен artist) — батчем.
+    # Сравнение через artist_names: бан «GASHI» ловит и трек
+    # «Dark Polo Gang/GASHI/Capo Plaza», регистр не важен.
     if bans and cand:
+        from app.services.artist_names import is_banned as _is_banned
+
         meta = {str(t.id): t for t in
                 db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
         cand = [c for c in cand
-                if not (meta.get(c) and meta[c].artist_name in bans)]
-    # mood-фильтр как в мобиле (по первому муд-лейблу)
-    mood = (settings.get('mood') or '').strip().lower() or None
+                if not (meta.get(c) and _is_banned(meta[c].artist_name, bans))]
+    # mood-фильтр как в мобиле (по первому муд-лейблу).
+    # При морфинге (старт → цель) жёсткий фильтр снимаем: пускаем оба
+    # настроения + безфичные, а градиент раскладываем после скоринга.
+    mood = target_mood
     if mood and cand:
         from app.db.models import TrackFeatures
         fm = {str(f.track_id): f for f in
               db.query(TrackFeatures).filter(
                   TrackFeatures.track_id.in_(cand[:2000])).all()}
-        cand = [c for c in cand
-                if (_mood_of(fm[c]) == mood if c in fm else True)]
+        if morphing:
+            allowed = {start_mood, mood}
+            cand = [c for c in cand
+                    if (c not in fm or _mood_of(fm[c]) in allowed)]
+        else:
+            cand = [c for c in cand
+                    if (_mood_of(fm[c]) == mood if c in fm else True)]
 
     # collab-подмес: кто у похожих в топе — тем выше collabScore
     collab_scores: dict[str, float] = {}
@@ -390,14 +417,18 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # novelty-членом, дубли очереди на всякий случай режем ещё раз
     ranked = [r for r in ranked if r['track_id'] not in played]
     top = ranked[:count]
-    # Обогащаем ответ настроением/энергией для страницы «Моя волна»
-    # (текущее настроение → в какое переходит). Без отдельных запросов за треками.
+    # Обогащаем ответ настроением/энергией/обложкой для страницы «Моя волна».
+    # Без отдельных запросов за треками.
     try:
+        from app.db.models import Track as _T
         from app.db.models import TrackFeatures as _TF
+        from app.services.covers import resolve_track_cover_id as _resolve_cover
 
         _ids = [str(r.get("track_id") or "") for r in top if r.get("track_id")]
         _fm = {str(f.track_id): f for f in
                db.query(_TF).filter(_TF.track_id.in_(_ids)).all()} if _ids else {}
+        _tm = {str(t.id): t for t in
+               db.query(_T).filter(_T.id.in_(_ids)).all()} if _ids else {}
         for r in top:
             f = _fm.get(str(r.get("track_id") or ""))
             try:
@@ -414,8 +445,28 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 r["tempo"] = float(f.tempo_bpm) if f is not None and f.tempo_bpm else None
             except (TypeError, ValueError):
                 r["tempo"] = None
+            try:
+                t = _tm.get(str(r.get("track_id") or ""))
+                r["cover_art_id"] = _resolve_cover(db, t) if t is not None else None
+            except Exception:
+                r["cover_art_id"] = None
     except Exception:
         pass
+    morph = None
+    if morphing and top:
+        # Градиент: голова — стартовое настроение, хвост — целевое,
+        # середина — лучшее остальное. Плавный уход в выбранный муд.
+        g_start = [r for r in top if (r.get("mood") or None) == start_mood]
+        g_target = [r for r in top if (r.get("mood") or None) == target_mood]
+        head = g_start[:3]
+        tail = g_target[:4]
+        used = {str(r.get("track_id")) for r in head + tail}
+        mid_n = max(0, len(top) - len(head) - len(tail))
+        mid = [r for r in top if str(r.get("track_id")) not in used][:mid_n]
+        top = head + mid + tail
+        morph = {"from": start_mood, "to": target_mood}
     return {'tracks': top, 'seeds': seeds,
             'applied': applied,
+            'current_mood': start_mood,
+            'morph': morph,
             'profile_version': datetime.utcnow().isoformat() + 'Z'}

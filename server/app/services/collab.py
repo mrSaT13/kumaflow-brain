@@ -91,12 +91,14 @@ def recommend_for_user(db, user_id: str, n: int = 30) -> dict:
         return {"items": [], "similar_users": sim_users}
     tracks = {str(t.id): t for t in
               db.query(Track).filter(Track.id.in_(list(scores))).all()}
+    from app.services.artist_names import is_banned as _is_banned
+
     items = []
     for tid, s in sorted(scores.items(), key=lambda kv: kv[1], reverse=True):
         t = tracks.get(tid)
         if not t:
             continue
-        if t.artist_name and t.artist_name in bans:
+        if _is_banned(t.artist_name, bans):
             continue
         items.append({"track_id": tid, "title": t.title, "artist_name": t.artist_name,
                       "album_name": t.album_name, "genre": t.genre,
