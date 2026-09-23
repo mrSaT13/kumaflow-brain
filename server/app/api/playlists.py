@@ -34,7 +34,7 @@ def _hidden_ids(db: Session) -> set[str]:
     return {str(x) for x in ids if x}
 
 
-def _to_dict(p: Playlist, db: Session) -> dict:
+def _to_dict(p: Playlist, db: Session, owners: dict[str, str] | None = None) -> dict:
     count = (
         db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).count()
     )
@@ -51,7 +51,19 @@ def _to_dict(p: Playlist, db: Session) -> dict:
         "track_count": count,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "is_hidden": str(p.id) in _hidden_ids(db),
+        "owner_user_id": str(p.owner_user_id) if p.owner_user_id else None,
+        "owner_username": (owners or {}).get(str(p.owner_user_id)) if p.owner_user_id else None,
     }
+
+
+def _owner_map(db: Session, rows: list[Playlist]) -> dict[str, str]:
+    from app.db.models import MediaUser
+
+    ids = {str(p.owner_user_id) for p in rows if p.owner_user_id}
+    if not ids:
+        return {}
+    return {str(u.id): u.username for u in
+            db.query(MediaUser).filter(MediaUser.id.in_(list(ids))).all()}
 
 
 @router.get("", include_in_schema=False)
@@ -59,7 +71,8 @@ def _to_dict(p: Playlist, db: Session) -> dict:
 def list_playlists(show_hidden: bool = False, db: Session = Depends(get_db)):
     rows = db.query(Playlist).order_by(Playlist.created_at.desc()).limit(200).all()
     hidden = _hidden_ids(db)
-    items = [_to_dict(p, db) for p in rows]
+    owners = _owner_map(db, rows)
+    items = [_to_dict(p, db, owners) for p in rows]
     if not show_hidden:
         items = [it for it in items if it["id"] not in hidden]
     return {"playlists": items, "hidden_count": len(hidden)}
@@ -172,7 +185,7 @@ def get_playlist(playlist_id: str, db: Session = Depends(get_db)):
                     "added_at": it.added_at.isoformat() if it.added_at else None,
                 }
             )
-    return {**_to_dict(p, db), "tracks": tracks}
+    return {**_to_dict(p, db, _owner_map(db, [p])), "tracks": tracks}
 
 
 @router.post("/generate-daily")

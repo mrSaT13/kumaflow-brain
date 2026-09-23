@@ -4,11 +4,13 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { ListMusic, Play, Loader2 } from "lucide-react";
 import { Button, Card } from "@/components/ui";
+import TrackCover from "@/components/TrackCover";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 
 type WaveTrack = {
   track_id: string; title: string; artist_name?: string; score: number; reason: string;
+  cover_art_id?: string | null;
 };
 
 /** Пробник «живой волны клиента»: очередь живёт тут, мозг докладывает next-N. */
@@ -110,13 +112,11 @@ export default function LiveWave({ userId }: { userId: string }) {
                   >
                     {i + 1}
                   </span>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={api.trackCoverUrl(t.track_id, 100)}
-                    alt=""
-                    loading="lazy"
-                    className={`w-9 h-9 rounded-lg object-cover border shrink-0 transition-transform ${active ? "scale-105 border-muted" : "border-border"}`}
-                    onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+                  <TrackCover
+                    trackId={t.track_id}
+                    coverArtId={t.cover_art_id}
+                    size={100}
+                    className={`w-9 h-9 rounded-lg transition-transform ${active ? "scale-105 border-muted" : "border-border"}`}
                   />
                   <div className="min-w-0 flex-1">
                     <Link

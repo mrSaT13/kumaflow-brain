@@ -290,7 +290,13 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         out.append({'track_id': tid, 'title': t.title,
                     'artist_name': t.artist_name, 'album_name': t.album_name,
                     'genre': t.genre, 'score': round(total, 4),
-                    'audio': round(audio, 3), 'reason': reason})
+                    'audio': round(audio, 3), 'reason': reason,
+                    'comp': {'audio': round(audio, 3),
+                             'genre': round(genre_s, 3),
+                             'artist': round(artist_s, 3),
+                             'behavior': round(behavior, 3),
+                             'collab': round(collab, 3),
+                             'novelty': round(novelty, 3)}})
         if t.artist_name:
             used_artists[t.artist_name] = used_artists.get(t.artist_name, 0) + 1
         if t.genre:

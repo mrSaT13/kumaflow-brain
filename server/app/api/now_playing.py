@@ -19,51 +19,92 @@ from app.db import get_db
 router = APIRouter()
 
 
-def _explain(cur_feat, cur_track, cand_track, cand_feat, collab: float = 0.0) -> str:
-    bits: list[str] = []
+def _explain(cur_feat, cur_track, cand_track, cand_feat,
+             collab: float = 0.0, comp: dict | None = None,
+             score: float = 0.0) -> str:
+    """Почему кандидат рядом: топ-3 факта по силе evidence.
+
+    Честно: если sonic-фичей нет — про аудио молчим, говорим по метаданным.
+    comp — покомпонентный скоринг из wave.score_candidates.
+    """
+    comp = comp or {}
+    c_audio = float(comp.get("audio", 0.0) or 0.0)
+    c_genre = float(comp.get("genre", 0.0) or 0.0)
+    c_artist = float(comp.get("artist", 0.0) or 0.0)
+    c_behav = float(comp.get("behavior", 0.0) or 0.0)
+    c_collab = float(comp.get("collab", collab or 0.0) or 0.0)
+    c_novel = float(comp.get("novelty", 0.0) or 0.0)
+    has_audio = cur_feat is not None and cand_feat is not None
+
+    scored: list[tuple[float, str]] = []
+
+    def _num(v, default=None):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
     try:
-        if cand_track.artist_name and cur_track.artist_name \
-                and cand_track.artist_name == cur_track.artist_name:
-            bits.append("тот же артист")
-        if cand_track.genre and cur_track.genre \
-                and str(cand_track.genre).lower() == str(cur_track.genre).lower():
-            bits.append(f"жанр {cand_track.genre}")
-        if cur_feat is not None and cand_feat is not None:
-            try:
-                cb = float(cand_feat.tempo_bpm or 0)
-                tb = float(cur_feat.tempo_bpm or 0)
-                if cb and tb and abs(cb - tb) <= 8:
-                    bits.append(f"темп {int(tb)}→{int(cb)}")
-            except (TypeError, ValueError):
-                pass
-            try:
-                ce = float(cand_feat.energy) if cand_feat.energy is not None else None
-                te = float(cur_feat.energy) if cur_feat.energy is not None else None
-                if ce is not None and te is not None and abs(ce - te) <= 0.15:
-                    bits.append("похожая энергия")
-            except (TypeError, ValueError):
-                pass
+        ca = (cand_track.artist_name or "").strip()
+        ta = (cur_track.artist_name or "").strip()
+        if ca and ta and ca.lower() == ta.lower():
+            scored.append((1.0, "тот же артист"))
+        cg = (cand_track.genre or "").strip()
+        tg = (cur_track.genre or "").strip()
+        if cg and tg and cg.lower() == tg.lower():
+            scored.append((0.85 + 0.1 * c_genre, f"жанр {cg}"))
+        if has_audio and c_audio > 0.7:
+            scored.append((0.9, "звук очень близко"))
+        elif has_audio and c_audio > 0.45:
+            scored.append((0.6, "похоже по звуку"))
+        if c_collab > 0.6:
+            scored.append((0.8, "слушают те же люди"))
+        elif c_collab > 0.35:
+            scored.append((0.55, "заходит похожим слушателям"))
+        if c_behav > 0.6:
+            scored.append((0.7, "из твоего ротации"))
+        if c_artist > 0.5:
+            scored.append((0.65, "артист из твоего вкуса"))
+        if has_audio:
+            tb, cb = _num(getattr(cur_feat, "tempo_bpm", None)), _num(getattr(cand_feat, "tempo_bpm", None))
+            if tb and cb and abs(tb - cb) <= 8:
+                scored.append((0.5, f"темп {int(tb)}→{int(cb)}"))
+            te, ce = _num(getattr(cur_feat, "energy", None)), _num(getattr(cand_feat, "energy", None))
+            if te is not None and ce is not None and abs(te - ce) <= 0.15:
+                scored.append((0.5, "энергия рядом"))
             try:
                 cm = set(str(m).lower() for m in (cand_feat.mood_labels or []))
                 tm = set(str(m).lower() for m in (cur_feat.mood_labels or []))
                 common = cm & tm
                 if common:
-                    bits.append(f"вайб {sorted(common)[0]}")
+                    scored.append((0.55, f"вайб {sorted(common)[0]}"))
             except Exception:
                 pass
             try:
-                if cand_feat.key_name and cur_feat.key_name \
-                        and cand_feat.key_name == cur_feat.key_name:
-                    bits.append(f"тональность {cand_feat.key_name}")
+                ck, tk = getattr(cand_feat, "key_name", None), getattr(cur_feat, "key_name", None)
+                if ck and tk and ck == tk:
+                    scored.append((0.4, f"тональность {ck}"))
             except Exception:
                 pass
-        if collab and collab > 0.4:
-            bits.append("слушают те же люди")
+        try:
+            cy, ty = getattr(cand_track, "year", None), getattr(cur_track, "year", None)
+            if cy and ty:
+                if int(cy) == int(ty):
+                    scored.append((0.45, f"один год · {int(cy)}"))
+                elif int(cy) // 10 == int(ty) // 10:
+                    scored.append((0.35, f"эпоха {int(cy) // 10 * 10}-х"))
+        except (TypeError, ValueError):
+            pass
+        if c_novel > 0.85 and len(scored) < 2:
+            scored.append((0.3, "свежее открытие"))
     except Exception:
         pass
+    scored.sort(key=lambda kv: kv[0], reverse=True)
+    bits = [t for _, t in scored[:3]]
     if not bits:
-        bits.append("похоже по аудио-фичам")
-    return " · ".join(bits[:3])
+        # честный фолбэк со скором вместо вранья про «аудио-фичи»
+        bits = [f"край вкуса · скор {score:.2f}"] if score else ["край вкуса"]
+    return " · ".join(bits)
 
 
 def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5) -> list[dict]:
@@ -174,7 +215,9 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
             "cover_art_id": cid,
             "score": round(float(r.get("score", 0) or 0), 3),
             "reason": _explain(cur_feat, cur, t, feats.get(tid),
-                               collab_map.get(tid, 0.0)),
+                               collab_map.get(tid, 0.0),
+                               comp=r.get("comp"),
+                               score=float(r.get("score", 0) or 0)),
         })
     return out
 

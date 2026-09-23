@@ -37,7 +37,7 @@ def cover(cover_id: str, request: Request, db=Depends(get_db), size: int = 300):
 
 @router.get("/track/{track_id}")
 def track_cover(track_id: str, request: Request, db=Depends(get_db), size: int = 300):
-    """Обложка трека: встроенная в файл (диск) либо coverArt из Navidrome."""
+    """Обложка трека: встроенная в файл (диск) → своя → альбома → плейсхолдер."""
     import uuid as _uuid
 
     try:
@@ -45,6 +45,7 @@ def track_cover(track_id: str, request: Request, db=Depends(get_db), size: int =
     except ValueError:
         raise HTTPException(400, "invalid id")
     from app.db.models import Track
+    from app.services.covers import resolve_track_cover_id
 
     t = db.get(Track, track_id)
     if not t:
@@ -58,15 +59,16 @@ def track_cover(track_id: str, request: Request, db=Depends(get_db), size: int =
             return Response(status_code=304)
         headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{etag}"'}
         return Response(content=data, media_type=ctype, headers=headers)
-    # 2) coverArt из Navidrome
-    if t.cover_art_id:
-        data = get_cover(t.cover_art_id, size=size, cfg=dict(get_media_server_config(db)))
+    # 2) своя coverArt либо альбома (song-level Navidrome обычно не отдаёт)
+    cid = resolve_track_cover_id(db, t)
+    if cid:
+        data = get_cover(cid, size=size, cfg=dict(get_media_server_config(db)))
         if data:
             etag = _etag_for(data)
             if request.headers.get("if-none-match", "").strip('" ') == etag:
                 return Response(status_code=304)
             headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{etag}"'}
-            return Response(content=data, media_type=cached_content_type(t.cover_art_id, size), headers=headers)
+            return Response(content=data, media_type=cached_content_type(cid, size), headers=headers)
     return _placeholder_png()
 
 

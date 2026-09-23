@@ -40,6 +40,7 @@ export default function PlaylistsPage() {
   const [aiQuery, setAiQuery] = useState("");
   const [plQuery, setPlQuery] = usePersisted<string>("kf:pl:q", "");
   const [plFilter, setPlFilter] = usePersisted<"all" | "auto" | "manual" | "hidden">("kf:pl:filter", "all");
+  const [plOwner, setPlOwner] = usePersisted<string>("kf:pl:owner", "");
   const [lastSteps, setLastSteps] = useState<{ step: number; name: string; items: number }[] | null>(null);
   const [weekly, setWeekly] = useState<{ track_id: string; score: number; because_of_title?: string | null; text: string }[]>([]);
 
@@ -48,6 +49,7 @@ export default function PlaylistsPage() {
     if (plFilter === "manual" && p.is_auto_generated) return false;
     if (plFilter === "hidden" && !p.is_hidden) return false;
     if (plFilter !== "hidden" && !showHidden && p.is_hidden) return false;
+    if (plOwner && (p.owner_user_id ?? "") !== plOwner && (p.owner_username ?? "") !== plOwner) return false;
     const q = plQuery.trim().toLowerCase();
     if (q && !p.name.toLowerCase().includes(q)) return false;
     return true;
@@ -308,6 +310,12 @@ export default function PlaylistsPage() {
             <option value="manual">Только manual</option>
             <option value="hidden">Только скрытые</option>
           </select>
+          <select className="kuma-input kuma-input-inline sm:w-44" value={plOwner} onChange={(e) => setPlOwner(e.target.value)} title="Владелец">
+            <option value="">Все пользователи</option>
+            {(usersData?.users ?? []).map((u) => (
+              <option key={u.id} value={u.id}>{u.username}</option>
+            ))}
+          </select>
           <label className="flex items-center gap-2 text-sm text-muted whitespace-nowrap">
             <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
             показать скрытые
@@ -327,6 +335,9 @@ export default function PlaylistsPage() {
                     </div>
                     <div className="text-xs text-muted mt-1">
                       {p.is_auto_generated ? "ежедневный" : "обычный"} · {p.track_count} треков · {fmtDate(p.created_at)}
+                      {p.owner_username && (
+                        <span> · для <span className="font-medium text-text">{p.owner_username}</span></span>
+                      )}
                     </div>
                   </div>
                   <div className="flex gap-1">

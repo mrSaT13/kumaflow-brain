@@ -4,6 +4,7 @@ import useSWR from "swr";
 import { useEffect, useState } from "react";
 import { Check, Sparkles, Wifi } from "lucide-react";
 import { Badge, Button, Card, Input, PageHeader, Section } from "@/components/ui";
+import Automation from "@/components/Automation";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 
@@ -224,16 +225,16 @@ export default function SettingsPage() {
     }
   }
 
-  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "diag">("connections");
+  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "auto" | "diag">("connections");
   const rt = (data?.runtime ?? {}) as Record<string, unknown>;
 
   return (
     <>
       <PageHeader title="Настройки" subtitle="Подключения, токены и провайдеры" />
       <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
-        {(["connections", "ai", "bridge", "diag"] as const).map((t) => (
+        {(["connections", "ai", "bridge", "auto", "diag"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm border-b-2 -mb-px whitespace-nowrap ${tab === t ? "border-accent text-text" : "border-transparent text-muted hover:text-text"}`}>
-            {t === "connections" ? "Подключения" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : "Диагностика"}
+            {t === "connections" ? "Подключения" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : t === "auto" ? "Автоматизация" : "Диагностика"}
           </button>
         ))}
       </div>
@@ -382,6 +383,11 @@ export default function SettingsPage() {
             </pre>
           )}
         </Card>
+      </Section>
+      }
+
+      {tab === "auto" && <Section title="Автоматизация">
+        <Automation />
       </Section>
       }
 

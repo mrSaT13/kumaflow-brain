@@ -7,11 +7,13 @@ import { ArrowRight, Loader2, Play } from "lucide-react";
 import { Button, Card, PageHeader, Section } from "@/components/ui";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import TrackCover from "@/components/TrackCover";
 import { moodLook } from "@/lib/moodStyle";
 
 type WaveTrack = {
   track_id: string; title: string; artist_name?: string; score: number; reason: string;
   mood?: string | null; moods?: string[]; energy?: number | null; tempo?: number | null;
+  cover_art_id?: string | null;
 };
 
 export default function WavePage() {
@@ -165,13 +167,11 @@ export default function WavePage() {
                       <span className="absolute -left-4 w-[19px] h-[19px] rounded-full text-[10px] flex items-center justify-center border border-border bg-bg tabular-nums">
                         {i + 1}
                       </span>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={api.trackCoverUrl(t.track_id, 100)}
-                        alt=""
-                        loading="lazy"
-                        className="w-10 h-10 rounded-lg object-cover border border-border shrink-0"
-                        onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+                      <TrackCover
+                        trackId={t.track_id}
+                        coverArtId={t.cover_art_id}
+                        size={100}
+                        className="w-10 h-10 rounded-lg"
                       />
                       <div className="min-w-0 flex-1">
                         <Link

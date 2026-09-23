@@ -2,8 +2,9 @@
 
 import useSWR from "swr";
 import Link from "next/link";
-import { Radio, Music2 } from "lucide-react";
+import { Radio } from "lucide-react";
 import { Card } from "@/components/ui";
+import TrackCover from "@/components/TrackCover";
 import { api } from "@/lib/api";
 
 /** Виджет «Слушает сейчас + паутина next-5». Polling 10с, без вебсокетов (MVP). */
@@ -39,16 +40,14 @@ export default function NowPlaying({ userId }: { userId?: string }) {
       </div>
       <div className="flex items-center gap-4 flex-wrap">
         {playing.track_id ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={api.trackCoverUrl(playing.track_id, 160)}
-            alt=""
-            className="w-14 h-14 rounded-xl object-cover shrink-0"
+          <TrackCover
+            trackId={playing.track_id}
+            coverArtId={playing.cover_art_id}
+            size={160}
+            className="w-14 h-14 rounded-xl"
           />
         ) : (
-          <div className="w-14 h-14 rounded-xl bg-border/50 flex items-center justify-center shrink-0">
-            <Music2 className="w-6 h-6 text-muted" />
-          </div>
+          <TrackCover trackId="" coverArtId={null} size={160} className="w-14 h-14 rounded-xl" />
         )}
         <div className="min-w-0 flex-1">
           <div className="text-xs uppercase tracking-wider text-muted flex items-center gap-2">
@@ -105,11 +104,19 @@ export default function NowPlaying({ userId }: { userId?: string }) {
                   key={t.track_id}
                   href={`/track/${t.track_id}`}
                   title={`${t.artist_name} — ${t.title}\n${t.reason}`}
-                  className="absolute w-24 -translate-x-1/2 -translate-y-1/2 kuma-card p-2 text-center hover:border-muted transition"
+                  className="absolute w-24 -translate-x-1/2 -translate-y-1/2 kuma-card p-2 text-center hover:border-muted transition flex flex-col items-center gap-1"
                   style={{ left: `${x}%`, top: `${y}%` }}
                 >
-                  <div className="text-[11px] font-medium truncate">{t.title}</div>
-                  <div className="text-[10px] text-muted truncate">{t.artist_name}</div>
+                  <TrackCover
+                    trackId={t.track_id}
+                    coverArtId={t.cover_art_id}
+                    size={100}
+                    className="w-8 h-8 rounded-lg"
+                  />
+                  <div>
+                    <div className="text-[11px] font-medium truncate">{t.title}</div>
+                    <div className="text-[10px] text-muted truncate">{t.artist_name}</div>
+                  </div>
                 </Link>
               );
             })}

@@ -245,6 +245,40 @@ def cached_content_type(cover_id: str, size: int | None = None) -> str:
     return "image/jpeg"
 
 
+def resolve_track_cover_id(db, track) -> str | None:
+    """Обложка трека с фолбэком: своя → альбома → соседа по альбому.
+
+    Navidrome обычно не отдаёт song-level coverArt, поэтому у большинства
+    треков cover_art_id пустой, а у альбома — есть. Без фолбэка UI
+    показывает прозрачный плейсхолдер (пустые квадраты в волне).
+    """
+    try:
+        own = (getattr(track, "cover_art_id", None) or "").strip()
+        if own:
+            return own
+        album_ext = (getattr(track, "album_external_id", None) or "").strip()
+        server_id = str(getattr(track, "server_id", "") or "")
+        if not album_ext or not server_id:
+            return None
+        from app.db.models import Album, Track as _Track
+
+        alb = db.query(Album).filter_by(server_id=server_id, external_id=album_ext).first()
+        if alb is not None and (alb.cover_art_id or "").strip():
+            return str(alb.cover_art_id).strip()
+        sib = db.query(_Track.cover_art_id).filter(
+            _Track.server_id == server_id,
+            _Track.album_external_id == album_ext,
+            _Track.cover_art_id.isnot(None),
+            _Track.cover_art_id != "",
+        ).first()
+        if sib and sib[0]:
+            return str(sib[0]).strip()
+    except Exception:
+        pass
+    return None
+    return "image/jpeg"
+
+
 async def prefetch_artist_covers(artist_ids: list[str]) -> int:
     """Параллельно дёргает обложки артистов из Navidrome и кэширует."""
     cfg = _load_cfg()

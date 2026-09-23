@@ -55,6 +55,8 @@ export type Playlist = {
   generated_for_date?: string | null;
   track_count: number;
   created_at: string;
+  owner_user_id?: string | null;
+  owner_username?: string | null;
 };
 
 export type PlaylistTrackDetail = Track & {
@@ -239,11 +241,11 @@ export const api = {
       playing: {
         external_id?: string | null; track_id?: string | null; title: string;
         artist_name: string; album_name?: string | null; username?: string | null;
-        minutes_ago?: number | null; player?: string | null;
+        minutes_ago?: number | null; player?: string | null; cover_art_id?: string | null;
       } | null;
       next: {
         track_id: string; title: string; artist_name?: string; album_name?: string | null;
-        genre?: string | null; score: number; reason: string;
+        genre?: string | null; score: number; reason: string; cover_art_id?: string | null;
       }[];
       source: string;
     }>(`/api/now-playing/${userId ? `?user_id=${encodeURIComponent(userId)}&n=${n}` : `?n=${n}`}`),
@@ -329,12 +331,22 @@ export const api = {
   }) =>
     http<{
       ok: boolean; user_id: string;
-      tracks: { track_id: string; title: string; artist_name?: string; score: number; reason: string }[];
+      tracks: { track_id: string; title: string; artist_name?: string; score: number; reason: string; cover_art_id?: string | null; mood?: string | null }[];
       seeds: string[]; applied: Record<string, number>;
     }>(`/api/wave/continue`, { method: "POST", body: JSON.stringify(body) }),
   waveSeeds: (user_id: string, limit = 5) =>
     http<{ ok: boolean; user_id: string; seeds: string[] }>(
       `/api/wave/seeds?user_id=${encodeURIComponent(user_id)}&limit=${limit}`,
+    ),
+  listCron: () =>
+    http<{ jobs: { id: string; name: string; kind: string; cron_expr: string; enabled: boolean; last_run_at?: string | null }[] }>(
+      `/api/cron/`,
+    ),
+  updateCron: (id: string, body: { enabled?: boolean; cron_expr?: string; name?: string }) =>
+    http<{ ok: boolean }>(`/api/cron/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  runCron: (id: string) =>
+    http<{ queued: boolean; job_id?: string; run_id?: string; error?: string }>(
+      `/api/cron/${id}/run`, { method: "POST" },
     ),
   collabSimilar: (userId: string) =>
     http<{ users: { user_id: string; username: string; similarity: number; shared_likes: number; likes: number }[] }>(
