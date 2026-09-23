@@ -22,6 +22,7 @@ export default function LiveWave({ userId }: { userId: string }) {
   const toast = useToast();
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const pendingEvents = useRef<{ track_id: string; action: string; position_sec?: number }[]>([]);
 
   // автопрокрутка к играющему — плавно, по центру ленты
   useEffect(() => {
@@ -34,11 +35,14 @@ export default function LiveWave({ userId }: { userId: string }) {
   async function more() {
     setBusy(true);
     try {
+      const events = pendingEvents.current;
+      pendingEvents.current = [];
       const r = await api.waveContinue({
         user_id: userId,
         queue: queue.map((t) => t.track_id),
         current_track_id: queue.length > 0 ? queue[queue.length - 1].track_id : undefined,
         count: 10,
+        recent_events: events,
       });
       setSeeds(r.seeds ?? []);
       setQueue((q) => [...q, ...(r.tracks ?? [])].slice(0, 50));
@@ -49,10 +53,30 @@ export default function LiveWave({ userId }: { userId: string }) {
     }
   }
 
+  function playAt(i: number) {
+    const prev = queue[Math.min(playingIdx, queue.length - 1)];
+    if (prev && i !== playingIdx) {
+      pendingEvents.current.push({ track_id: prev.track_id, action: "skip", position_sec: 15 });
+    }
+    const nxt = queue[i];
+    if (nxt && i !== playingIdx) {
+      pendingEvents.current.push({ track_id: nxt.track_id, action: "play" });
+    }
+    setPlayingIdx(i);
+  }
+
+  // Авто-докрутка хвоста — как в плеере «Моей волны».
+  useEffect(() => {
+    if (queue.length === 0 || busy) return;
+    if (queue.length - 1 - playingIdx <= 3) void more();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playingIdx, queue.length]);
+
   function reset() {
     setQueue([]);
     setSeeds([]);
     setPlayingIdx(0);
+    pendingEvents.current = [];
   }
 
   return (
@@ -102,7 +126,7 @@ export default function LiveWave({ userId }: { userId: string }) {
                     if (el) itemRefs.current.set(i, el);
                     else itemRefs.current.delete(i);
                   }}
-                  onClick={() => setPlayingIdx(i)}
+                  onClick={() => playAt(i)}
                   className={`kuma-wave-item relative flex items-center gap-3 text-sm rounded-xl px-2 py-1.5 -ml-2 cursor-pointer transition-all hover:bg-border/40 ${active ? "bg-border/50 shadow-sm" : ""}`}
                   style={{ animationDelay: `${Math.min(i, 12) * 45}ms` }}
                 >
@@ -145,7 +169,7 @@ export default function LiveWave({ userId }: { userId: string }) {
 
       <div className="mt-3 text-[11px] text-muted flex items-center gap-1.5">
         <ListMusic className="w-3 h-3" />
-        Это тот же `POST /api/wave/continue`, что дёргает мобильный клиент. Клик по строке — «сейчас играет».
+        Это тот же `POST /api/wave/continue`, что дёргает мобильный клиент. Клик по строке — «сейчас играет» (шлём play/skip), хвост докручивается сам.
       </div>
     </Card>
   );

@@ -264,8 +264,13 @@ export const api = {
       `/api/users/${id}/sync-playlists`,
       { method: "POST", body: JSON.stringify({ password }) },
     ),
-  nowPlaying: (userId?: string, n = 5) =>
-    http<{
+  nowPlaying: (userId?: string, n = 5, offset = 0, seed?: string) => {
+    const qs = new URLSearchParams();
+    if (userId) qs.set("user_id", userId);
+    qs.set("n", String(n));
+    if (offset) qs.set("offset", String(offset));
+    if (seed) qs.set("seed", seed);
+    return http<{
       playing: {
         external_id?: string | null; track_id?: string | null; title: string;
         artist_name: string; album_name?: string | null; username?: string | null;
@@ -276,7 +281,9 @@ export const api = {
         genre?: string | null; score: number; reason: string; cover_art_id?: string | null;
       }[];
       source: string;
-    }>(`/api/now-playing/${userId ? `?user_id=${encodeURIComponent(userId)}&n=${n}` : `?n=${n}`}`),
+      offset?: number;
+    }>(`/api/now-playing/?${qs.toString()}`);
+  },
   userTastes: (id: string) =>
     http<{ user_id: string; favorites: number; playlists: number; playlist_tracks: number }>(
       `/api/users/${id}/tastes`,

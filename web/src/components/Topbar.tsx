@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { api } from "@/lib/api";
+import PwaInstall from "@/components/PwaInstall";
 
 const KIND_DOT: Record<string, string> = {
   success: "bg-green-500",
@@ -147,6 +148,7 @@ export function Topbar({ onMenu }: { onMenu?: () => void } = {}) {
       </div>
       <div className="flex items-center gap-2 shrink-0">
         <BellBox />
+        <PwaInstall />
         <button onClick={toggle} className="kuma-pill shrink-0" aria-label="Переключить тему" suppressHydrationWarning>
           {dark ? <Sun className="w-3 h-3" /> : <Moon className="w-3 h-3" />}
           <span className="hidden sm:inline">{dark ? "Светлая" : "Тёмная"}</span>

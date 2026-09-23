@@ -1,23 +1,47 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
-import { Radio } from "lucide-react";
+import { Radio, RefreshCw, Shuffle } from "lucide-react";
 import { Card } from "@/components/ui";
 import TrackCover from "@/components/TrackCover";
 import { api } from "@/lib/api";
 
 /** Виджет «Слушает сейчас + паутина next-5». Polling 10с, без вебсокетов (MVP). */
-export default function NowPlaying({ userId }: { userId?: string }) {
-  const { data } = useSWR(
-    userId ? `/api/now-playing?u=${userId}` : "/api/now-playing",
-    () => api.nowPlaying(userId, 5),
-    { refreshInterval: 10000, revalidateOnFocus: true },
+export default function NowPlaying({ userId: propUserId }: { userId?: string }) {
+  const { data: users } = useSWR(propUserId ? null : "/api/users", () => api.listUsers());
+  const [selUser, setSelUser] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [seed, setSeed] = useState("");
+  useEffect(() => {
+    if (propUserId || selUser) return;
+    try {
+      const saved = localStorage.getItem("nowplaying_user") ?? "";
+      if (saved) setSelUser(saved);
+    } catch { /* ignore */ }
+  }, [propUserId, selUser]);
+  const userId = propUserId ?? selUser;
+  useEffect(() => {
+    if (!propUserId && selUser) {
+      try { localStorage.setItem("nowplaying_user", selUser); } catch { /* ignore */ }
+    }
+  }, [propUserId, selUser]);
+  const { data, mutate } = useSWR(
+    `/api/now-playing?u=${userId ?? "-"}&o=${offset}&s=${seed}`,
+    () => api.nowPlaying(userId, 5, offset, seed || undefined),
+    { refreshInterval: 15000, revalidateOnFocus: true },
   );
   const playing = data?.playing ?? null;
   const next = data?.next ?? [];
   const age = playing?.minutes_ago;
   const stale = typeof age === "number" && age >= 5;
+
+  // Трек сменился — ротацию сначала.
+  useEffect(() => {
+    setOffset(0);
+    setSeed("");
+  }, [playing?.track_id]);
 
   if (!data) return null;
   if (!playing) {
@@ -32,11 +56,50 @@ export default function NowPlaying({ userId }: { userId?: string }) {
 
   return (
     <Card>
-      <div className="flex items-center gap-2 text-xs mb-3">
+      <div className="flex items-center gap-2 text-xs mb-3 flex-wrap">
         <Link href={"/wave" as never} className="kuma-pill hover:text-text transition-colors">
           <Radio className="w-3 h-3" /> Моя волна →
         </Link>
         <span className="text-muted">открыть живую очередь мозга</span>
+        <span className="flex-1" />
+        {!propUserId && (users?.users?.length ?? 0) > 0 && (
+          <select
+            className="kuma-input kuma-input-inline !py-1 !px-2 text-xs w-36"
+            value={selUser}
+            onChange={(e) => { setSelUser(e.target.value); setOffset(0); }}
+            title="Чей вкус учитывать в next-5"
+          >
+            <option value="">вкус: общий</option>
+            {(users?.users ?? []).map((u) => (
+              <option key={u.id} value={u.id}>{u.username}</option>
+            ))}
+          </select>
+        )}
+        {next.length > 0 && (
+          <>
+            <button
+              className="kuma-pill"
+              title="Следующие 5 из того же ранжирования"
+              onClick={() => setOffset((o) => o + 5)}
+            >
+              Другие 5 →
+            </button>
+            <button
+              className="kuma-pill p-1.5"
+              title="Перемешать (новый джиттер)"
+              onClick={() => { setSeed(Math.random().toString(36).slice(2, 8)); setOffset(0); mutate(); }}
+            >
+              <Shuffle className="w-3 h-3" />
+            </button>
+            <button
+              className="kuma-pill p-1.5"
+              title="Обновить"
+              onClick={() => mutate()}
+            >
+              <RefreshCw className="w-3 h-3" />
+            </button>
+          </>
+        )}
       </div>
       <div className="flex items-center gap-4 flex-wrap">
         {playing.track_id ? (
@@ -128,9 +191,14 @@ export default function NowPlaying({ userId }: { userId?: string }) {
                 <Link href={`/track/${t.track_id}`} className="kuma-link font-medium shrink-0">
                   {t.artist_name} — {t.title}
                 </Link>
-                <span className="text-muted truncate">· {t.reason}</span>
+                <span className="text-muted truncate" title={`скор ${t.score}`}>· {t.reason} · {t.score?.toFixed(2)}</span>
               </div>
             ))}
+            {next.length === 0 && offset > 0 && (
+              <button className="kuma-pill text-xs" onClick={() => setOffset(0)}>
+                ← К первым 5
+              </button>
+            )}
           </div>
         </div>
       )}

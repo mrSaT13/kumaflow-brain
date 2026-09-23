@@ -166,7 +166,8 @@ def _explain(cur_feat, cur_track, cand_track, cand_feat,
     return " · ".join(bits)
 
 
-def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5) -> list[dict]:
+def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5,
+                    offset: int = 0, jitter_seed: str | None = None) -> list[dict]:
     from app.db.models import ArtistBan, Track, TrackDislike, TrackFeatures
 
     cur = db.get(Track, track_id)
@@ -217,6 +218,11 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
     cand_ids = [str(t.id) for t in pool[:600]]
     ranked: list[dict] = []
     collab_map: dict[str, float] = {}
+    # Ротация: один и тот же текущий трек больше не даёт вечно один и тот же топ-5.
+    # jitter_seed детерминирован (трек+сдвиг), чтобы polling не тасовал паутину каждые 10с,
+    # а кнопка «Другие 5» честно показывала следующий срез.
+    offset = max(0, int(offset or 0))
+    jitter = jitter_seed or f"{track_id}:{offset}"
     if user_id:
         try:
             from app.services import collab as _cb
@@ -229,7 +235,8 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
             seeds = [str(cur.id)] + [s for s in seeds if s != str(cur.id)][:4]
             ranked = _wave.score_candidates(db, user_id, cand_ids[:400], seeds,
                                             settings={}, recent_events=None,
-                                            collab_scores=collab_map)
+                                            collab_scores=collab_map,
+                                            jitter_seed=jitter)
         except Exception:
             ranked = []
     if not ranked:
@@ -240,15 +247,16 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
             ranked = _wave.score_candidates(db, user_id or str(cur.server_id),
                                             cand_ids[:400], [str(cur.id)],
                                             settings={}, recent_events=None,
-                                            collab_scores={})
+                                            collab_scores={}, jitter_seed=jitter)
         except Exception:
             # совсем fallback: как есть из пула
             ranked = [{"track_id": tid, "score": 0.0} for tid in cand_ids[:n]]
+    window = ranked[offset:offset + n]
 
     meta = {str(t.id): t for t in pool}
     feats = {str(f.track_id): f for f in
              db.query(TrackFeatures).filter(
-                 TrackFeatures.track_id.in_([r["track_id"] for r in ranked[:n]] + [str(cur.id)])
+                 TrackFeatures.track_id.in_([r["track_id"] for r in window] + [str(cur.id)])
              ).all()}
     cur_feat = feats.get(str(cur.id))
     try:
@@ -256,7 +264,7 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
     except Exception:
         _resolve_cover = None  # noqa: F841
     out: list[dict] = []
-    for r in ranked[:n]:
+    for r in window:
         tid = str(r.get("track_id") or "")
         t = meta.get(tid)
         if not t:
@@ -283,12 +291,18 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5)
 
 @router.get("", include_in_schema=False)
 @router.get("/")
-def now_playing(user_id: str | None = None, n: int = 5, db: Session = Depends(get_db)):
-    """Что играет сейчас в Navidrome + next-N от нашей алхимии."""
+def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
+                seed: str | None = None, db: Session = Depends(get_db)):
+    """Что играет сейчас в Navidrome + next-N от нашей алхимии.
+
+    offset/seed — ротация: один и тот же текущий трек больше не даёт вечно
+    один и тот же топ-5. «Другие 5» = offset+5, «перемешать» = случайный seed.
+    """
     from app.db.models import MediaUser, Track
     from app.services.media_server import get_media_server_config, is_real_config
 
     n = max(1, min(int(n or 5), 10))
+    offset = max(0, int(offset or 0))
     cfg = get_media_server_config(db)
     if not is_real_config(cfg) or not cfg.get("user"):
         return {"playing": None, "next": [], "source": "no-server"}
@@ -371,7 +385,8 @@ def now_playing(user_id: str | None = None, n: int = 5, db: Session = Depends(ge
     nxt: list[dict] = []
     if local is not None:
         try:
-            nxt = _next_for_track(db, str(local.id), user_id, n=n)
+            nxt = _next_for_track(db, str(local.id), user_id, n=n,
+                                  offset=offset, jitter_seed=seed)
         except Exception:
             nxt = []
-    return {"playing": playing, "next": nxt, "source": "navidrome"}
+    return {"playing": playing, "next": nxt, "source": "navidrome", "offset": offset}

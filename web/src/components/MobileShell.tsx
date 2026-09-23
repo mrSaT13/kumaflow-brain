@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { Topbar } from "@/components/Topbar";
+import PwaInstall from "@/components/PwaInstall";
 
 export function MobileShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -10,7 +11,10 @@ export function MobileShell({ children }: { children: React.ReactNode }) {
       <Sidebar open={open} onClose={() => setOpen(false)} />
       <main className="flex-1 min-w-0">
         <Topbar onMenu={() => setOpen((v) => !v)} />
-        <div className="px-4 md:px-8 py-4 md:py-6 max-w-[1400px] mx-auto">{children}</div>
+        <div className="px-4 md:px-8 py-4 md:py-6 max-w-[1400px] mx-auto">
+          <PwaInstall variant="banner" />
+          {children}
+        </div>
       </main>
     </div>
   );
