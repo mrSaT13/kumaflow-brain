@@ -20,7 +20,7 @@ const KIND_RU: Record<string, { title: string; desc: string }> = {
 
 /** Вкладка «Автоматизация»: все кроны с тумблерами, расписанием и ручным запуском. */
 export default function Automation() {
-  const { data, mutate } = useSWR("/api/cron", () => api.listCron(), { refreshInterval: 5000 });
+  const { data, error, mutate } = useSWR("/api/cron", () => api.listCron(), { refreshInterval: 5000 });
   const [busy, setBusy] = useState(false);
   const [exprs, setExprs] = useState<Record<string, string>>({});
   const toast = useToast();
@@ -140,7 +140,18 @@ export default function Automation() {
     </Card>
     <div className="h-4" />
     <Card>
-      {!data ? (
+      {error && !data ? (
+        <div className="text-sm">
+          <div className="text-red-500 font-medium">Не смог загрузить задачи: {fmtErr(error)}</div>
+          <div className="text-xs text-muted mt-1">
+            Проверьте в браузере <code className="kuma-pill">/api/cron/</code> и логи backend:{" "}
+            <code className="kuma-pill">docker compose logs backend --tail=50</code>
+          </div>
+          <div className="mt-2">
+            <Button variant="ghost" onClick={() => mutate()} disabled={busy}>Повторить</Button>
+          </div>
+        </div>
+      ) : !data ? (
         <div className="text-sm text-muted">Загрузка…</div>
       ) : jobs.length === 0 ? (
         <div className="text-sm text-muted">Задач нет.</div>
