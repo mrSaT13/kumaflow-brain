@@ -94,14 +94,34 @@ def fetch(artist: str, title: str, album: str | None = None, duration_sec: int |
     return None
 
 
+def detect_lyrics_language(text: str | None) -> str:
+    """Язык текста для фильтра волны: ru / foreign / instrumental.
+
+    Тупо но практично (как просил юзер):
+    - пусто или <10 букв → instrumental (музыка без слов)
+    - есть кириллица → ru
+    - иначе → foreign (англ и всё остальное)
+    """
+    if not text:
+        return "instrumental"
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 10:
+        return "instrumental"
+    for c in letters:
+        if "\u0400" <= c <= "\u04ff":
+            return "ru"
+    return "foreign"
+
+
 def _to_result(item: dict[str, Any]) -> dict[str, Any]:
     plain = (item.get("plainLyrics") or "").strip()
     synced = (item.get("syncedLyrics") or "").strip()
+    text = plain or _strip_lrc(synced)
     return {
         "provider": "lrclib",
-        "text": plain or _strip_lrc(synced),
+        "text": text,
         "synced": _parse_lrc(synced) if synced else None,
-        "language": None,
+        "language": detect_lyrics_language(text),
         "source_url": item.get("url") or f"{BASE}/api/get?artist_name={item.get('artistName','')}&track_name={item.get('trackName','')}",
         "fetched_at": int(time.time()),
     }

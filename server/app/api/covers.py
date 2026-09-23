@@ -3,13 +3,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.db import get_db
+from app.core.auth import require_scope
 from app.services.covers import cached_content_type, get_cover, get_disk_cover
 from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
 from app.services.media_server import get_media_server_config, resolve_active_server
 from app.services.queue import enqueue
 from app.workers.tasks import noop as _placeholder
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_scope("covers"))])
 
 import hashlib
 
@@ -37,17 +38,15 @@ def cover(cover_id: str, request: Request, db=Depends(get_db), size: int = 300):
 
 @router.get("/track/{track_id}")
 def track_cover(track_id: str, request: Request, db=Depends(get_db), size: int = 300):
-    """Обложка трека: встроенная в файл (диск) → своя → альбома → плейсхолдер."""
-    import uuid as _uuid
+    """Обложка трека: встроенная в файл (диск) → своя → альбома → плейсхолдер.
 
-    try:
-        _uuid.UUID(track_id)
-    except ValueError:
-        raise HTTPException(400, "invalid id")
+    Принимает uuid ИЛИ external_id (Navidrome song id) — мобила шлёт external_id.
+    """
     from app.db.models import Track
     from app.services.covers import resolve_track_cover_id
+    from app.services.track_resolve import get_track as _gt
 
-    t = db.get(Track, track_id)
+    t = _gt(db, track_id)
     if not t:
         raise HTTPException(404, "track not found")
     # 1) встроенная обложка из файла

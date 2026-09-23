@@ -15,8 +15,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import require_scope
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_scope("wave"))])
 
 
 def _explain(cur_feat, cur_track, cand_track, cand_feat,
@@ -87,16 +88,74 @@ def _explain(cur_feat, cur_track, cand_track, cand_feat,
             except Exception:
                 pass
         try:
+            from datetime import datetime as _dt
+
+            _cur_year = _dt.now().year
             cy, ty = getattr(cand_track, "year", None), getattr(cur_track, "year", None)
-            if cy and ty:
-                if int(cy) == int(ty):
-                    scored.append((0.45, f"один год · {int(cy)}"))
-                elif int(cy) // 10 == int(ty) // 10:
-                    scored.append((0.35, f"эпоха {int(cy) // 10 * 10}-х"))
+            try:
+                cyi = int(cy) if cy else None
+                tyi = int(ty) if ty else None
+            except (TypeError, ValueError):
+                cyi = tyi = None
+            # Год 2026 (=текущий) у всех треков — это дефолт скана, не факт.
+            # Показываем год только если он осмысленный (не текущий, не пустой).
+            if cyi and tyi and cyi < _cur_year and tyi < _cur_year:
+                if cyi == tyi:
+                    scored.append((0.45, f"один год · {cyi}"))
+                elif cyi // 10 == tyi // 10:
+                    scored.append((0.35, f"эпоха {cyi // 10 * 10}-х"))
+            elif cyi and cyi < _cur_year and not tyi:
+                scored.append((0.3, f"{cyi} год"))
         except (TypeError, ValueError):
             pass
-        if c_novel > 0.85 and len(scored) < 2:
-            scored.append((0.3, "свежее открытие"))
+        # слабые, но РАЗЛИЧАЮЩИЕ биты: когда сильных совпадений нет,
+        # показываем что-то про сам трек-кандидат, а не одинаковую заглушку.
+        try:
+            _cg = (cand_track.genre or "").strip()
+            _tg = (cur_track.genre or "").strip()
+            if _cg and (not _tg or _cg.lower() != _tg.lower()):
+                scored.append((0.20, f"жанр {_cg}"))
+        except Exception:
+            pass
+        try:
+            if cand_feat is not None:
+                _ml = list(getattr(cand_feat, "mood_labels", None) or [])
+                if _ml:
+                    _m0 = str(_ml[0]).lower()
+                    _tm = set(str(m).lower() for m in (cur_feat.mood_labels or [])) if cur_feat else set()
+                    if _m0 not in _tm:
+                        scored.append((0.28, f"вайб {_m0}"))
+                _ce = _num(getattr(cand_feat, "energy", None))
+                if _ce is not None:
+                    if _ce >= 0.75:
+                        scored.append((0.22, "качает"))
+                    elif _ce <= 0.35:
+                        scored.append((0.22, "спокойный"))
+                _cbpm = _num(getattr(cand_feat, "tempo_bpm", None))
+                if _cbpm:
+                    scored.append((0.18, f"{int(round(_cbpm))} bpm"))
+        except Exception:
+            pass
+        try:
+            _pc = int(getattr(cand_track, "play_count", 0) or 0)
+            if _pc >= 30:
+                scored.append((0.18, "хит твоей ротации"))
+            elif _pc == 0:
+                scored.append((0.16, "ни разу не играл"))
+        except (TypeError, ValueError):
+            pass
+        if not scored and c_novel > 0.9:
+            scored.append((0.25, "ещё не слушал"))
+        # второй резорт: новизна + слабая зацепка — уточняем чем новое
+        elif len(scored) == 1 and c_novel > 0.9:
+            try:
+                _cm = set(str(m).lower() for m in (cand_feat.mood_labels or [])) if cand_feat else set()
+                if _cm:
+                    scored.append((0.24, f"новый вайб {sorted(_cm)[0]}"))
+                else:
+                    scored.append((0.24, "мимо ротации"))
+            except Exception:
+                scored.append((0.24, "мимо ротации"))
     except Exception:
         pass
     scored.sort(key=lambda kv: kv[0], reverse=True)

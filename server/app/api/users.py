@@ -7,11 +7,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import enforce_user_binding, require_scope
 from app.db.models import MediaUser
 from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
 from app.services.media_server import resolve_active_server
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_scope("sync")), Depends(enforce_user_binding)])
 
 
 class UserIn(BaseModel):

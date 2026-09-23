@@ -258,3 +258,67 @@ def save_automation(payload: dict, db: Session = Depends(get_db)):
 
     flags = _auto.set_flags(dict(payload or {}), db)
     return {"ok": True, "flags": flags}
+
+
+@router.get("/tokens/meta")
+def tokens_meta(db: Session = Depends(get_db)):
+    """Мета для UI: скоупы, пресеты, задан ли env-токен, сколько токенов."""
+    from app.core.config import get_settings as _gs
+    from app.services import api_tokens as _tokens
+
+    return {
+        "scopes": dict(_tokens.SCOPES),
+        "presets": {k: {"label": v["label"], "desc": v["desc"], "scopes": v["scopes"]}
+                    for k, v in _tokens.PRESETS.items()},
+        "env_token_configured": bool((_gs().brain_api_token or "").strip()),
+        "count": _tokens.count_tokens(db),
+    }
+
+
+@router.get("/tokens")
+def tokens_list(owner_user_id: str | None = None, db: Session = Depends(get_db)):
+    """Список токенов (без секретов). Фильтр по юзеру — для вкладки per-user."""
+    from app.services import api_tokens as _tokens
+
+    return {"tokens": _tokens.list_tokens(db, owner_user_id)}
+
+
+@router.post("/tokens")
+def tokens_create(payload: dict, db: Session = Depends(get_db)):
+    """Создать токен. Ответ содержит plaintext ОДИН раз — показать и скопировать."""
+    from app.services import api_tokens as _tokens
+
+    name = str((payload or {}).get("name") or "mobile")
+    scopes = list((payload or {}).get("scopes") or [])
+    owner = (payload or {}).get("owner_user_id") or (payload or {}).get("user_id")
+    try:
+        res = _tokens.create_token(db, str(owner) if owner else None, name, scopes)
+    except ValueError as e:
+        from fastapi import HTTPException as _HE
+
+        raise _HE(404, str(e))
+    return {"ok": True, **res}
+
+
+@router.patch("/tokens/{token_id}")
+def tokens_toggle(token_id: str, payload: dict, db: Session = Depends(get_db)):
+    from app.services import api_tokens as _tokens
+
+    enabled = bool((payload or {}).get("enabled", True))
+    res = _tokens.set_enabled(db, token_id, enabled)
+    if res is None:
+        from fastapi import HTTPException as _HE
+
+        raise _HE(404, "not found")
+    return {"ok": True, "token": res}
+
+
+@router.delete("/tokens/{token_id}")
+def tokens_delete(token_id: str, db: Session = Depends(get_db)):
+    from app.services import api_tokens as _tokens
+
+    if not _tokens.delete_token(db, token_id):
+        from fastapi import HTTPException as _HE
+
+        raise _HE(404, "not found")
+    return {"ok": True}

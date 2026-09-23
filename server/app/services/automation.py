@@ -14,7 +14,17 @@ DEFAULTS: dict[str, Any] = {
     "analysis_fetch_lyrics": True,
     # прогонять текст через AI-настроение (moods/ai_*). Без AI-провайдера — no-op
     "analysis_ai_mood": True,
+    # авто-отправка созданных автоплейлистов (daily/smart/weekly) в Navidrome
+    # после генерации. Выкл по дефолту — только локально в мозге.
+    "playlists_push_navidrome": False,
 }
+
+
+def playlists_push_enabled(db=None) -> bool:
+    try:
+        return bool(get_flags(db).get("playlists_push_navidrome", False))
+    except Exception:
+        return False
 
 
 def get_flags(db=None) -> dict[str, Any]:

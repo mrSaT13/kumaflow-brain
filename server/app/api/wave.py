@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import check_body_user, require_scope
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_scope("wave"))])
 
 
 def _require_user(db: Session, user_id: str):
@@ -28,7 +29,7 @@ def _require_user(db: Session, user_id: str):
 
 
 @router.post('/continue')
-def wave_continue(payload: dict, db: Session = Depends(get_db)):
+def wave_continue(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Аддитивная волна: клиент шлёт что уже есть + дельту, сервер докладывает.
 
     Body: {user_id, queue[], current_track_id?, count=20,
@@ -40,6 +41,7 @@ def wave_continue(payload: dict, db: Session = Depends(get_db)):
     user_id = str((payload or {}).get('user_id') or '')
     if not user_id:
         raise HTTPException(400, 'user_id required')
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
     try:
         return {'ok': True, 'user_id': str(u.id),

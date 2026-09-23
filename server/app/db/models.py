@@ -455,3 +455,26 @@ class TasteSnapshot(Base):
     artists: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
     counts: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ApiToken(Base):
+    """API-токен для связки плеер <-> мозг (создаётся в веб-UI, без compose).
+
+    Храним только sha256-хэш; plaintext показывается один раз при создании.
+    scopes: wave (волна/now-playing), sync (синк вкусов/событий/оценок),
+    covers (обложки), playlists (weekly/discovery/export), admin (всё).
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
+    owner_user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False, default="mobile")
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    prefix: Mapped[str] = mapped_column(String(12), nullable=False, default="")
+    scopes: Mapped[list] = mapped_column(JSONCol(), default=list, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

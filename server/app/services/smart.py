@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 FORGOTTEN_DAYS = 90
 
@@ -99,7 +99,8 @@ def discoveries(db, user_id: str, n: int = 30) -> list[str]:
         collab_scores = {}
     ranked = _wave.score_candidates(db, user_id, cand[:800], seeds,
                                     settings={}, recent_events=None,
-                                    collab_scores=collab_scores)
+                                    collab_scores=collab_scores,
+                                    jitter_seed=f"{user_id}:discoveries:{date.today().isoformat()}")
     return [r['track_id'] for r in ranked[:n]]
 
 
@@ -130,11 +131,30 @@ def forgotten(db, user_id: str, n: int = 30,
 
 
 def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
-    """Пул по sonic-фичам + досортировка скором вкуса."""
+    """Пул по sonic-фичам + досортировка скором вкуса.
+
+    Персонализация даже при пустой истории: подмешиваем веса жанров/артистов
+    из профиля (включая слепок с мобилы), а ничьи рвём детерминированным
+    per-user джиттером (иначе у всех юзеров без данных плейлисты одинаковые —
+    stable sort на равных скорах даёт один порядок).
+    """
+    import random as _rnd
+    from datetime import date as _date
+
     from app.db.models import Track, TrackFeatures
     from app.services import taste as _taste
 
     dis, bans = _exclusions(db, user_id)
+    try:
+        _prof = _taste.user_profile(db, user_id, top_n=0)
+        _pref_g = {str(k).lower(): float(v) for k, v in
+                   (_prof.get('preferredGenres') or {}).items()}
+        _pref_a = {str(k): float(v) for k, v in
+                   (_prof.get('preferredArtists') or {}).items()}
+    except Exception:
+        _pref_g, _pref_a = {}, {}
+    # джиттер свой у каждого юзера и каждый день свой (иначе daily одинаковый вечно)
+    _rng = _rnd.Random(f"{user_id}:{predicate}:{_date.today().isoformat()}")
     feats = db.query(TrackFeatures).limit(5000).all()
     pool: list[str] = []
     for f in feats:
@@ -170,6 +190,8 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
     top = [t for t, _ in pool[:max(n * 5, 100)]]
     if not top:
         return []
+    meta = {str(t.id): t for t in
+            db.query(Track).filter(Track.id.in_(top[:500])).all()} if top else {}
     agg = _taste._user_track_aggregates(db, user_id)
     scored = []
     for tid in top:
@@ -178,6 +200,17 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
             s = _taste.track_score(a) if a else 0.0
         except Exception:
             s = 0.0
+        # вкус из профиля (работает и без истории — по синку с мобилы)
+        t = meta.get(tid)
+        if t is not None:
+            try:
+                if t.genre:
+                    s += min(max(_pref_g.get(str(t.genre).lower(), 0.0) / 10.0, 0.0), 1.0) * 20.0
+                if t.artist_name:
+                    s += min(max(_pref_a.get(str(t.artist_name), 0.0) / 10.0, 0.0), 1.0) * 20.0
+            except Exception:
+                pass
+        s += _rng.random() * 2.0  # per-user tiebreak: ничьи 0.0 рвутся по-разному
         scored.append((s, tid))
     scored.sort(reverse=True)
     return [tid for _, tid in scored[:n]]

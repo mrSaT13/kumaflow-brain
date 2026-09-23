@@ -71,11 +71,13 @@ export default function Automation() {
   const { data: auto, mutate: mutateAuto } = useSWR("/api/settings/automation", () => api.getAutomation(), { refreshInterval: 10000 });
   const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
 
-  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood") {
+  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood" | "playlists_push_navidrome") {
     const cur = key === "analysis_fetch_lyrics"
       ? (auto?.flags?.analysis_fetch_lyrics ?? true)
-      : (auto?.flags?.analysis_ai_mood ?? true);
-    const label = key === "analysis_fetch_lyrics" ? "Тексты" : "AI-настроение";
+      : key === "analysis_ai_mood"
+        ? (auto?.flags?.analysis_ai_mood ?? true)
+        : (auto?.flags?.playlists_push_navidrome ?? false);
+    const label = key === "analysis_fetch_lyrics" ? "Тексты" : key === "analysis_ai_mood" ? "AI-настроение" : "Авто-пуш плейлистов";
     setBusy(true);
     try {
       await api.saveAutomation({ [key]: !cur });
@@ -134,6 +136,22 @@ export default function Automation() {
           <span className="font-medium text-sm">AI-настроение текста</span>
           <span className="text-xs text-muted block">
             Прогоняет текст через AI (moods + темы) и добирает в настроение трека. Акустику (energy/valence) не перезаписывает. Без AI-провайдера — no-op. Медленнее: до ~10с на трек.
+          </span>
+        </span>
+      </label>
+      <div className="h-3" />
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={auto?.flags?.playlists_push_navidrome ?? false}
+          disabled={busy}
+          onChange={() => toggleLyrics("playlists_push_navidrome")}
+          className="w-4 h-4 accent-black dark:accent-white shrink-0"
+        />
+        <span>
+          <span className="font-medium text-sm">Авто-отправка плейлистов в Navidrome</span>
+          <span className="text-xs text-muted block">
+            Daily, умные и открытия недели после генерации сразу выгружаются в Navidrome (видны в родном клиенте). Треки с диска пропускаются.
           </span>
         </span>
       </label>

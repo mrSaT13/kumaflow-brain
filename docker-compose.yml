@@ -59,6 +59,7 @@ services:
       POSTGRES_PASSWORD: CHANGE_ME_postgres_password
       POSTGRES_DB: kumaflow
       REDIS_HOST: redis
+      BRAIN_API_TOKEN: CHANGE_ME_brain_token
       # Сейф паролей (opt-in автообновление вкусов, Fernet). Сгенерировать один раз:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       # Пусто = автообновление выключено (ручной импорт работает всегда).
@@ -87,6 +88,7 @@ services:
       # Без :ro — чтобы качать прямо в volume: docker compose exec backend python -m ml.download_clap
       - ./deploy/models:/app/ml/models
 
+  # Лёгкие задачи: high/default/light (taste, notify, scan, playlists).
   worker:
     image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
     restart: unless-stopped
@@ -106,35 +108,122 @@ services:
       POSTGRES_PASSWORD: CHANGE_ME_postgres_password
       POSTGRES_DB: kumaflow
       REDIS_HOST: redis
+      BRAIN_API_TOKEN: CHANGE_ME_brain_token
       # Сейф паролей для автообновления вкусов (тот же ключ, что у backend).
       TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
       MEDIA_SERVER_TYPE: navidrome
       NAVIDROME_URL: http://host.docker.internal:4533
-      # --- Примонтированная папка музыки (вариант А) ---
-      # Та же папка, что видит Navidrome, только чтение. Даёт два плюса:
-      #   1) сканирование библиотеки подхватит файлы с диска напрямую
-      #      (теги через mutagen), даже если Navidrome тормозит/недоступен;
-      #   2) sonic-анализ читает файлы локально вместо стрима.
-      # ВАЖНО: MUSIC_DIR — это путь ВНУТРИ контейнера (/music), а НЕ путь хоста!
-      # Путь хоста указывается только в volumes ниже. Правильно:
-      #   MUSIC_DIR: /music
-      #   volumes:
-      #     - /путь/к/музыке/на/хосте:/music:ro
-      # НЕПРАВИЛЬНО: MUSIC_DIR: /srv/.../музыка:/music (так не заведётся).
-      # MUSIC_DIR: /music
-      # Вариант Б (ничего не монтировать): оставь как есть — библиотека
-      # тянется только из Navidrome через Subsonic API, а аудио для анализа —
-      # стримом оттуда же.
+      QUEUES: high,default,light
       ANALYSIS_SAMPLE_SECONDS: 90
       ANALYSIS_MAX_TRACKS_PER_RUN: 0  # 0 = весь остаток за раз
-    # volumes:
-    #   - /путь/к/музыке/на/хосте:/music:ro
     volumes:
-      # та же CLAP-модель, что у backend (эмбеддинги считает воркер)
       - ./deploy/models:/app/ml/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.workers.rq_worker"]
+
+  # Тяжёлый аудио-анализ (librosa) — ОТДЕЛЬНО, чтобы не блокировать очередь.
+  worker-audio:
+    image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      ENV: prod
+      LOG_LEVEL: INFO
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: kumaflow
+      POSTGRES_PASSWORD: CHANGE_ME_postgres_password
+      POSTGRES_DB: kumaflow
+      REDIS_HOST: redis
+      BRAIN_API_TOKEN: CHANGE_ME_brain_token
+      TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
+      MEDIA_SERVER_TYPE: navidrome
+      NAVIDROME_URL: http://host.docker.internal:4533
+      QUEUES: audio
+      ANALYSIS_SAMPLE_SECONDS: 90
+      ANALYSIS_MAX_TRACKS_PER_RUN: 200  # чанками с resume, не всё за раз
+    volumes:
+      - ./deploy/models:/app/ml/models
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "app.workers.rq_worker", "audio"]
+
+  # CLAP-эмбеддинги — отдельно (модель ~350МБ, долгая загрузка).
+  worker-clap:
+    image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
+    restart: unless-stopped
+    profiles: [ml]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      ENV: prod
+      LOG_LEVEL: INFO
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: kumaflow
+      POSTGRES_PASSWORD: CHANGE_ME_postgres_password
+      POSTGRES_DB: kumaflow
+      REDIS_HOST: redis
+      BRAIN_API_TOKEN: CHANGE_ME_brain_token
+      TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
+      MEDIA_SERVER_TYPE: navidrome
+      NAVIDROME_URL: http://host.docker.internal:4533
+      QUEUES: clap
+    volumes:
+      - ./deploy/models:/app/ml/models
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "app.workers.rq_worker", "clap"]
+
+  # Планировщик крона — ОДИН инстанс (не внутри воркера, иначе дубли).
+  scheduler:
+    image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      ENV: prod
+      LOG_LEVEL: INFO
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: kumaflow
+      POSTGRES_PASSWORD: CHANGE_ME_postgres_password
+      POSTGRES_DB: kumaflow
+      REDIS_HOST: redis
+      BRAIN_API_TOKEN: CHANGE_ME_brain_token
+      TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
+    command: ["python", "-m", "app.workers.scheduler"]
+
+  # Ночной бэкап pgdata (pg_dump в ./backups, ротация 14 дней).
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: CHANGE_ME_postgres_password
+    volumes:
+      - ./backups:/backups
+    entrypoint: |
+      sh -c 'echo "0 3 * * * pg_dump -h postgres -U kumaflow kumaflow | gzip > /backups/kumaflow-$$(date +\%Y\%m\%d-\%H\%M).sql.gz && ls -t /backups/kumaflow-*.sql.gz | tail -n +15 | xargs -r rm --" | crontab - && crond -f'
 
   web:
     image: ghcr.io/mrsat13/kumaflow-brain-web:latest

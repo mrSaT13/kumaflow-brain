@@ -25,22 +25,59 @@ def _weights(total_likes: int) -> dict[str, float]:
             'behavior': 0.20, 'collab': 0.05, 'novelty': 0.05}
 
 
-def _resolve_ids(db, ids: list[str]) -> list[str]:
-    """uuid как есть, external_id (мобильный id) -> наш track_id."""
-    from app.db.models import Track
+# Пресеты «Моя волна» (клиент шлёт русские пилюли или англ. коды).
+# Настроение: целевые диапазоны energy/valence/dance + родственные муд-лейблы.
+MOOD_PRESETS: dict[str, dict] = {
+    'бодрое': {'moods': {'energetic', 'excited', 'happy'}, 'energy_min': 0.6, 'tempo_min': 110},
+    'весёлое': {'moods': {'happy', 'upbeat', 'energetic'}, 'valence_min': 0.55, 'dance_min': 0.5},
+    'спокойное': {'moods': {'calm', 'relaxed', 'peaceful'}, 'energy_max': 0.45, 'arousal_max': 0.45},
+    'грустное': {'moods': {'sad', 'melancholic', 'dark'}, 'valence_max': 0.45},
+    'тёмное': {'moods': {'dark', 'aggressive', 'melancholic'}, 'valence_max': 0.5},
+    'chill': {'moods': {'calm', 'relaxed'}, 'energy_max': 0.5},
+}
+# Занятие: мягкие бонусы (не жёсткие фильтры — очередь не должна пустеть).
+ACTIVITY_PRESETS: dict[str, dict] = {
+    'просыпаюсь': {'energy_min': 0.5, 'tempo_min': 100, 'valence_min': 0.4},
+    'в дороге': {'energy_min': 0.6, 'tempo_min': 110},
+    'работаю': {'energy_max': 0.6, 'tempo_max': 120},
+    'work': {'energy_min': 0.3, 'energy_max': 0.6},
+    'workout': {'tempo_min': 110, 'energy_min': 0.6},
+    'sleep': {'energy_max': 0.35},
+}
 
-    out: list[str] = []
-    for raw in ids or []:
-        s = str(raw or '').strip()
-        if not s:
-            continue
-        if db.get(Track, s) is not None:
-            out.append(s)
-            continue
-        t = db.query(Track).filter(Track.external_id == s).first()
-        if t is not None:
-            out.append(str(t.id))
-    return out
+
+def _norm_mood(v: str | None) -> str | None:
+    s = (v or '').strip().lower()
+    if not s:
+        return None
+    # русские пилюли -> англ. лейблы фичей
+    _ru = {'бодрое': 'energetic',
+           'весёлое': 'happy',
+           'веселое': 'happy', 'спокойное': 'calm', 'грустное': 'sad',
+           'тёмное': 'dark', 'темное': 'dark', 'меланхоличное': 'melancholic',
+           'энергичное': 'energetic', 'меланхоличный': 'melancholic',
+           'тёмный': 'dark', 'темный': 'dark', 'энергичный': 'energetic'}
+    return _ru.get(s, s)
+
+
+def _norm_language(v: str | None) -> str | None:
+    s = (v or '').strip().lower()
+    if not s:
+        return None
+    if s in ('ru', 'ru-ru', 'русский', 'russian', 'рус'):
+        return 'ru'
+    if s in ('foreign', 'en', 'eng', 'иностранный', 'английский', 'не русский'):
+        return 'foreign'
+    if s in ('instrumental', 'без слов', 'инструментал', 'no_lyrics', 'no lyrics'):
+        return 'instrumental'
+    return None
+
+
+def _resolve_ids(db, ids: list[str]) -> list[str]:
+    """uuid как есть, external_id (мобильный id) -> наш track_id. Не падает на PG."""
+    from app.services.track_resolve import resolve_track_ids as _r
+
+    return _r(db, ids)
 
 
 def apply_delta(db, user_id: str, ratings_delta: list[dict] | None,
@@ -58,8 +95,8 @@ def apply_delta(db, user_id: str, ratings_delta: list[dict] | None,
             d = dict(r)
             tid = str(d.get('track_id') or '')
             if tid and d.get('external_id') is None:
-                from app.db.models import Track
-                t = db.get(Track, tid)
+                from app.services.track_resolve import get_track as _gt
+                t = _gt(db, tid)
                 if t is not None:
                     d['external_id'] = t.external_id
             norm.append(d)
@@ -74,12 +111,11 @@ def apply_delta(db, user_id: str, ratings_delta: list[dict] | None,
             tid = str(e.get('track_id') or '')
             if not tid:
                 continue
-            from app.db.models import Track
-            if db.get(Track, tid) is None:
-                t = db.query(Track).filter(Track.external_id == tid).first()
-                if t is None:
-                    continue
-                tid = str(t.id)
+            from app.services.track_resolve import get_track as _gt2
+            _t = _gt2(db, tid)
+            if _t is None:
+                continue
+            tid = str(_t.id)
             norm_e.append({'track_id': tid, 'action': e.get('action'),
                            'position_sec': e.get('position_sec')})
         if norm_e:
@@ -144,16 +180,33 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                      seed_ids: list[str], settings: dict | None = None,
                      recent_events: list[dict] | None = None,
                      collab_scores: dict[str, float] | None = None,
-                     current_hour: int | None = None) -> list[dict]:
-    """Порт TrackScorer.scoreAndRankTracks на наших таблицах."""
+                     current_hour: int | None = None,
+                     jitter_seed: str | None = None) -> list[dict]:
+    """Порт TrackScorer.scoreAndRankTracks на наших таблицах.
+
+    jitter_seed: детерминированный per-user джиттер вместо глобального random
+    (иначе у юзеров без данных порядок одинаковый — все вкусовые члены нули).
+    """
     from app.db.models import Track, TrackFeatures
     from app.services import taste as _taste
     from app.services.ml import _cosine, _feature_vector
 
     settings = settings or {}
-    activity = settings.get('activity')
-    mood = (settings.get('mood') or '').strip().lower() or None
+    _rng = random.Random(jitter_seed) if jitter_seed else random
+    activity_raw = (settings.get('activity') or '').strip()
+    activity = activity_raw.lower() or None
+    mood = _norm_mood(settings.get('mood'))
     hour = current_hour if current_hour is not None else datetime.now().hour
+    # Пресеты: русские пилюли клиента -> диапазоны фичей для ctx-бонусов.
+    _mood_preset = MOOD_PRESETS.get((settings.get('mood') or '').strip().lower(), {})
+    _act_preset = ACTIVITY_PRESETS.get(activity_raw.strip().lower(),
+                                       ACTIVITY_PRESETS.get(activity or '', {}))
+    if mood and not _mood_preset:
+        # англ. mood без пресета — ищем по ключам без учёта регистра
+        for k, v in MOOD_PRESETS.items():
+            if k == mood:
+                _mood_preset = v
+                break
 
     prof = _taste.user_profile(db, user_id, top_n=0)
     likes_total = int((prof.get('counts') or {}).get('likes', 0) or 0)
@@ -252,6 +305,15 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                 bpm = float(f.tempo_bpm or 0)
             except (TypeError, ValueError):
                 bpm = 0
+            try:
+                va = float(f.valence if f.valence is not None else 0.5)
+            except (TypeError, ValueError):
+                va = 0.5
+            try:
+                da = float(f.danceability if f.danceability is not None else 0.5)
+            except (TypeError, ValueError):
+                da = 0.5
+            # legacy активности (совместимость)
             if activity == 'work' and 0.3 <= en <= 0.6:
                 ctx += 0.1
             if activity == 'workout' and bpm > 110:
@@ -260,6 +322,51 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                 ctx += 0.1
             if mood and _mood_of(f) == mood:
                 ctx += 0.1
+            # пресеты настроения: родственные муд-лейблы + диапазоны
+            if _mood_preset:
+                _pm = set(_mood_preset.get('moods') or set())
+                try:
+                    _fm = set(str(m).lower() for m in (f.mood_labels or []))
+                except Exception:
+                    _fm = set()
+                if _fm & _pm:
+                    ctx += 0.12
+                _ok = True
+                if 'energy_min' in _mood_preset and en < _mood_preset['energy_min']:
+                    _ok = False
+                if 'energy_max' in _mood_preset and en > _mood_preset['energy_max']:
+                    _ok = False
+                if 'valence_min' in _mood_preset and va < _mood_preset['valence_min']:
+                    _ok = False
+                if 'valence_max' in _mood_preset and va > _mood_preset['valence_max']:
+                    _ok = False
+                if 'dance_min' in _mood_preset and da < _mood_preset['dance_min']:
+                    _ok = False
+                if 'tempo_min' in _mood_preset and bpm and bpm < _mood_preset['tempo_min']:
+                    _ok = False
+                if _ok:
+                    ctx += 0.08
+            # пресеты занятия: мягкие бонусы
+            if _act_preset:
+                _aok = True
+                if 'energy_min' in _act_preset and en < _act_preset['energy_min']:
+                    _aok = False
+                if 'energy_max' in _act_preset and en > _act_preset['energy_max']:
+                    _aok = False
+                if 'tempo_min' in _act_preset and bpm and bpm < _act_preset['tempo_min']:
+                    _aok = False
+                if 'tempo_max' in _act_preset and bpm and bpm > _act_preset['tempo_max']:
+                    _aok = False
+                if 'valence_min' in _act_preset and va < _act_preset['valence_min']:
+                    _aok = False
+                if _aok:
+                    ctx += 0.10
+            # время суток: утром — энергия, вечером — спокойствие
+            if 6 <= hour <= 10 and en >= 0.6:
+                ctx += 0.03
+            elif hour >= 22 or hour <= 5:
+                if en <= 0.5:
+                    ctx += 0.03
         # diversity
         pen = 0.0
         if t.artist_name and t.artist_name in used_artists:
@@ -273,7 +380,7 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                  w['artist'] * artist_s + w['behavior'] * behavior +
                  w['collab'] * collab + w['novelty'] * novelty +
                  0.08 * novelty + ctx + bonus.get(tid, 0.0) -
-                 pen + random.random() * 0.12)
+                 pen + _rng.random() * 0.12)
         total = min(max(total, 0.0), 1.0)
         if collab >= 0.7:
             reason = 'Loved by friends'
@@ -287,7 +394,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             reason = 'New discovery'
         else:
             reason = None
-        out.append({'track_id': tid, 'title': t.title,
+        out.append({'track_id': tid, 'external_id': str(t.external_id or ''),
+                    'title': t.title,
                     'artist_name': t.artist_name, 'album_name': t.album_name,
                     'genre': t.genre, 'score': round(total, 4),
                     'audio': round(audio, 3), 'reason': reason,
@@ -397,6 +505,36 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             cand = [c for c in cand
                     if (_mood_of(fm[c]) == mood if c in fm else True)]
 
+    # Фильтр по языку (пилюли клиента «по языку»): ru / foreign / instrumental.
+    # Язык берём из Lyrics.language (детект при скачивании текстов).
+    # Треки без текстов НЕ выкидываем (unknown = пропуск) — иначе пустая очередь.
+    lang = _norm_language(settings.get('language'))
+    if lang and cand:
+        from app.db.models import Lyrics as _Ly
+
+        try:
+            from app.services.lyrics import detect_lyrics_language as _det_lang
+
+            _lm: dict[str, str] = {}
+            for r in db.query(_Ly).filter(_Ly.track_id.in_(cand[:2000])).all():
+                _lang_v = (r.language or '').strip().lower()
+                if not _lang_v:
+                    try:
+                        _lang_v = _det_lang(getattr(r, 'text', None))
+                    except Exception:
+                        _lang_v = ''
+                _lm[str(r.track_id)] = _lang_v
+        except Exception:
+            _lm = {}
+        if lang == 'ru':
+            cand = [c for c in cand
+                    if c not in _lm or (_lm.get(c) or '') == 'ru']
+        elif lang == 'foreign':
+            cand = [c for c in cand if (_lm.get(c) or '') != 'ru']
+        elif lang == 'instrumental':
+            cand = [c for c in cand
+                    if c not in _lm or (_lm.get(c) or '') == 'instrumental']
+
     # collab-подмес: кто у похожих в топе — тем выше collabScore
     collab_scores: dict[str, float] = {}
     try:
@@ -418,7 +556,8 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                                'position_sec': e.get('position_sec')})
 
     ranked = score_candidates(db, user_id, cand[:800], seeds, settings,
-                              norm_events, collab_scores)
+                              norm_events, collab_scores,
+                              jitter_seed=f"{user_id}:{len(played)}")
     # Недавнее реже (новизна как у cold-start novelty=True): уже учтено
     # novelty-членом, дубли очереди на всякий случай режем ещё раз
     ranked = [r for r in ranked if r['track_id'] not in played]

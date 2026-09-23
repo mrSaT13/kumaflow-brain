@@ -164,6 +164,7 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
         scored.sort(key=lambda kv: (kv[0], kv[1]), reverse=True)
         return [
             {
+                "id": str(r.id),
                 "track_id": str(r.id),
                 "title": r.title,
                 "artist_name": r.artist_name,
@@ -404,9 +405,11 @@ def _step2_candidates(rows, signal: dict[str, float],
     return [(by_id[tid], s) for tid, s in candidates.items() if tid in by_id]
 
 
-def _step3_diversify(items: list[tuple], n: int = 30) -> list:
+def _step3_diversify(items: list[tuple], n: int = 30, seed: str | None = None) -> list:
     """MMR + идеальные сочетания: штраф за похожесть, ограничение на артистов/жанры, энергетическая кривая.
 
+    seed: per-user/per-day сид для примеси и арки (дефолт 42 — одинаковый
+    результат у всех; с сидом разные юзеры без данных получают разные плейлисты).
     На большой библиотеке MMR по всем трекам — O(n²): сначала урезаем пул
     до топ-2000 по скору (качество не страдает, скорость — в разы).
     items: (track_row, score, features|None, cluster_id|None) — работает
@@ -420,7 +423,7 @@ def _step3_diversify(items: list[tuple], n: int = 30) -> list:
         import random as _rnd
 
         head, tail = pool[:1500], pool[1500:]
-        _rnd.Random(42).shuffle(tail)
+        _rnd.Random(seed if seed is not None else 42).shuffle(tail)
         pool = head + tail[:500]
         pool.sort(key=lambda x: x[1], reverse=True)
     chosen: list = []
@@ -504,9 +507,9 @@ def _step3_diversify(items: list[tuple], n: int = 30) -> list:
         arc: list = []
         # чередуем: берём по одному из low, mid, high по кругу
         pools = [low, mid, high]
-        # random shuffle внутри каждого пула для вариативности (детерминированно)
+        # random shuffle внутри каждого пула для вариативности (детерминированно per-user)
         for p in pools:
-            random.Random(42).shuffle(p)
+            random.Random(seed if seed is not None else 42).shuffle(p)
         idxs = [0,0,0]
         turn = 0
         while len(arc) < len(chosen):
@@ -611,7 +614,10 @@ def cold_start_playlist(server_id: str, n: int = 30, user_id: str | None = None,
         for t, s in candidates:
             tid = str(t.id)
             items.append((t, s, feat_map.get(tid), cluster_map.get(tid)))
-        tracks = _step3_diversify(items, n=n)
+        from datetime import date as _date
+
+        _seed = f"{user_id}:{_date.today().isoformat()}" if user_id else None
+        tracks = _step3_diversify(items, n=n, seed=_seed)
     # статистика для UI: распределение по жанрам/артистам в идеальном плейлисте
     genre_dist = Counter(t.genre or "unknown" for t in tracks)
     artist_dist = Counter(t.artist_name or "unknown" for t in tracks)

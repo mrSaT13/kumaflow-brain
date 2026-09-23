@@ -85,6 +85,23 @@ def get_lyrics(track_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/backfill-language")
+def backfill_language(db: Session = Depends(get_db)):
+    """Разовый прогон: проставить language у старых текстов (было None)."""
+    from app.services.lyrics import detect_lyrics_language as _det
+
+    rows = db.query(Lyrics).filter((Lyrics.language.is_(None)) | (Lyrics.language == "")).limit(5000).all()
+    fixed = 0
+    for r in rows:
+        try:
+            r.language = _det(getattr(r, "text", None))
+            fixed += 1
+        except Exception:
+            pass
+    db.commit()
+    return {"ok": True, "fixed": fixed, "checked": len(rows)}
+
+
 @router.post("/{track_id}/refresh")
 def refresh_lyrics(track_id: str, db: Session = Depends(get_db)):
     """Принудительно перетянуть текст с lrclib и прогнать AI анализ."""
@@ -103,6 +120,7 @@ def refresh_lyrics(track_id: str, db: Session = Depends(get_db)):
     if row:
         row.text = fetched["text"]
         row.synced = fetched.get("synced")
+        row.language = fetched.get("language") or row.language
         row.source_url = fetched.get("source_url")
         from datetime import datetime
         row.fetched_at = datetime.utcnow()

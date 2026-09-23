@@ -85,10 +85,32 @@ export type ArtistEntry = {
 
 const BASE = process.env.NEXT_PUBLIC_KUMAFLOW_API ?? "";
 
+const TOKEN_KEY = "kumaflow_api_token";
+
+export function getBrowserToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setBrowserToken(v: string) {
+  try {
+    if (v) localStorage.setItem(TOKEN_KEY, v);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch { /* приватный режим */ }
+}
+
+function authHeaders(): Record<string, string> {
+  const t = getBrowserToken().trim();
+  return t ? { authorization: `Bearer ${t}` } : {};
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "content-type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
     cache: "no-store",
   });
   if (!res.ok) {
@@ -166,8 +188,14 @@ export const api = {
     http<{ queued: boolean; run_id: string; job_id: string }>(`/api/tracks/${id}/analyze`, { method: "POST" }),
   fetchTrackLyrics: (id: string) =>
     http<{ ok: boolean; error?: string }>(`/api/tracks/${id}/lyrics`, { method: "POST" }),
-  trackCoverUrl: (id: string, size: number = 300) => `/api/covers/track/${id}?size=${size}`,
-  coverUrl: (coverId: string, size: number = 300) => `/api/covers/${encodeURIComponent(coverId)}?size=${size}`,
+  trackCoverUrl: (id: string, size: number = 300) => {
+    const t = getBrowserToken().trim();
+    return `/api/covers/track/${id}?size=${size}${t ? `&token=${encodeURIComponent(t)}` : ""}`;
+  },
+  coverUrl: (coverId: string, size: number = 300) => {
+    const t = getBrowserToken().trim();
+    return `/api/covers/${encodeURIComponent(coverId)}?size=${size}${t ? `&token=${encodeURIComponent(t)}` : ""}`;
+  },
   prefetchCovers: (artist_ids?: string[]) => http<{ fetched: number }>(`/api/covers/prefetch`, { method: "POST", body: JSON.stringify({ artist_ids: artist_ids ?? [] }) }),
   // yandex + ai + clap
   getYandexConfig: () => http<{ token: string; enabled: boolean; has_token: boolean }>(`/api/yandex/config`),
@@ -353,8 +381,8 @@ export const api = {
       `/api/analysis/clap-status`,
     ),
   getAutomation: () =>
-    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean } }>(`/api/settings/automation`),
-  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean }) =>
+    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean } }>(`/api/settings/automation`),
+  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean }) =>
     http<{ ok: boolean; flags: Record<string, unknown> }>(
       `/api/settings/automation`, { method: "PUT", body: JSON.stringify(flags) },
     ),
@@ -468,13 +496,36 @@ export const api = {
   bridgeStatus: () =>
     http<{ enabled: boolean; url: string; reachable: boolean; error?: string }>(`/api/bridge/status`),
 
-  notifications: (limit = 50) =>
+  notifications: (limit = 50, all = true) =>
     http<{ notifications: { id: string; user_id?: string | null; kind: string; title: string; body?: string | null; link?: string | null; created_at?: string | null; read_at?: string | null }[] }>(
-      `/api/notifications/?limit=${limit}`,
+      `/api/notifications/?limit=${limit}${all ? "&all=true" : ""}`,
     ),
-  unreadCount: () => http<{ unread: number }>(`/api/notifications/unread-count`),
+  unreadCount: (all = true) => http<{ unread: number }>(`/api/notifications/unread-count${all ? "?all=true" : ""}`),
   markNotificationRead: (id: string) =>
     http<{ ok: boolean }>(`/api/notifications/${id}/read`, { method: "POST" }),
-  markAllNotificationsRead: () =>
-    http<{ ok: boolean; marked: number }>(`/api/notifications/read-all`, { method: "POST" }),
+  markAllNotificationsRead: (all = true) =>
+    http<{ ok: boolean; marked: number }>(`/api/notifications/read-all${all ? "?all=true" : ""}`, { method: "POST" }),
+
+  tokensMeta: () =>
+    http<{
+      scopes: Record<string, string>;
+      presets: Record<string, { label: string; desc: string; scopes: string[] }>;
+      env_token_configured: boolean; count: number;
+    }>(`/api/settings/tokens/meta`),
+  listTokens: (owner_user_id?: string) =>
+    http<{ tokens: ApiToken[] }>(`/api/settings/tokens${owner_user_id ? `?owner_user_id=${encodeURIComponent(owner_user_id)}` : ""}`),
+  createToken: (body: { owner_user_id?: string | null; name: string; scopes: string[] }) =>
+    http<{ ok: boolean; id: string; name: string; prefix: string; scopes: string[]; owner_user_id?: string | null; token: string }>(
+      `/api/settings/tokens`, { method: "POST", body: JSON.stringify(body) },
+    ),
+  toggleToken: (id: string, enabled: boolean) =>
+    http<{ ok: boolean; token: ApiToken }>(`/api/settings/tokens/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
+  deleteToken: (id: string) =>
+    http<{ ok: boolean }>(`/api/settings/tokens/${id}`, { method: "DELETE" }),
+};
+
+export type ApiToken = {
+  id: string; name: string; prefix: string; scopes: string[];
+  owner_user_id?: string | null; enabled: boolean;
+  created_at?: string | null; last_used_at?: string | null;
 };

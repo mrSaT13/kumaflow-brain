@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, date
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db, models
+from app.core.auth import require_scope
 from app.db.models import Playlist, PlaylistTrack, Track
 from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
 from app.services.media_server import resolve_active_server
@@ -15,7 +16,7 @@ from app.services.queue import enqueue
 from app.workers.tasks import daily_playlist, lyrics_fetch
 from app.services.ml import cold_start_playlist
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_scope("playlists"))])
 
 
 class GenerateIn(BaseModel):
@@ -362,8 +363,9 @@ def my_wave(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/weekly-discovery")
-def weekly_discovery(payload: dict, db: Session = Depends(get_db)):
+def weekly_discovery(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Открытия недели по CLAP: средний вектор лайков -> ближайшие неслушанные + объяснение."""
+    from app.core.auth import check_body_user
     from app.db.models import MediaUser
 
     user_id = str((payload or {}).get("user_id") or "")
@@ -371,6 +373,7 @@ def weekly_discovery(payload: dict, db: Session = Depends(get_db)):
     n = max(5, min(100, n))
     if not user_id:
         raise HTTPException(400, "user_id required")
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = db.get(MediaUser, user_id)
     if not u:
         try:
@@ -472,63 +475,15 @@ def export_playlist(playlist_id: str, db: Session = Depends(get_db)):
     (файлы с диска пропускаются — Navidrome их не знает). Повторный вызов
     пересоздаёт удалённый плейлист заново. ID в Navidrome запоминаем.
     """
-    import asyncio
+    from app.services.playlist_push import push_playlist_to_navidrome as _push_shared
 
-    try:
-        uuid.UUID(playlist_id)
-    except ValueError:
-        raise HTTPException(400, "invalid id")
-    p = db.get(Playlist, playlist_id)
-    if not p:
-        raise HTTPException(404, "not found")
-    items = (
-        db.query(PlaylistTrack)
-        .filter(PlaylistTrack.playlist_id == p.id)
-        .order_by(PlaylistTrack.position.asc())
-        .all()
-    )
-    nav_ids: list[str] = []
-    skipped = 0
-    for it in items:
-        t = db.get(Track, it.track_id)
-        ext = str(t.external_id or "") if t else ""
-        if ext and not ext.startswith(("disk:", "dartist:", "dalbum:", "demo-")):
-            nav_ids.append(ext)
-        else:
-            skipped += 1
-    if not nav_ids:
-        return {"ok": False, "error": "В плейлисте нет треков из Navidrome (только файлы с диска) — выгружать нечего"}
-    from app.services.media_server import get_media_server_config
-    from app.services.navidrome.client import SubsonicAuth, SubsonicClient
-
-    try:
-        cfg = get_media_server_config(db)
-    except Exception:
-        cfg = {}
-    url, user, password = (cfg.get("url") or ""), (cfg.get("user") or ""), (cfg.get("password") or "")
-    if not url or not user:
-        return {"ok": False, "error": "Медиа-сервер не настроен (Настройки → Медиа-сервер)"}
-
-    async def _push() -> str:
-        async with SubsonicClient(url, SubsonicAuth(user=user, password=password), timeout=60.0) as client:
-            if p.external_id:
-                try:
-                    await client.delete_playlist(p.external_id)
-                except Exception:
-                    pass
-            created = await client.create_playlist(name=p.name, song_ids=nav_ids)
-            remote_id = str(created.get("id") or "")
-            if not remote_id:
-                raise RuntimeError("Navidrome не вернул id созданного плейлиста")
-            return remote_id
-
-    try:
-        remote_id = asyncio.run(_push())
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": f"Navidrome: {str(e)[:300]}"}
-    p.external_id = remote_id
-    db.commit()
-    return {"ok": True, "navidrome_id": remote_id, "exported": len(nav_ids), "skipped": skipped}
+    res = _push_shared(db, playlist_id)
+    if not res.get("ok"):
+        err = str(res.get("error") or "")
+        if err in ("not found",):
+            raise HTTPException(404, "not found")
+        return {"ok": False, "error": err}
+    return res
 
 
 @router.delete("/{playlist_id}")

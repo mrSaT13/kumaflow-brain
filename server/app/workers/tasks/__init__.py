@@ -1790,6 +1790,17 @@ def daily_per_user(*args, **kwargs):
                     for pos, tid in enumerate(tids):
                         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
                     ok += 1
+                    _new_pid = str(p.id)
+                # авто-пуш в Navidrome за тумблером (тихо, best-effort)
+                try:
+                    with session_scope() as _pdb:
+                        from app.services.playlist_push import maybe_auto_push as _push
+
+                        _pr = _push(_pdb, _new_pid)
+                        if _pr and _pr.get("ok"):
+                            _append_log(run_id, "info", f"Daily {u.username}: выгружен в Navidrome ({_pr.get('exported')} тр.)")
+                except Exception:
+                    pass
                 _append_log(run_id, "info", f"Daily {u.username}: {len(tids)} треков")
             except Exception as e:
                 _append_log(run_id, "warn", f"Daily {u.username} fail: {e}")
@@ -1855,6 +1866,7 @@ def smart_playlists(*args, **kwargs):
             if _is_cancelled(run_id):
                 break
             made: list[str] = []
+            made_ids: list[str] = []
             for kind, label in _smart.KINDS.items():
                 try:
                     with session_scope() as db:
@@ -1892,6 +1904,7 @@ def smart_playlists(*args, **kwargs):
                             db.add(PlaylistTrack(playlist_id=p.id, track_id=tid,
                                                  position=pos))
                         made.append(f"{label} ({len(tids)})")
+                        made_ids.append(str(p.id))
                 except Exception as e:  # noqa: BLE001 — один вид не валит остальных
                     if run_id:
                         _append_log(run_id, "warn", f"Smart {u.username}/{kind} fail: {e}")
@@ -1903,6 +1916,20 @@ def smart_playlists(*args, **kwargs):
                 done += 1
                 if run_id:
                     _append_log(run_id, "info", f"Smart {u.username}: {', '.join(made)}")
+                # авто-пуш в Navidrome за тумблером (тихо, best-effort)
+                try:
+                    with session_scope() as _pdb:
+                        from app.services.playlist_push import maybe_auto_push as _push2
+
+                        _n = 0
+                        for _pid in made_ids:
+                            _pr = _push2(_pdb, _pid)
+                            if _pr and _pr.get("ok"):
+                                _n += 1
+                        if _n and run_id:
+                            _append_log(run_id, "info", f"Smart {u.username}: выгружено в Navidrome ({_n})")
+                except Exception:
+                    pass
                 try:
                     from app.services import notify as _notify
 
@@ -2199,6 +2226,7 @@ def weekly_discovery_all(*args, **kwargs):
                     db.flush()
                     for pos, tid in enumerate(tids):
                         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+                    _wpid = str(p.id)
                     try:
                         from app.services import notify as _notify
 
@@ -2208,6 +2236,16 @@ def weekly_discovery_all(*args, **kwargs):
                     except Exception:
                         pass
                     ok += 1
+                # авто-пуш в Navidrome за тумблером (тихо, best-effort)
+                try:
+                    with session_scope() as _pdb:
+                        from app.services.playlist_push import maybe_auto_push as _push3
+
+                        _pr = _push3(_pdb, _wpid)
+                        if _pr and _pr.get("ok") and run_id:
+                            _append_log(run_id, "info", f"Weekly {u.username}: выгружен в Navidrome")
+                except Exception:
+                    pass
                 if run_id:
                     _append_log(run_id, "info", f"Weekly {u.username}: {len(tids)} ({res.get('mode')})")
             except Exception as e:  # noqa: BLE001

@@ -66,12 +66,16 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     mistral_api_key: str = ""
 
-    clap_enabled: bool = True
+    clap_enabled: bool = False
     use_gpu_clustering: bool = False
 
     # Сейф паролей Navidrome (opt-in автообновление вкусов, Fernet).
     # Ключ генерируется один раз и живёт в секретах compose, НЕ в базе.
     taste_vault_key: str = ""
+
+    # Токен связки плеер <-> мозг. Пусто = auth выключен (доверенная LAN, как раньше).
+    # Задать один раз: openssl rand -hex 32, вписать в compose И в настройки плеера.
+    brain_api_token: str = ""
 
     yandex_music_token: str = ""
     yandex_music_enabled: bool = False

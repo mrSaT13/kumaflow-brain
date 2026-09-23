@@ -15,16 +15,17 @@ const KIND_DOT: Record<string, string> = {
 
 function BellBox() {
   const [open, setOpen] = useState(false);
-  const { data: count, mutate: mutateCount } = useSWR("/api/notifications/unread-count", () => api.unreadCount(), { refreshInterval: 15000 });
-  const { data: list, mutate: mutateList } = useSWR(open ? "/api/notifications" : null, () => api.notifications(30));
+  const { data: count, mutate: mutateCount } = useSWR("/api/notifications/unread-count?all", () => api.unreadCount(true), { refreshInterval: 15000 });
+  const { data: list, error: listError, isLoading: listLoading, mutate: mutateList } = useSWR(open ? "/api/notifications?all" : null, () => api.notifications(30, true));
   const unread = count?.unread ?? 0;
+  const items = list?.notifications ?? [];
 
   async function openBox() {
     setOpen((v) => !v);
   }
 
   async function readAll() {
-    await api.markAllNotificationsRead();
+    await api.markAllNotificationsRead(true);
     mutateCount();
     mutateList();
   }
@@ -58,10 +59,16 @@ function BellBox() {
               <span className="text-sm font-medium">Уведомления</span>
               <button className="kuma-pill text-xs" onClick={readAll}>Прочитать все</button>
             </div>
-            {(list?.notifications ?? []).length === 0 && (
+            {(listLoading || (!list && !listError)) && (
+              <div className="text-xs text-muted px-2 py-4 text-center">Загрузка…</div>
+            )}
+            {!listLoading && listError && (
+              <div className="text-xs text-red-500 px-2 py-4 text-center">Не смог загрузить: {String(listError instanceof Error ? listError.message : listError)}</div>
+            )}
+            {!listLoading && !listError && items.length === 0 && (
               <div className="text-xs text-muted px-2 py-4 text-center">Пока тихо — итоги ночных задач появятся здесь.</div>
             )}
-            {(list?.notifications ?? []).map((n) => (
+            {items.map((n) => (
               <div
                 key={n.id}
                 onClick={() => { if (!n.read_at) readOne(n.id); }}

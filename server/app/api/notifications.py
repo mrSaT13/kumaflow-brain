@@ -25,11 +25,13 @@ def _to_dict(n) -> dict:
     }
 
 
-def _scope(db, user_id: str | None):
-    """Глобальные + свои (чужие не отдаём)."""
+def _scope(db, user_id: str | None, all: bool = False):
+    """Глобальные + свои (чужие не отдаём). all=True — всё (колокол в вебе без юзера)."""
     from app.db.models import Notification
 
     q = db.query(Notification)
+    if all:
+        return q
     if user_id:
         try:
             uuid.UUID(str(user_id))
@@ -43,21 +45,21 @@ def _scope(db, user_id: str | None):
 
 
 @router.get("/")
-def list_notifications(user_id: str | None = None, limit: int = 50,
+def list_notifications(user_id: str | None = None, limit: int = 50, all: bool = False,
                        db: Session = Depends(get_db)):
     """Свежие первые, непрочитанные выше (сортировка в вебе по read_at)."""
     from app.db.models import Notification
 
-    q = _scope(db, user_id).order_by(Notification.created_at.desc())
+    q = _scope(db, user_id, all).order_by(Notification.created_at.desc())
     rows = q.limit(max(1, min(200, int(limit or 50)))).all()
     return {"notifications": [_to_dict(n) for n in rows]}
 
 
 @router.get("/unread-count")
-def unread_count(user_id: str | None = None, db: Session = Depends(get_db)):
+def unread_count(user_id: str | None = None, all: bool = False, db: Session = Depends(get_db)):
     from app.db.models import Notification
 
-    n = _scope(db, user_id).filter(Notification.read_at.is_(None)).count()
+    n = _scope(db, user_id, all).filter(Notification.read_at.is_(None)).count()
     return {"unread": n}
 
 
@@ -78,10 +80,10 @@ def mark_read(note_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/read-all")
-def mark_all_read(user_id: str | None = None, db: Session = Depends(get_db)):
+def mark_all_read(user_id: str | None = None, all: bool = False, db: Session = Depends(get_db)):
     from app.db.models import Notification
 
-    n = _scope(db, user_id).filter(Notification.read_at.is_(None)) \
+    n = _scope(db, user_id, all).filter(Notification.read_at.is_(None)) \
         .update({"read_at": datetime.utcnow()}, synchronize_session=False)
     db.commit()
     return {"ok": True, "marked": n}

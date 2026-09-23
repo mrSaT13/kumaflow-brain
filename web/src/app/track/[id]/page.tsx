@@ -184,10 +184,13 @@ export default function TrackPage() {
           <div className="text-xs uppercase tracking-wider text-muted mb-3">Похожие треки (content-based, косинус по фичам)</div>
           {recs?.items && recs.items.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-              {recs.items.slice(0, 9).map((t: Track & { score?: number }) => (
+              {recs.items.slice(0, 9).map((t: Track & { score?: number; track_id?: string }) => {
+                const tid = t.id ?? t.track_id;
+                if (!tid) return null;
+                return (
                 <Link
-                  key={t.id}
-                  href={`/track/${t.id}`}
+                  key={tid}
+                  href={`/track/${tid}`}
                   className="kuma-card !p-3 hover:bg-surface flex items-center gap-3"
                 >
                   <div className="flex-1 min-w-0">
@@ -198,7 +201,8 @@ export default function TrackPage() {
                     <div className="text-xs tabular-nums text-muted">{(t.score * 100).toFixed(0)}%</div>
                   )}
                 </Link>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="text-sm text-muted">Похожих пока нет — нужен sonic-анализ большего числа треков.</div>

@@ -20,20 +20,23 @@ except Exception:
 
 
 _redis_client: Optional["_redis.Redis"] = None
-_rq_default: Optional["_RQQueue"] = None
-_rq_high: Optional["_RQQueue"] = None
+_rq_queues: dict[str, "_RQQueue"] = {}
 _executor: Optional[ThreadPoolExecutor] = None
+
+# Очереди: high/default — legacy/лёгкие; audio — librosa (CPU-тяжёлая);
+# clap — эмбеддинги; light — быстрые задачи (taste, notify, covers_gc).
+KNOWN_QUEUES = ("high", "default", "audio", "clap", "light")
 
 
 def init_redis() -> None:
-    global _redis_client, _rq_default, _rq_high, _executor
+    global _redis_client, _rq_queues, _executor
     settings = get_settings()
     if _HAS_RQ:
         try:
             _redis_client = _redis.from_url(settings.redis_url, decode_responses=False)
             _redis_client.ping()
-            _rq_default = _RQQueue("default", connection=_redis_client)
-            _rq_high = _RQQueue("high", connection=_redis_client)
+            for qn in KNOWN_QUEUES:
+                _rq_queues[qn] = _RQQueue(qn, connection=_redis_client)
             logger.info("redis connected at {}", settings.redis_url)
             return
         except Exception as e:
@@ -42,7 +45,7 @@ def init_redis() -> None:
 
 
 def shutdown_redis() -> None:
-    global _redis_client, _rq_default, _rq_high, _executor
+    global _redis_client, _rq_queues, _executor
     try:
         if _redis_client is not None:
             _redis_client.close()
@@ -51,8 +54,7 @@ def shutdown_redis() -> None:
     if _executor is not None:
         _executor.shutdown(wait=False, cancel_futures=True)
     _redis_client = None
-    _rq_default = None
-    _rq_high = None
+    _rq_queues = {}
     _executor = None
 
 
@@ -68,23 +70,32 @@ def get_redis():
 
 def get_queue(name: str = "default"):
     """RQ-очередь на общем Redis-клиенте (нужна воркеру)."""
-    global _rq_default, _rq_high
     if not _HAS_RQ:
         raise RuntimeError("RQ не установлен")
     conn = get_redis()
-    if name == "high":
-        if _rq_high is None:
-            _rq_high = _RQQueue("high", connection=conn)
-        return _rq_high
-    if _rq_default is None:
-        _rq_default = _RQQueue("default", connection=conn)
-    return _rq_default
+    qn = name if name in KNOWN_QUEUES else "default"
+    if qn not in _rq_queues:
+        _rq_queues[qn] = _RQQueue(qn, connection=conn)
+    return _rq_queues[qn]
+
+
+def enqueue_audio(fn: Callable[..., Any], *args: Any, job_timeout: int | None = 1800, **kwargs: Any) -> str:
+    """Тяжёлый аудио-анализ (librosa) — отдельная очередь audio."""
+    return enqueue(fn, *args, queue="audio", job_timeout=job_timeout, **kwargs)
+
+
+def enqueue_clap(fn: Callable[..., Any], *args: Any, job_timeout: int | None = 3600, **kwargs: Any) -> str:
+    return enqueue(fn, *args, queue="clap", job_timeout=job_timeout, **kwargs)
+
+
+def enqueue_light(fn: Callable[..., Any], *args: Any, job_timeout: int | None = 600, **kwargs: Any) -> str:
+    return enqueue(fn, *args, queue="light", job_timeout=job_timeout, **kwargs)
 
 
 def enqueue(fn: Callable[..., Any], *args: Any, queue: str = "default", job_timeout: int | None = None, **kwargs: Any) -> str:
     """Enqueue a callable. Returns a job id (real RQ id or synthetic 'bg-<n>')."""
-    if _rq_default is not None:
-        q = _rq_high if queue == "high" else _rq_default
+    if _rq_queues:
+        q = get_queue(queue)
         # job_timeout=None → дефолт RQ (180 c). Для долгих сканов вызывающий
         # передаёт явное значение (см. app/api/scan.py).
         job = q.enqueue(fn, *args, job_timeout=job_timeout, **kwargs)
@@ -121,8 +132,8 @@ def cancel_job(job_id: str | None) -> dict:
             job.cancel()
         except Exception:
             pass
-        # если job ещё в очереди — убрать из обеих очередей
-        for qname in ("default", "high"):
+        # если job ещё в очереди — убрать из всех очередей
+        for qname in ("default", "high", "audio", "clap", "light"):
             try:
                 get_queue(qname).remove(job)
             except Exception:
