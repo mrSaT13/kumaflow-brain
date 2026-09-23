@@ -23,6 +23,7 @@ from app.api import (
     status,
     covers,
     bridge,
+    now_playing,
 )
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -111,6 +112,7 @@ def create_app() -> FastAPI:
     app.include_router(cron.router, prefix="/api/cron", tags=["cron"])
     app.include_router(covers.router, prefix="/api/covers", tags=["covers"])
     app.include_router(bridge.router, prefix="/api/bridge", tags=["bridge"])
+    app.include_router(now_playing.router, prefix="/api/now-playing", tags=["now-playing"])
 
     return app
 

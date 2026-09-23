@@ -127,7 +127,9 @@ def _store_tastes(db, *, server_id: str, username: str,
     return fav_added, pl_count, pl_tracks, pl_skipped
 
 
-def import_user_tastes(server_id: str, username: str, password: str) -> dict:
+def import_user_tastes(server_id: str, username: str, password: str,
+                       include_starred: bool = True,
+                       include_playlists: bool = True) -> dict:
     """Импорт вкусов под учёткой пользователя. Синхронная обёртка над async клиентом."""
     from app.services.navidrome.client import SubsonicAuth, SubsonicClient
 
@@ -150,35 +152,44 @@ def import_user_tastes(server_id: str, username: str, password: str) -> dict:
             ok = await client.ping()
             if not ok:
                 raise RuntimeError("ping failed — неверный логин/пароль или недоступный сервер")
-            starred = await client.get_starred2()
-            # плейлисты: пробуем с username и без (разные версии Navidrome)
+            starred: dict = {}
+            if include_starred:
+                starred = await client.get_starred2()
+            # Плейлисты — отдельно и только по запросу: на 100+ плейлистах
+            # детали тянутся минутами и синхронный HTTP из UI упирается в
+            # таймаут прокси (видимый 500). Вкусы (starred) — быстро всегда.
             playlists: list[dict] = []
-            try:
-                playlists = await client.get_playlists(username=username)
-            except Exception:
-                playlists = []
-            if not playlists:
+            playlists_total = 0
+            playlists_failed = 0
+            if include_playlists:
                 try:
-                    playlists = await client.get_playlists()
+                    playlists = await client.get_playlists(username=username)
                 except Exception:
                     playlists = []
+                if not playlists:
+                    try:
+                        playlists = await client.get_playlists()
+                    except Exception:
+                        playlists = []
             # детали тянем ПАРАЛЛЕЛЬНО (по одному — минуты на 100+ плейлистах,
             # прокси рвёт соединение и UI видит 500)
             details: list[dict] = []
-            sem = asyncio.Semaphore(8)
+            ids: list[str] = []
+            if include_playlists:
+                sem = asyncio.Semaphore(8)
 
-            async def _one(pid: str) -> dict | None:
-                async with sem:
-                    try:
-                        return await client.get_playlist(pid)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("getPlaylist {} failed: {}", pid, e)
-                        return None
+                async def _one(pid: str) -> dict | None:
+                    async with sem:
+                        try:
+                            return await client.get_playlist(pid)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("getPlaylist {} failed: {}", pid, e)
+                            return None
 
-            ids = [str(pl.get("id")) for pl in playlists if pl.get("id")]
-            for got in await asyncio.gather(*[_one(pid) for pid in ids]):
-                if got:
-                    details.append(got)
+                ids = [str(pl.get("id")) for pl in playlists if pl.get("id")]
+                for got in await asyncio.gather(*[_one(pid) for pid in ids]):
+                    if got:
+                        details.append(got)
             return {"starred": starred or {}, "playlists": details or [],
                     "playlists_total": len(ids), "playlists_failed": len(ids) - len(details)}
 

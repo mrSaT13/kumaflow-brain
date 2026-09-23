@@ -13,6 +13,7 @@ import {
   Users,
   Settings as Cog,
   Activity,
+  Radio,
 } from "lucide-react";
 
 type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
@@ -22,6 +23,7 @@ const sections: { title: string; items: NavItem[] }[] = [
     { href: "/", label: "Главная", icon: LayoutDashboard },
     { href: "/library", label: "Библиотека", icon: Library },
     { href: "/playlists", label: "Плейлисты", icon: ListMusic },
+    { href: "/wave", label: "Моя волна", icon: Radio },
     { href: "/cold-start", label: "Холодный старт", icon: Sparkles },
   ]},
   { title: "Задачи", items: [

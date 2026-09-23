@@ -390,6 +390,32 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # novelty-членом, дубли очереди на всякий случай режем ещё раз
     ranked = [r for r in ranked if r['track_id'] not in played]
     top = ranked[:count]
+    # Обогащаем ответ настроением/энергией для страницы «Моя волна»
+    # (текущее настроение → в какое переходит). Без отдельных запросов за треками.
+    try:
+        from app.db.models import TrackFeatures as _TF
+
+        _ids = [str(r.get("track_id") or "") for r in top if r.get("track_id")]
+        _fm = {str(f.track_id): f for f in
+               db.query(_TF).filter(_TF.track_id.in_(_ids)).all()} if _ids else {}
+        for r in top:
+            f = _fm.get(str(r.get("track_id") or ""))
+            try:
+                moods = list(f.mood_labels or []) if f is not None else []
+            except Exception:
+                moods = []
+            r["mood"] = str(moods[0]).lower() if moods else None
+            r["moods"] = [str(m).lower() for m in moods[:3]]
+            try:
+                r["energy"] = float(f.energy) if f is not None and f.energy is not None else None
+            except (TypeError, ValueError):
+                r["energy"] = None
+            try:
+                r["tempo"] = float(f.tempo_bpm) if f is not None and f.tempo_bpm else None
+            except (TypeError, ValueError):
+                r["tempo"] = None
+    except Exception:
+        pass
     return {'tracks': top, 'seeds': seeds,
             'applied': applied,
             'profile_version': datetime.utcnow().isoformat() + 'Z'}

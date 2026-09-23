@@ -29,6 +29,7 @@ class TasteImportIn(BaseModel):
     username: str
     password: str
     remember: bool = False  # opt-in: зашифровать пароль в сейф для автообновления
+    include_playlists: bool = False  # по умолчанию только вкусы (быстро); плейлисты — отдельным вызовом
 
 
 class SeedTasteIn(BaseModel):
@@ -56,6 +57,8 @@ class VaultIn(BaseModel):
 
 class UserTasteImportIn(BaseModel):
     password: str = ""
+    include_playlists: bool = False  # вкусы (starred) — быстро; плейлисты — отдельно, там долго
+    include_starred: bool = True
 
 
 def _to_dict(u: MediaUser) -> dict:
@@ -158,7 +161,8 @@ def create_user_by_credentials(payload: TasteImportIn, db: Session = Depends(get
     from app.services.taste_import import import_user_tastes
 
     try:
-        res = import_user_tastes(str(server.id), payload.username, payload.password)
+        res = import_user_tastes(str(server.id), payload.username, payload.password,
+                                 include_playlists=bool(payload.include_playlists))
     except Exception as e:  # noqa: BLE001 — читаемая ошибка вместо голого 500
         from app.core.logging import get_logger as _gl
 
@@ -189,7 +193,11 @@ def create_user_by_credentials(payload: TasteImportIn, db: Session = Depends(get
 
 @router.post("/{user_id}/import-tastes")
 def import_tastes(user_id: str, payload: UserTasteImportIn, db: Session = Depends(get_db)):
-    """Импорт вкусов (лайки/плейлисты) для существующего пользователя.
+    """Импорт вкусов (лайки) для существующего пользователя.
+
+    По умолчанию — только starred (быстро, без таймаутов).
+    Плейлисты — отдельно через /{user_id}/sync-playlists (там долго,
+    лучше фоном через refresh-async).
 
     Нужен пароль ЭТОГО пользователя в Navidrome (в body: {"password": "..."}).
     Если пароль не передан — пробуем глобальный пароль медиа-сервера
@@ -215,12 +223,50 @@ def import_tastes(user_id: str, payload: UserTasteImportIn, db: Session = Depend
     from app.services.taste_import import import_user_tastes
 
     try:
-        res = import_user_tastes(str(u.server_id), u.external_id, password)
+        res = import_user_tastes(str(u.server_id), u.external_id, password,
+                                 include_starred=bool(payload.include_starred),
+                                 include_playlists=bool(payload.include_playlists))
     except Exception as e:  # noqa: BLE001 — читаемая ошибка вместо голого 500
         from app.core.logging import get_logger as _gl
 
         _gl("api.users").exception("import-tastes failed")
         return {"ok": False, "error": f"Импорт не удался: {str(e)[:400]}"}
+    if res.get("status") != "success":
+        return {"ok": False, "error": res.get("error")}
+    return {"ok": True, **res}
+
+
+@router.post("/{user_id}/sync-playlists")
+def sync_playlists(user_id: str, payload: UserTasteImportIn, db: Session = Depends(get_db)):
+    """Отдельная синхронизация плейлистов (долгая — дёргает getPlaylist на каждый).
+
+    Вкусы (starred) не трогает. Для больших библиотек лучше фоном:
+    запомните пароль (vault) и жмите refresh-async.
+    """
+    try:
+        uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(400, "invalid id")
+    u = db.get(MediaUser, user_id)
+    if not u:
+        raise HTTPException(404, "not found")
+    password = (payload.password or "").strip()
+    if not password:
+        from app.services.media_server import get_media_server_config
+
+        try:
+            password = (get_media_server_config(db).get("password") or "")
+        except Exception:
+            password = ""
+    if not password:
+        return {"ok": False, "error": "Нужен пароль пользователя Navidrome — передайте {\"password\": \"...\"}"}
+    from app.services.taste_import import import_user_tastes
+
+    try:
+        res = import_user_tastes(str(u.server_id), u.external_id, password,
+                                 include_starred=False, include_playlists=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"Синк плейлистов не удался: {str(e)[:400]}"}
     if res.get("status") != "success":
         return {"ok": False, "error": res.get("error")}
     return {"ok": True, **res}

@@ -4,6 +4,7 @@ import useSWR from "swr";
 import Link from "next/link";
 import { Activity, Disc3, ListMusic, Sparkles, Users, Library, Scan } from "lucide-react";
 import { Badge, Card, PageHeader, Section, Stat, Button, CountUp } from "@/components/ui";
+import NowPlaying from "@/components/NowPlaying";
 import { api } from "@/lib/api";
 import { fmtNumber, PHASE_LABELS, STATUS_LABELS, STATUS_TONE, fmtDate } from "@/lib/format";
 
@@ -96,6 +97,10 @@ export default function HomePage() {
             )}
           </div>
         </Card>
+      </Section>
+
+      <Section title="Слушает сейчас">
+        <NowPlaying />
       </Section>
     </>
   );

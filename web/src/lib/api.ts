@@ -224,11 +224,29 @@ export const api = {
       `/api/users/by-credentials`,
       { method: "POST", body: JSON.stringify(body) },
     ),
-  importTastes: (id: string, password: string) =>
+  importTastes: (id: string, password: string, include_playlists = false) =>
     http<{ ok: boolean; favorites_total?: number; favorites_added?: number; playlists?: number; error?: string }>(
       `/api/users/${id}/import-tastes`,
+      { method: "POST", body: JSON.stringify({ password, include_playlists }) },
+    ),
+  syncPlaylists: (id: string, password: string) =>
+    http<{ ok: boolean; playlists?: number; playlist_tracks?: number; error?: string }>(
+      `/api/users/${id}/sync-playlists`,
       { method: "POST", body: JSON.stringify({ password }) },
     ),
+  nowPlaying: (userId?: string, n = 5) =>
+    http<{
+      playing: {
+        external_id?: string | null; track_id?: string | null; title: string;
+        artist_name: string; album_name?: string | null; username?: string | null;
+        minutes_ago?: number | null; player?: string | null;
+      } | null;
+      next: {
+        track_id: string; title: string; artist_name?: string; album_name?: string | null;
+        genre?: string | null; score: number; reason: string;
+      }[];
+      source: string;
+    }>(`/api/now-playing/${userId ? `?user_id=${encodeURIComponent(userId)}&n=${n}` : `?n=${n}`}`),
   userTastes: (id: string) =>
     http<{ user_id: string; favorites: number; playlists: number; playlist_tracks: number }>(
       `/api/users/${id}/tastes`,
@@ -302,6 +320,21 @@ export const api = {
     http<{ playlist_id: string; tracks: number; excluded_disliked: number; excluded_banned: number }>(
       `/api/playlists/my-wave`,
       { method: "POST", body: JSON.stringify({ user_id, n, seed_track_id, mood }) },
+    ),
+  waveContinue: (body: {
+    user_id: string; queue?: string[]; current_track_id?: string; count?: number;
+    settings?: Record<string, string>; exclude_ids?: string[];
+    recent_events?: { track_id: string; action: string; position_sec?: number }[];
+    ratings_delta?: Record<string, unknown>[];
+  }) =>
+    http<{
+      ok: boolean; user_id: string;
+      tracks: { track_id: string; title: string; artist_name?: string; score: number; reason: string }[];
+      seeds: string[]; applied: Record<string, number>;
+    }>(`/api/wave/continue`, { method: "POST", body: JSON.stringify(body) }),
+  waveSeeds: (user_id: string, limit = 5) =>
+    http<{ ok: boolean; user_id: string; seeds: string[] }>(
+      `/api/wave/seeds?user_id=${encodeURIComponent(user_id)}&limit=${limit}`,
     ),
   collabSimilar: (userId: string) =>
     http<{ users: { user_id: string; username: string; similarity: number; shared_likes: number; likes: number }[] }>(

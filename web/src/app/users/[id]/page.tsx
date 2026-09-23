@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { useState } from "react";
 import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
+import LiveWave from "@/components/LiveWave";
 import { PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
@@ -382,6 +383,10 @@ export default function UserProfilePage() {
           </div>
           <div className="text-xs text-muted mt-2">Скор = ♥±100 + ▶×10 + complete×15 + ⟳×50 + ⏪×30 − abandon×8 − скипы (ранний −15/−5, &gt;1 −n×10). Как в мобильном.</div>
         </Card>
+      </Section>
+
+      <Section title="Живая волна · как у клиента">
+        <LiveWave userId={id} />
       </Section>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

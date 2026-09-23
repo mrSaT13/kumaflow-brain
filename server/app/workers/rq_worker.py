@@ -2,7 +2,10 @@
 """Запуск воркера RQ: слушает очереди default и high."""
 from __future__ import annotations
 
+import os
+import socket
 import sys
+import uuid
 
 from rq import Worker
 
@@ -96,7 +99,12 @@ def main() -> int:
         from app.core.logging import get_logger
         get_logger("cron").warning("scheduler not started: {}", e)
     queues = [get_queue("high"), get_queue("default")]
-    worker = Worker(queues, connection=get_redis(), name=f"kumaflow-{s.app_version}")
+    # Уникальное имя на инстанс: иначе при быстром рестарте контейнера
+    # старый ключ rq:worker:kumaflow-0.1.0 ещё жив в Redis (TTL) и новый
+    # процесс падает в register_birth: "There exists an active worker named...".
+    # Плюс это позволяет масштабировать worker --scale > 1.
+    _uniq = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    worker = Worker(queues, connection=get_redis(), name=f"kumaflow-{s.app_version}-{_uniq}")
     worker.work(with_scheduler=False)
     return 0
 
