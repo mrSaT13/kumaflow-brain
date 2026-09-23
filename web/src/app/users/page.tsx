@@ -134,7 +134,7 @@ function CompareSection({ ids, users, onClear }: { ids: string[]; users: { id: s
 export default function UsersPage() {
   const [confirmNode, confirm] = useConfirm();
   const toast = useToast();
-  const { data, mutate } = useSWR("/api/users", () => api.listUsers());
+  const { data, error, mutate } = useSWR("/api/users", () => api.listUsers());
   const [externalId, setExternalId] = useState("");
   const [username, setUsername] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
@@ -311,7 +311,9 @@ export default function UsersPage() {
       </Section>
 
       <Section title={`Всего: ${data?.users.length ?? 0}`}>
-        {(data?.users ?? []).length === 0 ? (
+        {error ? (
+          <EmptyState message={`Не смог загрузить: ${error instanceof Error ? error.message : String(error)} — если там 401, вставьте токен в Настройки → Токены → «Использовать».`} />
+        ) : (data?.users ?? []).length === 0 ? (
           <EmptyState message="Пользователей ещё нет." />
         ) : (
           <>

@@ -63,7 +63,12 @@ function BellBox() {
               <div className="text-xs text-muted px-2 py-4 text-center">Загрузка…</div>
             )}
             {!listLoading && listError && (
-              <div className="text-xs text-red-500 px-2 py-4 text-center">Не смог загрузить: {String(listError instanceof Error ? listError.message : listError)}</div>
+              <div className="text-xs text-red-500 px-2 py-4 text-center">
+                Не смог загрузить: {String(listError instanceof Error ? listError.message : listError)}
+                <div className="mt-2">
+                  <button className="kuma-pill" onClick={() => mutateList()}>Повторить</button>
+                </div>
+              </div>
             )}
             {!listLoading && !listError && items.length === 0 && (
               <div className="text-xs text-muted px-2 py-4 text-center">Пока тихо — итоги ночных задач появятся здесь.</div>

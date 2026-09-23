@@ -52,8 +52,11 @@ export default function ApiTokens() {
         scopes,
       });
       setFresh({ name: r.name, token: r.token });
+      // Сразу сохраняем в этот браузер — иначе веб сам себе закроет API
+      // первым же токеном (ловушка первого токена).
+      saveBrowser(r.token);
       mutate();
-      toast("Токен создан — скопируйте, больше он не покажется", "ok");
+      toast("Токен создан и сохранён в этот браузер ✓ — скопируйте его ещё и в плеер", "ok");
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
