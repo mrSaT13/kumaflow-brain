@@ -170,6 +170,18 @@ body {
 .kuma-eq > span:nth-child(2) { height: 100%; animation-delay: 0.15s; }
 .kuma-eq > span:nth-child(3) { height: 40%; animation-delay: 0.3s; }
 
+/* Очередь волны: тонкий скролл + плавающая кнопка «к текущему» */
+.kuma-queue-scroll { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.kuma-queue-scroll::-webkit-scrollbar { width: 8px; }
+.kuma-queue-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+.kuma-queue-scroll::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes kuma-jump-in {
+  from { opacity: 0; transform: translate(-50%, 8px) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+.kuma-jump-btn { animation: kuma-jump-in 0.25s ease both; }
+
 @media (prefers-reduced-motion: reduce) {
   .kuma-fade-in, .kuma-fade-in-1, .kuma-fade-in-2, .kuma-fade-in-3,
   .kuma-skeleton, .kuma-bar-anim { animation: none; transition: none; }

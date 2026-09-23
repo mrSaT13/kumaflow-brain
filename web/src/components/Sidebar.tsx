@@ -14,6 +14,8 @@ import {
   Settings as Cog,
   Activity,
   Radio,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 
 type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
@@ -43,23 +45,69 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
   // а подсветка активного пункта включается только после монтирования.
   const pathname = usePathname() ?? "";
   const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+    try {
+      setCollapsed(localStorage.getItem("sidebar-collapsed") === "1");
+    } catch { /* ignore */ }
+  }, []);
+  function toggleCollapsed() {
+    setCollapsed((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem("sidebar-collapsed", next ? "1" : "0");
+      } catch { /* ignore */ }
+      return next;
+    });
+  }
   // десктопный сайдбар + мобильный дровер
   return (
     <>
       {/* desktop */}
-      <aside className="w-[240px] border-r border-border bg-bg sticky top-0 h-screen hidden md:flex md:flex-col">
-      <div className="px-6 py-6 flex items-center gap-2">
-        <img src="/app-icon.png" alt="KumaFlow" className="w-6 h-6 rounded-full" />
-        <div>
-          <div className="font-semibold tracking-tight">KumaFlow</div>
-          <div className="text-[11px] text-muted">brain · v0.2.0</div>
-        </div>
+      <aside
+        className={clsx(
+          "border-r border-border bg-bg sticky top-0 h-screen hidden md:flex md:flex-col shrink-0 transition-[width] duration-200",
+          collapsed ? "w-[68px]" : "w-[240px]",
+        )}
+      >
+      <div className={clsx("py-6 flex items-center gap-2", collapsed ? "px-0 justify-center" : "px-6")}>
+        <img src="/app-icon.png" alt="KumaFlow" className="w-6 h-6 rounded-full shrink-0" />
+        {!collapsed && (
+          <div className="min-w-0">
+            <div className="font-semibold tracking-tight">KumaFlow</div>
+            <div className="text-[11px] text-muted">brain · v0.2.1</div>
+          </div>
+        )}
+        {!collapsed && (
+          <button
+            onClick={toggleCollapsed}
+            className="ml-auto kuma-pill !px-2 py-1"
+            title="Свернуть сайдбар"
+            aria-label="Свернуть сайдбар"
+          >
+            <ChevronsLeft className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
-      <nav suppressHydrationWarning className="flex-1 px-3 space-y-3 overflow-y-auto">
+      {collapsed && (
+        <button
+          onClick={toggleCollapsed}
+          className="mx-auto mb-2 kuma-pill !px-2 py-1"
+          title="Развернуть сайдбар"
+          aria-label="Развернуть сайдбар"
+        >
+          <ChevronsRight className="w-3.5 h-3.5" />
+        </button>
+      )}
+      <nav suppressHydrationWarning className={clsx("flex-1 space-y-3 overflow-y-auto overflow-x-hidden", collapsed ? "px-2" : "px-3")}>
         {sections.map((sec) => (
           <div key={sec.title}>
-            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted">{sec.title}</div>
+            {!collapsed ? (
+              <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted">{sec.title}</div>
+            ) : (
+              <div className="mx-3 my-1 h-px bg-border" aria-hidden />
+            )}
             <div className="space-y-1">
               {sec.items.map((it) => {
                 const active = mounted ? pathname === it.href || (it.href !== "/" && pathname.startsWith(it.href)) : false;
@@ -68,13 +116,15 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
                   <Link
                     key={it.href}
                     href={it.href as any}
+                    title={collapsed ? it.label : undefined}
                     className={clsx(
                       "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors",
-                      active ? "bg-surface text-text" : "text-muted hover:text-text hover:bg-surface/60",
+                      collapsed && "justify-center px-0",
+                      active ? "bg-surface text-text shadow-sm ring-1 ring-border" : "text-muted hover:text-text hover:bg-surface/60",
                     )}
                   >
-                    <Icon className="w-4 h-4" />
-                    {it.label}
+                    <Icon className="w-4 h-4 shrink-0" />
+                    {!collapsed && <span className="truncate">{it.label}</span>}
                   </Link>
                 );
               })}
@@ -82,7 +132,7 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
           </div>
         ))}
       </nav>
-      <div className="px-6 py-4 text-[11px] text-muted">made with ♥ для аудиофилов</div>
+      {!collapsed && <div className="px-6 py-4 text-[11px] text-muted">made with ♥ для аудиофилов</div>}
     </aside>
       {/* mobile drawer */}
       {open && (
@@ -93,7 +143,7 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
               <img src="/app-icon.png" alt="KumaFlow" className="w-6 h-6 rounded-full" />
               <div>
                 <div className="font-semibold tracking-tight">KumaFlow</div>
-                <div className="text-[11px] text-muted">brain · v0.2.0</div>
+                <div className="text-[11px] text-muted">brain · v0.2.1</div>
               </div>
               <button onClick={onClose} className="ml-auto kuma-pill text-xs">✕</button>
             </div>

@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "KumaFlow Brain"
-    app_version: str = "0.2.0"
+    app_version: str = "0.2.1"
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
 
