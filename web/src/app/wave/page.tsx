@@ -45,6 +45,7 @@ export default function WavePage() {
   const [followNavidrome, setFollowNavidrome] = useState(true);
   const [followPhone, setFollowPhone] = useState(true);
   const [phoneAge, setPhoneAge] = useState<number | null>(null);
+  const [drift, setDrift] = useState<{ severity: string; consecutive_skips: number; temp_banned_genres: string[] } | null>(null);
   const toast = useToast();
   const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const pendingEvents = useRef<WaveEvent[]>([]);
@@ -95,6 +96,7 @@ export default function WavePage() {
       });
       const tracks = (r.tracks ?? []) as WaveTrack[];
       setQueue((prev) => (reset ? tracks : [...prev, ...tracks]).slice(0, 100));
+      setDrift(r.drift ?? null);
       if (reset) {
         setPlayingIdx(0);
         lastSyncedExternal.current = "";
@@ -298,6 +300,11 @@ export default function WavePage() {
                     : `переход: ${cur.mood} → ${nxt.mood}`
                   : "мозг подбирает по аудио + вкусу + коллаборативке"}
               </span>
+              {drift?.severity && (
+                <span className="text-xs rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title={drift.temp_banned_genres.length ? `Временно мимо: ${drift.temp_banned_genres.join(", ")}` : undefined}>
+                  остываем: {drift.consecutive_skips} скипа подряд — энергию вниз
+                </span>
+              )}
             </div>
             <div className="mt-3 flex items-center gap-4 flex-wrap text-xs text-muted">
               <label className="flex items-center gap-1.5 cursor-pointer">

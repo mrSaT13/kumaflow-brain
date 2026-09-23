@@ -168,6 +168,61 @@ def select_seeds(db, user_id: str, characteristic: str | None = None,
     return out[:limit]
 
 
+def session_drift(db, recent_events: list[dict] | None) -> dict:
+    """Порт мобильного MoodDriftDetector: сессия, а не вечность.
+
+    recent_events — в хронологическом порядке (как шлёт клиент).
+    - 3/5/7 скипов подряд в хвосте -> mild/moderate/strong (энергия/темп вниз).
+    - 3+ скипа жанра -> временный бан жанра НА ЭТОТ ЗАПРОС (в БД не пишем).
+    - скипнутые треки -> исключить из кандидатов НА ЭТОТ ЗАПРОС.
+    Постоянные счётчики (3 скипа ever -> автодизлайк) не трогаем.
+    """
+    events = [e for e in (recent_events or []) if isinstance(e, dict)]
+    # Хвостовые скипы подряд (позитив обнуляет серию — как logPositiveInteraction).
+    trailing = 0
+    for e in reversed(events):
+        if str(e.get("action") or "") == "skip":
+            trailing += 1
+        else:
+            break
+    if trailing >= 7:
+        severity, energy_shift, tempo_shift = "strong", -0.3, -30
+    elif trailing >= 5:
+        severity, energy_shift, tempo_shift = "moderate", -0.2, -20
+    elif trailing >= 3:
+        severity, energy_shift, tempo_shift = "mild", -0.1, -10
+    else:
+        severity, energy_shift, tempo_shift = None, 0.0, 0
+
+    skip_ids: list[str] = []
+    genre_hits: Counter = Counter()
+    if events:
+        raws = [str(e.get("track_id") or "") for e in events]
+        tids = _resolve_ids(db, raws)
+        id_by_raw = dict(zip(raws, tids))
+        seen: set[str] = set()
+        for e in events:
+            if str(e.get("action") or "") != "skip":
+                continue
+            tid = id_by_raw.get(str(e.get("track_id") or ""))
+            if tid and tid not in seen:
+                seen.add(tid)
+                skip_ids.append(tid)
+        if skip_ids:
+            try:
+                from app.db.models import Track as _T
+
+                for t in db.query(_T).filter(_T.id.in_(skip_ids[:100])).all():
+                    if t.genre:
+                        genre_hits[str(t.genre).lower()] += 1
+            except Exception:
+                pass
+    temp_banned = sorted([g for g, n in genre_hits.items() if n >= 3])
+    return {"severity": severity, "energy_shift": energy_shift,
+            "tempo_shift": tempo_shift, "consecutive_skips": trailing,
+            "temp_banned_genres": temp_banned, "skip_ids": skip_ids}
+
+
 def _mood_of(feat) -> str | None:
     try:
         moods = list(feat.mood_labels or [])
@@ -181,7 +236,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                      recent_events: list[dict] | None = None,
                      collab_scores: dict[str, float] | None = None,
                      current_hour: int | None = None,
-                     jitter_seed: str | None = None) -> list[dict]:
+                     jitter_seed: str | None = None,
+                     drift: dict | None = None) -> list[dict]:
     """Порт TrackScorer.scoreAndRankTracks на наших таблицах.
 
     jitter_seed: детерминированный per-user джиттер вместо глобального random
@@ -367,6 +423,15 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             elif hour >= 22 or hour <= 5:
                 if en <= 0.5:
                     ctx += 0.03
+            # сессионный дрейф (порт MoodDriftDetector): скипы подряд остужают
+            # волну — энергичное/быстрое штрафуем, спокойное чуть поднимаем.
+            _dr = drift or {}
+            _eshift = float(_dr.get("energy_shift") or 0.0)
+            if _eshift:
+                ctx += _eshift * (en - 0.4)
+            _tshift = float(_dr.get("tempo_shift") or 0)
+            if _tshift and bpm > 110:
+                ctx += (_tshift / -30.0) * -0.15 * min(max((bpm - 110) / 50.0, 0.0), 1.0)
         # diversity
         pen = 0.0
         if t.artist_name and t.artist_name in used_artists:
@@ -427,7 +492,12 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
     applied = apply_delta(db, user_id, ratings_delta, recent_events)
 
+    # Сессионный дрейф (порт MoodDriftDetector): скипы подряд остужают волну,
+    # скипнутое исключаем из кандидатов — только на этот запрос, в БД не пишем.
+    drift = session_drift(db, recent_events)
+
     played = set(_resolve_ids(db, list(queue or []) + list(exclude_ids or [])))
+    played.update(drift.get("skip_ids") or [])
     if current_track_id:
         played.update(_resolve_ids(db, [current_track_id]))
 
@@ -488,6 +558,15 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
         cand = [c for c in cand
                 if not (meta.get(c) and _is_banned(meta[c].artist_name, bans))]
+    # Временный бан жанра из дрейфа (3+ скипа жанра за сессию): только запрос.
+    _tmp_genres = set(drift.get("temp_banned_genres") or [])
+    if _tmp_genres and cand:
+        try:
+            _gm = {str(t.id): (t.genre or "") for t in
+                   db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
+        except Exception:
+            _gm = {}
+        cand = [c for c in cand if _gm.get(c, "").lower() not in _tmp_genres]
     # mood-фильтр как в мобиле (по первому муд-лейблу).
     # При морфинге (старт → цель) жёсткий фильтр снимаем: пускаем оба
     # настроения + безфичные, а градиент раскладываем после скоринга.
@@ -557,7 +636,8 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
     ranked = score_candidates(db, user_id, cand[:800], seeds, settings,
                               norm_events, collab_scores,
-                              jitter_seed=f"{user_id}:{len(played)}")
+                              jitter_seed=f"{user_id}:{len(played)}",
+                              drift=drift)
     # Недавнее реже (новизна как у cold-start novelty=True): уже учтено
     # novelty-членом, дубли очереди на всякий случай режем ещё раз
     ranked = [r for r in ranked if r['track_id'] not in played]
@@ -614,4 +694,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             'applied': applied,
             'current_mood': start_mood,
             'morph': morph,
+            'drift': {k: drift.get(k) for k in
+                      ("severity", "consecutive_skips", "temp_banned_genres")}
+            if drift.get("severity") else None,
             'profile_version': datetime.utcnow().isoformat() + 'Z'}

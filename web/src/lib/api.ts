@@ -394,6 +394,7 @@ export const api = {
       ok: boolean; user_id: string;
       tracks: { track_id: string; title: string; artist_name?: string; score: number; reason: string; cover_art_id?: string | null; mood?: string | null }[];
       seeds: string[]; applied: Record<string, number>;
+      drift?: { severity: string; consecutive_skips: number; temp_banned_genres: string[] } | null;
     }>(`/api/wave/continue`, { method: "POST", body: JSON.stringify(body) }),
   waveSeeds: (user_id: string, limit = 5) =>
     http<{ ok: boolean; user_id: string; seeds: string[] }>(
