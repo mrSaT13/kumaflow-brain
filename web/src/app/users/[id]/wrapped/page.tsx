@@ -131,10 +131,16 @@ export default function WrappedPage() {
             </Section>
           )}
 
-          <div className="flex gap-2 flex-wrap">
-            <Badge tone="info">completes {data.completes}</Badge>
-            <Badge>дослушано {data.plays > 0 ? Math.round(((data.completes ?? 0) / data.plays) * 100) : 0}%</Badge>
-          </div>
+          {(data.completes > 0 || data.skips > 0 || data.replays > 0) ? (
+            <div className="flex gap-2 flex-wrap">
+              <Badge tone="info">дослушано треков: {data.completes}</Badge>
+              <Badge>доля дослушанных: {data.plays > 0 ? Math.round(((data.completes ?? 0) / data.plays) * 100) : 0}%</Badge>
+            </div>
+          ) : (
+            <div className="text-xs text-muted">
+              Дослушивания не трекаются: события play/complete/skip шлёт только мобильный клиент, а прослушивания из Navidrome в эту метрику не попадают.
+            </div>
+          )}
         </>
       )}
     </>
