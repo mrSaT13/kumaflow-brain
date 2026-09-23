@@ -204,7 +204,19 @@ def now_playing(user_id: str | None = None, n: int = 5, db: Session = Depends(ge
     if not entries:
         return {"playing": None, "next": [], "source": "idle"}
 
-    # предпочитаем запись нашего пользователя, иначе первую
+    def _age(e: dict) -> float:
+        try:
+            v = e.get("minutesAgo")
+            if v is None:
+                return 0.0
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Navidrome отдаёт и залипшие сессии — сортируем по свежести,
+    # иначе виджет залипает на первом (старом) треке.
+    entries = sorted([e for e in entries if isinstance(e, dict)], key=_age)
+    # предпочитаем запись нашего пользователя, иначе самую свежую
     picked: dict | None = None
     if want_username:
         for e in entries:
@@ -213,7 +225,7 @@ def now_playing(user_id: str | None = None, n: int = 5, db: Session = Depends(ge
                 picked = e
                 break
     if picked is None:
-        picked = entries[0] if isinstance(entries[0], dict) else None
+        picked = entries[0] if entries else None
     if not picked:
         return {"playing": None, "next": [], "source": "idle"}
 

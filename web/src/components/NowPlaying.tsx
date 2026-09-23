@@ -6,15 +6,17 @@ import { Radio, Music2 } from "lucide-react";
 import { Card } from "@/components/ui";
 import { api } from "@/lib/api";
 
-/** Виджет «Слушает сейчас + паутина next-5». Polling 15с, без вебсокетов (MVP). */
+/** Виджет «Слушает сейчас + паутина next-5». Polling 10с, без вебсокетов (MVP). */
 export default function NowPlaying({ userId }: { userId?: string }) {
   const { data } = useSWR(
     userId ? `/api/now-playing?u=${userId}` : "/api/now-playing",
     () => api.nowPlaying(userId, 5),
-    { refreshInterval: 15000 },
+    { refreshInterval: 10000, revalidateOnFocus: true },
   );
   const playing = data?.playing ?? null;
   const next = data?.next ?? [];
+  const age = playing?.minutes_ago;
+  const stale = typeof age === "number" && age >= 5;
 
   if (!data) return null;
   if (!playing) {
@@ -51,10 +53,13 @@ export default function NowPlaying({ userId }: { userId?: string }) {
         <div className="min-w-0 flex-1">
           <div className="text-xs uppercase tracking-wider text-muted flex items-center gap-2">
             <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+              <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 ${stale ? "" : "animate-ping bg-green-400"}`} />
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${stale ? "bg-amber-500" : "bg-green-500"}`} />
             </span>
             Слушает сейчас{playing.username ? ` · ${playing.username}` : ""}
+            {typeof age === "number" && age >= 1 && (
+              <span className="normal-case tracking-normal">· {age} мин назад{stale ? " (пауза/залипло?)" : ""}</span>
+            )}
           </div>
           <div className="mt-1 font-semibold truncate">
             {playing.artist_name} — {playing.title}
