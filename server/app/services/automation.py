@@ -10,8 +10,10 @@ from typing import Any
 KEY = "automation"
 
 DEFAULTS: dict[str, Any] = {
-    # тянуть текст + AI-настроение сразу после sonic-анализа трека
+    # тянуть текст (LRCLIB) сразу после sonic-анализа трека
     "analysis_fetch_lyrics": True,
+    # прогонять текст через AI-настроение (moods/ai_*). Без AI-провайдера — no-op
+    "analysis_ai_mood": True,
 }
 
 
@@ -38,6 +40,13 @@ def get_flags(db=None) -> dict[str, Any]:
 def analysis_fetch_lyrics_enabled(db=None) -> bool:
     try:
         return bool(get_flags(db).get("analysis_fetch_lyrics", True))
+    except Exception:
+        return True
+
+
+def analysis_ai_mood_enabled(db=None) -> bool:
+    try:
+        return bool(get_flags(db).get("analysis_ai_mood", True))
     except Exception:
         return True
 

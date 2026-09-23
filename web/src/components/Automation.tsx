@@ -71,13 +71,16 @@ export default function Automation() {
   const { data: auto, mutate: mutateAuto } = useSWR("/api/settings/automation", () => api.getAutomation(), { refreshInterval: 10000 });
   const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
 
-  async function toggleLyrics() {
-    const cur = auto?.flags?.analysis_fetch_lyrics ?? true;
+  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood") {
+    const cur = key === "analysis_fetch_lyrics"
+      ? (auto?.flags?.analysis_fetch_lyrics ?? true)
+      : (auto?.flags?.analysis_ai_mood ?? true);
+    const label = key === "analysis_fetch_lyrics" ? "Тексты" : "AI-настроение";
     setBusy(true);
     try {
-      await api.saveAutomation({ analysis_fetch_lyrics: !cur });
+      await api.saveAutomation({ [key]: !cur });
       mutateAuto();
-      toast(!cur ? "Автоподтяжка текстов включена ✓" : "Автоподтяжка текстов выключена", !cur ? "ok" : "info");
+      toast(!cur ? `${label} включены ✓` : `${label} выключены`, !cur ? "ok" : "info");
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
@@ -108,13 +111,29 @@ export default function Automation() {
           type="checkbox"
           checked={auto?.flags?.analysis_fetch_lyrics ?? true}
           disabled={busy}
-          onChange={toggleLyrics}
+          onChange={() => toggleLyrics("analysis_fetch_lyrics")}
           className="w-4 h-4 accent-black dark:accent-white shrink-0"
         />
         <span>
-          <span className="font-medium text-sm">Тексты + AI-настроение следом за анализом</span>
+          <span className="font-medium text-sm">Тексты следом за анализом</span>
           <span className="text-xs text-muted block">
-            Каждый проанализированный трек сразу тянет текст (LRCLIB) и AI-настроение в настроение-трека. Акустику (energy/valence) не перезаписывает — только добирает. Без AI-провайдера сохраняется только текст.
+            Каждый проанализированный трек сразу тянет текст (LRCLIB). Быстро, без AI.
+          </span>
+        </span>
+      </label>
+      <div className="h-3" />
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={auto?.flags?.analysis_ai_mood ?? true}
+          disabled={busy}
+          onChange={() => toggleLyrics("analysis_ai_mood")}
+          className="w-4 h-4 accent-black dark:accent-white shrink-0"
+        />
+        <span>
+          <span className="font-medium text-sm">AI-настроение текста</span>
+          <span className="text-xs text-muted block">
+            Прогоняет текст через AI (moods + темы) и добирает в настроение трека. Акустику (energy/valence) не перезаписывает. Без AI-провайдера — no-op. Медленнее: до ~10с на трек.
           </span>
         </span>
       </label>

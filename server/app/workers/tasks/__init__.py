@@ -826,6 +826,14 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
     except Exception:
         sample_seconds, default_limit, music_dir = 90, 0, os.getenv("MUSIC_DIR", "")
         per_track_timeout, auto_continue = 300, True
+    try:
+        from app.services import automation as _auto_flags_svc
+
+        _auto_flags = _auto_flags_svc.get_flags()
+    except Exception:
+        _auto_flags = {"analysis_fetch_lyrics": True, "analysis_ai_mood": True}
+    _auto_fetch = bool(_auto_flags.get("analysis_fetch_lyrics", True))
+    _auto_ai = bool(_auto_flags.get("analysis_ai_mood", True))
     # limit из API: 0 = «пачками, но всю библиотеку». chunk — размер одной пачки.
     requested = kwargs.get("limit", None)
     if requested is not None and int(requested or 0) > 0:
@@ -1000,13 +1008,14 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                             _write_mood_tags(Path(_local_for_tags), feats, backup=s.mutagen_writeback_backup)
                     except Exception as _e:
                         logger.warning("mutagen writeback failed for {}: {}", src, _e)
-                    # --- AUTO-LYRICS: текст + AI-настроение сразу (тумблер automation) ---
+                    # --- AUTO-LYRICS: текст (+AI-настроение) сразу (тумблеры automation) ---
                     try:
-                        _lr = _auto_lyrics_for_track(str(tid))
-                        if _lr == "lyrics+ai":
-                            n_lyr_ai += 1
-                        elif _lr == "lyrics":
-                            n_lyr += 1
+                        if _auto_fetch:
+                            _lr = _auto_lyrics_for_track(str(tid), with_ai=_auto_ai)
+                            if _lr == "lyrics+ai":
+                                n_lyr_ai += 1
+                            elif _lr == "lyrics":
+                                n_lyr += 1
                     except Exception:
                         pass
                     ok += 1
@@ -1269,20 +1278,14 @@ def lyrics_fetch_one(track_id: str) -> dict:
     return {"status": "success", "track_id": track_id, "ai_analyzed": bool(ai_result)}
 
 
-def _auto_lyrics_for_track(tid: str) -> str:
-    """Автоподтяжка текста + AI-настроения после sonic-анализа (тумблер automation).
+def _auto_lyrics_for_track(tid: str, with_ai: bool = True) -> str:
+    """Автоподтяжка текста (+ опционально AI-настроения) после sonic-анализа.
 
     Best-effort: никогда не валит анализ. Акустические valence/arousal/energy
     AI-сентиментом НЕ перезаписываем — только добираем текст, moods и ai_* ключи.
+    Тумблеры проверяет вызывающий (флаги читаются раз за прогон).
     Возвращает: 'lyrics+ai' | 'lyrics' | 'none' | 'skip'.
     """
-    try:
-        from app.services import automation as _auto
-
-        if not _auto.analysis_fetch_lyrics_enabled():
-            return "skip"
-    except Exception:
-        return "skip"
     try:
         with session_scope() as db:
             if db.query(Lyrics).filter(Lyrics.track_id == tid, Lyrics.provider == "lrclib").first():
@@ -1294,10 +1297,12 @@ def _auto_lyrics_for_track(tid: str) -> str:
         res = lyrics_svc.fetch(artist=artist or "", title=title or "", album=album, duration_sec=dur)
         if not res or not res.get("text"):
             return "none"
-        try:
-            ai_res = lyrics_ai.analyze(res["text"])
-        except Exception:
-            ai_res = None
+        ai_res = None
+        if with_ai:
+            try:
+                ai_res = lyrics_ai.analyze(res["text"])
+            except Exception:
+                ai_res = None
         with session_scope() as db:
             if not db.query(Lyrics).filter(Lyrics.track_id == tid, Lyrics.provider == "lrclib").first():
                 db.add(Lyrics(track_id=tid, provider="lrclib", text=res["text"],
@@ -1389,9 +1394,14 @@ def analyze_single(run_id: str, track_id: str) -> dict:
         _append_log(run_id, "info", f"Готово: {label} — tempo {feats.get('tempo_bpm')}, key {feats.get('key_name')}")
         _lr = "skip"
         try:
-            _lr = _auto_lyrics_for_track(str(track_id))
-            if _lr in ("lyrics", "lyrics+ai"):
-                _append_log(run_id, "info", f"Текст подтянут следом ({_lr})")
+            from app.services import automation as _auto3
+
+            _flags3 = _auto3.get_flags()
+            if _flags3.get("analysis_fetch_lyrics", True):
+                _lr = _auto_lyrics_for_track(
+                    str(track_id), with_ai=bool(_flags3.get("analysis_ai_mood", True)))
+                if _lr in ("lyrics", "lyrics+ai"):
+                    _append_log(run_id, "info", f"Текст подтянут следом ({_lr})")
         except Exception:
             pass
         _finish_run(run_id, "success")

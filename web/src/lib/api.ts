@@ -353,8 +353,8 @@ export const api = {
       `/api/analysis/clap-status`,
     ),
   getAutomation: () =>
-    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean } }>(`/api/settings/automation`),
-  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean }) =>
+    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean } }>(`/api/settings/automation`),
+  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean }) =>
     http<{ ok: boolean; flags: Record<string, unknown> }>(
       `/api/settings/automation`, { method: "PUT", body: JSON.stringify(flags) },
     ),
