@@ -30,9 +30,11 @@ export default function PwaInstall({ variant = "button" }: { variant?: "button" 
   const [dismissed, setDismissed] = useState(false);
   const [installed, setInstalled] = useState(false);
   const [ios, setIos] = useState(false);
+  const [insecure, setInsecure] = useState(false);
 
   useEffect(() => {
     setIos(isIos());
+    setInsecure(typeof window !== "undefined" && !window.isSecureContext);
     if (isStandalone()) setInstalled(true);
     const onBip = (e: Event) => {
       e.preventDefault();
@@ -59,6 +61,30 @@ export default function PwaInstall({ variant = "button" }: { variant?: "button" 
   }, []);
 
   if (installed || dismissed) return null;
+
+  // HTTP по IP — не secure context: SW и Install тут невозможны в принципе.
+  // Показываем причину вместо тишины (только баннер, кнопку в топбаре прячем).
+  if (insecure && !installed) {
+    if (variant !== "banner") return null;
+    return (
+      <div className="mb-4 flex items-start gap-3 rounded-xl border border-border bg-surface p-3 text-sm">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/icon-192.png" alt="KumaFlow" className="h-10 w-10 rounded-xl shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">Установка недоступна по HTTP</div>
+          <div className="text-xs text-muted mt-0.5">
+            Chrome даёт «Установить приложение» только по HTTPS (или localhost).
+            Варианты: открыть через https-домен, либо в Chrome ввести{" "}
+            <code className="kuma-pill">chrome://flags/#unsafely-treat-insecure-origins-as-secure</code>{" "}
+            и добавить адрес сервера — после перезапуска появится установка.
+          </div>
+        </div>
+        <button onClick={dismiss} className="kuma-pill p-1.5" aria-label="Закрыть">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    );
+  }
 
   function dismiss() {
     setDismissed(true);

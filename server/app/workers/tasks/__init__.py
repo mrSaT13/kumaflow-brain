@@ -1633,7 +1633,7 @@ def yandex_enrich(*args, **kwargs):
             run = db.get(ScanRun, run_id) if run_id else None
             total = run.total_items if run else 0
         _append_log(run_id, "info", f"Yandex enrich: до {total} треков (throttle 1.2s)")
-        ok = fail = 0
+        ok = fail = corrected = 0
         with session_scope() as db:
             have = db.query(TrackMetadataEnrich.track_id).filter(TrackMetadataEnrich.source == "yandex").subquery()
             todos = db.query(Track).filter(~Track.id.in_(db.query(have.c.track_id))).limit(total or 20).all()
@@ -1641,6 +1641,11 @@ def yandex_enrich(*args, **kwargs):
         import asyncio as _aio
 
         from app.services.yandex_music.client import fetch_metadata_sync
+        from app.services.yandex_music.library import apply_metadata_corrections as _ym_fix
+        from app.services.yandex_music.library import corrections_enabled as _ym_fix_on
+
+        with session_scope() as _db0:
+            _fix_on = _ym_fix_on(_db0)
 
         for idx, (tid, artist, title, album) in enumerate(todo_data):
             if _is_cancelled(run_id):
@@ -1653,6 +1658,10 @@ def yandex_enrich(*args, **kwargs):
                 with session_scope() as db:
                     res = fetch_metadata_sync(db, artist, title, album)
                     if res:
+                        corr = _ym_fix(db, tid, res) if _fix_on else {}
+                        if corr:
+                            corrected += 1
+                            res = {**res, "corrected": corr}
                         # защита от дубля
                         ex = db.query(TrackMetadataEnrich).filter_by(track_id=tid, source="yandex").first()
                         if ex is None:
@@ -1671,10 +1680,10 @@ def yandex_enrich(*args, **kwargs):
                 fail += 1
                 _append_log(run_id, "warn", f"Yandex err {artist} — {title}: {e}")
             if (idx + 1) % 10 == 0:
-                _append_log(run_id, "info", f"Yandex {idx+1}/{len(todo_data)} ok:{ok} fail:{fail}")
-        _append_log(run_id, "info", f"Yandex готово ok:{ok} fail:{fail}")
+                _append_log(run_id, "info", f"Yandex {idx+1}/{len(todo_data)} ok:{ok} fail:{fail} corrected:{corrected}")
+        _append_log(run_id, "info", f"Yandex готово ok:{ok} fail:{fail} corrected:{corrected}")
         _finish_run(run_id, "success")
-        return {"status": "success", "ok": ok, "fail": fail}
+        return {"status": "success", "ok": ok, "fail": fail, "corrected": corrected}
     except Exception as e:  # noqa: BLE001
         logger.exception("yandex_enrich failed: {}", e)
         if run_id:

@@ -6,6 +6,7 @@ import { Check, Sparkles, Wifi } from "lucide-react";
 import { Badge, Button, Card, Input, PageHeader, Section } from "@/components/ui";
 import Automation from "@/components/Automation";
 import ApiTokens from "@/components/ApiTokens";
+import YandexImport from "@/components/YandexImport";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 
@@ -226,16 +227,16 @@ export default function SettingsPage() {
     }
   }
 
-  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "tokens" | "auto" | "diag">("connections");
+  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "tokens" | "auto" | "diag" | "yandex">("connections");
   const rt = (data?.runtime ?? {}) as Record<string, unknown>;
 
   return (
     <>
       <PageHeader title="Настройки" subtitle="Подключения, токены и провайдеры" />
       <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
-        {(["connections", "ai", "bridge", "tokens", "auto", "diag"] as const).map((t) => (
+        {(["connections", "yandex", "ai", "bridge", "tokens", "auto", "diag"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm border-b-2 -mb-px whitespace-nowrap ${tab === t ? "border-accent text-text" : "border-transparent text-muted hover:text-text"}`}>
-            {t === "connections" ? "Подключения" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : t === "tokens" ? "Токены" : t === "auto" ? "Автоматизация" : "Диагностика"}
+            {t === "connections" ? "Подключения" : t === "yandex" ? "Яндекс" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : t === "tokens" ? "Токены" : t === "auto" ? "Автоматизация" : "Диагностика"}
           </button>
         ))}
       </div>
@@ -280,6 +281,11 @@ export default function SettingsPage() {
             Важно: проверка и сканирование выполняются из backend-контейнера в Docker, где <code className="kuma-pill">localhost</code> — это сам контейнер. Если Navidrome стоит на том же хосте, укажите LAN-IP машины (например <code className="kuma-pill">http://192.168.1.10:4533</code>), а не <code className="kuma-pill">localhost:4533</code>. Сохранение — только здесь, в веб-интерфейсе; править compose-файл не нужно.
           </div>
         </Card>
+      </Section>
+      }
+
+      {tab === "yandex" && <Section title="Яндекс Музыка — вкус, история, чарты">
+        <YandexImport />
       </Section>
       }
 

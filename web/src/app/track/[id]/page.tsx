@@ -92,6 +92,7 @@ export default function TrackPage() {
       {notice && (
         <div className="mb-4 text-sm p-3 rounded-lg border border-border bg-surface">{notice}</div>
       )}
+      <YandexCorrection id={id} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-1">
@@ -246,6 +247,41 @@ function Row({ k, v }: { k: string; v: unknown }) {
     <div className="flex items-center justify-between">
       <dt className="text-muted">{k}</dt>
       <dd>{v === undefined || v === null || v === "" ? "—" : String(v)}</dd>
+    </div>
+  );
+}
+
+function YandexCorrection({ id }: { id: string }) {
+  const { data, mutate } = useSWR(["yandex-meta", id], () => api.yandexTrackMeta(id));
+  const [busy, setBusy] = useState(false);
+  const corr = (data?.items ?? [])
+    .map((it) => (it.data as Record<string, unknown>).corrected as Record<string, [unknown, unknown]> | undefined)
+    .find(Boolean);
+  if (!corr || Object.keys(corr).length === 0) return null;
+  return (
+    <div className="mb-4 text-sm p-3 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950 flex items-center gap-2 flex-wrap">
+      <Sparkles className="w-4 h-4 shrink-0" />
+      <span>Яндекс поправил:</span>
+      {Object.entries(corr).map(([f, [oldV, newV]]) => (
+        <span key={f} className="rounded-full border border-border px-2 py-0.5 text-xs tabular-nums bg-bg">
+          {f}: {String(oldV ?? "—")} → {String(newV ?? "—")}
+        </span>
+      ))}
+      <button
+        className="kuma-pill text-xs"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await api.yandexRevertCorrection(id);
+            mutate();
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "…" : "Откатить"}
+      </button>
     </div>
   );
 }

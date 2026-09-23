@@ -201,6 +201,32 @@ export const api = {
   getYandexConfig: () => http<{ token: string; enabled: boolean; has_token: boolean }>(`/api/yandex/config`),
   saveYandexConfig: (p: Record<string, unknown>) => http<unknown>(`/api/yandex/config`, { method: "POST", body: JSON.stringify(p) }),
   testYandex: (p?: Record<string, unknown>) => http<{ ok: boolean; result?: unknown; error?: string }>(`/api/yandex/test`, { method: "POST", body: JSON.stringify(p ?? {}) }),
+  yandexUserTokenSave: (user_id: string, token: string) =>
+    http<{ ok: boolean; login?: string | null; error?: string }>(`/api/yandex/user-token`, { method: "POST", body: JSON.stringify({ user_id, token }) }),
+  yandexUserTokenStatus: (user_id: string) =>
+    http<{ ok: boolean; stored: boolean }>(`/api/yandex/user-token-status?user_id=${encodeURIComponent(user_id)}`),
+  yandexUserTokenForget: (user_id: string) =>
+    http<{ ok: boolean }>(`/api/yandex/user-token?user_id=${encodeURIComponent(user_id)}`, { method: "DELETE" }),
+  yandexImportSettings: () =>
+    http<{ ok: boolean; settings: { history_enabled: boolean; charts_enabled: boolean } }>(`/api/yandex/import-settings`),
+  saveYandexImportSettings: (body: { history_enabled?: boolean; charts_enabled?: boolean; corrections_enabled?: boolean }) =>
+    http<{ ok: boolean; settings: { history_enabled: boolean; charts_enabled: boolean } }>(`/api/yandex/import-settings`, { method: "PUT", body: JSON.stringify(body) }),
+  yandexImportTaste: (user_id: string) =>
+    http<{ ok: boolean; error?: string; [k: string]: unknown }>(`/api/yandex/import-taste`, { method: "POST", body: JSON.stringify({ user_id }) }),
+  yandexImportHistory: (user_id: string, limit = 300) =>
+    http<{ ok: boolean; error?: string; [k: string]: unknown }>(`/api/yandex/import-history`, { method: "POST", body: JSON.stringify({ user_id, limit }) }),
+  yandexChartsRefresh: () =>
+    http<{ ok: boolean; error?: string; tracks?: number; fetched_at?: string }>(`/api/yandex/charts/refresh`, { method: "POST" }),
+  yandexCharts: () =>
+    http<{ ok: boolean; fetched_at?: string | null; total: number; in_library: number; tracks: { artist?: string; title?: string; origin?: string; track_id?: string }[] }>(`/api/yandex/charts`),
+  yandexCorrections: (limit = 50, offset = 0) =>
+    http<{ ok: boolean; total: number; items: { track_id: string; title: string; artist_name?: string; album_name?: string | null; corrected: Record<string, [unknown, unknown]>; fetched_at?: string | null }[] }>(
+      `/api/yandex/corrections?limit=${limit}&offset=${offset}`),
+  yandexRevertCorrection: (track_id: string, fields?: string[]) =>
+    http<{ ok: boolean; error?: string; restored?: Record<string, [unknown, unknown]> }>(
+      `/api/yandex/corrections/revert`, { method: "POST", body: JSON.stringify({ track_id, fields }) }),
+  yandexTrackMeta: (track_id: string) =>
+    http<{ items: { source: string; data: Record<string, unknown>; fetched_at?: string | null }[] }>(`/api/yandex/track/${track_id}`),
   aiPull: (p?: Record<string, unknown>) => http<{ ok: boolean; error?: string; model?: string }>(`/api/settings/ai/pull`, { method: "POST", body: JSON.stringify(p ?? {}) }),
   recommendByTrack: (id: string) => http<{ items: Track[] }>(`/api/analysis/recommend/by-track/${id}`),
   coldStart: (n = 30) => http<{ tracks: string[]; items: Track[]; steps: { step: number; name: string; items: number }[] }>(`/api/analysis/cold-start?n=${n}`),
@@ -373,6 +399,13 @@ export const api = {
     http<{ ok: boolean; user_id: string; seeds: string[] }>(
       `/api/wave/seeds?user_id=${encodeURIComponent(user_id)}&limit=${limit}`,
     ),
+  wavePublish: (body: { user_id: string; queue: string[]; current_track_id?: string }) =>
+    http<{ ok: boolean; queued: number }>(`/api/wave/publish`, { method: "POST", body: JSON.stringify(body) }),
+  waveLive: (user_id: string) =>
+    http<{
+      ok: boolean; user_id: string; current: number; age_sec?: number | null; stale?: boolean;
+      queue: { track_id: string; title: string; artist_name?: string; album_name?: string | null; genre?: string | null; cover_art_id?: string | null; reason: string }[];
+    }>(`/api/wave/live?user_id=${encodeURIComponent(user_id)}`),
   listCron: () =>
     http<{ jobs: { id: string; name: string; kind: string; cron_expr: string; enabled: boolean; last_run_at?: string | null }[] }>(
       `/api/cron/`,

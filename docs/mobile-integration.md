@@ -64,6 +64,27 @@
    Ответ: `tracks[{track_id, title, artist_name, score, reason}] + seeds + applied
    + profile_version`. Клиент append'ит к очереди. `GET /api/wave/seeds` — сиды отдельно.
 
+3a. **Живая очередь на веб (`/wave`)**: чтобы страница мозга показывала очередь
+   телефона как есть, клиент публикует её при каждом изменении:
+   `POST /api/wave/publish {"user_id": "...", "queue": ["<ext...>"], "current_track_id": "..."}`
+   (fire-and-forget, best-effort, throttle ~5с). Веб тянет `GET /api/wave/live?user_id=...`
+   (очередь + current + age_sec, TTL 10 мин, in-memory). Хранилище переживать
+   рестарт не обязано — телефон перепубликует при следующем изменении очереди.
+
+3b. **Server-driven очередь (мозг отдаёт очередь в AutoDJ)**. Отдельного
+   endpoint не нужно — очередь отдаёт `POST /api/wave/continue` (треки уже идут
+   с `external_id` = Navidrome song id, т.е. сразу играбельны). Клиентский цикл:
+   - триггер refill: в очереди осталось ≤5 треков или сменился current —
+     `waveContinue{queue, current_track_id, count: 10-20, settings, exclude_ids}`;
+   - `exclude_ids`: сюда же складывать id, которых нет в локальной библиотеке
+     (missing из резолвера), — сервер их больше не предлагает;
+   - фидбек — как обычно: `reportEvent play/skip/complete` + `reportRate`,
+     отдельными вызовами (внутрь `waveContinue` дублировать не надо);
+   - при старте волны с нуля: `queue: [], current_track_id: <seed или null>`.
+   Важно: встраивать как **источник внутри SmartAutoDJ** (рядом с локальным
+   скорингом, с фолбеком на него при недоступности мозга), а не отдельным
+   плеером/модулем — очередь, управление и эквалайзер общие.
+
 4. **Профиль/история для экранов** (опционально):
    - `GET /api/users/{id}/profile` — веса жанров/артистов, топ треков со скором,
      часы/дни, настроения, баны (готовая модель для экрана «Вкусы»).

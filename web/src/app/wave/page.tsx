@@ -43,10 +43,13 @@ export default function WavePage() {
   const [busy, setBusy] = useState(false);
   const [liveRefill, setLiveRefill] = useState(true);
   const [followNavidrome, setFollowNavidrome] = useState(true);
+  const [followPhone, setFollowPhone] = useState(true);
+  const [phoneAge, setPhoneAge] = useState<number | null>(null);
   const toast = useToast();
   const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const pendingEvents = useRef<WaveEvent[]>([]);
   const lastSyncedExternal = useRef<string>("");
+  const bootRef = useRef<string>("");
   const busyRef = useRef(false);
   busyRef.current = busy;
 
@@ -104,6 +107,40 @@ export default function WavePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, queue, mood, toast]);
 
+  // Холодный вход: очередь пуста, а в Navidrome что-то играет —
+  // сразу строим волну от него, жать «Запустить» не надо.
+  useEffect(() => {
+    if (!followNavidrome || !userId || queue.length > 0 || busyRef.current) return;
+    if (bootRef.current === `${userId}:${mood}`) return;
+    bootRef.current = `${userId}:${mood}`;
+    (async () => {
+      try {
+        const np = await api.nowPlaying(userId, 1);
+        const tid = np.playing?.track_id;
+        if (!tid) return;
+        setBusy(true);
+        const r = await api.waveContinue({
+          user_id: userId,
+          queue: [],
+          current_track_id: tid,
+          count: 10,
+          settings: mood ? { mood } : {},
+          recent_events: [{ track_id: tid, action: "play" }],
+        });
+        const tracks = (r.tracks ?? []) as WaveTrack[];
+        if (tracks.length > 0) {
+          setQueue(tracks.slice(0, 100));
+          setPlayingIdx(0);
+        }
+      } catch {
+        /* внешний плеер молчит — ждём ручного запуска */
+      } finally {
+        setBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, followNavidrome, mood]);
+
   // Клик по строке = «это сейчас играет во внешнем плеере»: помечаем и копим play-событие.
   function markCurrent(i: number) {
     if (queue.length === 0) return;
@@ -121,6 +158,38 @@ export default function WavePage() {
     if (queue.length - 1 - playingIdx <= REFILL_THRESHOLD) void more(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playingIdx, queue.length, liveRefill]);
+
+  // Очередь с телефона: мобила публикует её в POST /api/wave/publish,
+  // веб подхватывает и показывает как есть (свежесть < 5 мин).
+  useEffect(() => {
+    if (!followPhone || !userId) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const live = await api.waveLive(userId);
+        if (stop || !live.queue?.length) return;
+        if (live.age_sec != null && live.age_sec > 300) {
+          setPhoneAge(live.age_sec);
+          return;
+        }
+        setPhoneAge(live.age_sec ?? null);
+        const ids = live.queue.map((t) => t.track_id).join("|");
+        setQueue((prev) => {
+          if (prev.map((t) => t.track_id).join("|") === ids) return prev;
+          setPlayingIdx(Math.max(0, Math.min(live.current ?? 0, live.queue.length - 1)));
+          return live.queue.map((t) => ({
+            ...t, score: 1, mood: null, moods: [], energy: null, tempo: null,
+          })) as WaveTrack[];
+        });
+      } catch {
+        /* телефона нет в сети — живём своей очередью */
+      }
+    };
+    const id = setInterval(tick, 10000);
+    void tick();
+    return () => { stop = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followPhone, userId]);
 
   // Реал-тайм от внешнего плеера: что играет в Navidrome — подсвечиваем как current.
   useEffect(() => {
@@ -235,6 +304,10 @@ export default function WavePage() {
                 <input type="checkbox" checked={liveRefill} onChange={(e) => setLiveRefill(e.target.checked)} />
                 Авто-докрутка (осталось ≤{REFILL_THRESHOLD} — добрать +10)
               </label>
+              <label className="flex items-center gap-1.5 cursor-pointer" title="Мобила шлёт очередь в POST /api/wave/publish — страница показывает её как есть">
+                <input type="checkbox" checked={followPhone} onChange={(e) => setFollowPhone(e.target.checked)} />
+                Очередь с телефона{phoneAge != null && phoneAge <= 300 ? ` · ${phoneAge} сек назад` : ""}
+              </label>
               <label className="flex items-center gap-1.5 cursor-pointer" title="Раз в 15 сек смотрим, что играет в Navidrome, и подсвечиваем">
                 <input type="checkbox" checked={followNavidrome} onChange={(e) => setFollowNavidrome(e.target.checked)} />
                 Подсвечивать, что играет в Navidrome
@@ -249,7 +322,7 @@ export default function WavePage() {
         <Card>
           {queue.length === 0 ? (
             <div className="text-sm text-muted text-center py-8">
-              Пусто — выбери пользователя и нажми «Запустить волну».
+              Пусто — нажми «Запустить волну» или включи «Подсвечивать…» и запусти трек во внешнем плеере: страница подхватит его сама.
             </div>
           ) : (
             <div className="relative pl-6 max-h-[560px] overflow-y-auto pr-1">

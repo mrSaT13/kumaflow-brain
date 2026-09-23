@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -9,6 +11,22 @@ from app.services.yandex_music.client import get_yandex_config, save_yandex_conf
 from app.services.queue import enqueue
 
 router = APIRouter()
+
+
+def _require_user(db: Session, user_id: str):
+    from app.db.models import MediaUser
+
+    try:
+        uuid.UUID(str(user_id))
+    except ValueError:
+        u = db.query(MediaUser).filter(MediaUser.external_id == str(user_id)).first()
+        if not u:
+            raise HTTPException(400, "invalid user_id")
+        return u
+    u = db.get(MediaUser, str(user_id))
+    if not u:
+        raise HTTPException(404, "user not found")
+    return u
 
 
 @router.get("/status")
@@ -83,3 +101,128 @@ def track_meta(track_id: str, db: Session = Depends(get_db)):
 
     rows = db.query(TrackMetadataEnrich).filter(TrackMetadataEnrich.track_id == track_id, TrackMetadataEnrich.source == "yandex").all()
     return {"items": [{"source": r.source, "data": r.data, "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None} for r in rows]}
+
+
+# --- Персональный токен Яндекс Музыки (шифр в БД, как vault) ---
+
+@router.post("/user-token")
+def user_token_save(payload: dict, db: Session = Depends(get_db)):
+    from app.services.yandex_music import library as _lib
+
+    u = _require_user(db, str((payload or {}).get("user_id") or ""))
+    try:
+        return _lib.save_user_token(db, str(u.id), str((payload or {}).get("token") or ""))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@router.get("/user-token-status")
+def user_token_status(user_id: str, db: Session = Depends(get_db)):
+    from app.services.yandex_music import library as _lib
+
+    u = _require_user(db, user_id)
+    return {"ok": True, "stored": _lib.has_user_token(db, str(u.id))}
+
+
+@router.delete("/user-token")
+def user_token_forget(user_id: str, db: Session = Depends(get_db)):
+    from app.services.yandex_music import library as _lib
+
+    u = _require_user(db, user_id)
+    return _lib.forget_user_token(db, str(u.id))
+
+
+# --- Тумблеры импорта ---
+
+@router.get("/import-settings")
+def import_settings_get(db: Session = Depends(get_db)):
+    from app.services.yandex_music import library as _lib
+
+    return {"ok": True, "settings": _lib.get_import_settings(db)}
+
+
+@router.put("/import-settings")
+def import_settings_put(payload: dict, db: Session = Depends(get_db)):
+    from app.services.yandex_music import library as _lib
+
+    return {"ok": True, "settings": _lib.save_import_settings(db, payload or {})}
+
+
+# --- Импорт библиотеки пользователя в taste engine ---
+
+@router.post("/import-taste")
+def import_taste(payload: dict, db: Session = Depends(get_db)):
+    """Лайки/дизлайки из Яндекс Музыки -> вкус мозга. Тумблера нет, всегда доступен."""
+    from app.services.yandex_music import library as _lib
+
+    u = _require_user(db, str((payload or {}).get("user_id") or ""))
+    try:
+        return _lib.import_taste(db, str(u.id))
+    except Exception as e:  # noqa: BLE001
+        from app.core.logging import get_logger as _gl
+
+        _gl("api.yandex").exception("import-taste failed")
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@router.post("/import-history")
+def import_history(payload: dict, db: Session = Depends(get_db)):
+    """История прослушиваний -> PlayHistory/events. Только при history_enabled."""
+    from app.services.yandex_music import library as _lib
+
+    u = _require_user(db, str((payload or {}).get("user_id") or ""))
+    try:
+        limit = int((payload or {}).get("limit") or 300)
+    except (TypeError, ValueError):
+        limit = 300
+    try:
+        return _lib.import_history(db, str(u.id), limit=max(1, min(1000, limit)))
+    except Exception as e:  # noqa: BLE001
+        from app.core.logging import get_logger as _gl
+
+        _gl("api.yandex").exception("import-history failed")
+        return {"ok": False, "error": str(e)[:300]}
+
+
+# --- Чарты/новинки для cold start ---
+
+@router.post("/charts/refresh")
+def charts_refresh(db: Session = Depends(get_db)):
+    from app.services.yandex_music import library as _lib
+
+    try:
+        return _lib.refresh_charts(db)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@router.get("/charts")
+def charts_get(db: Session = Depends(get_db)):
+    from app.services.yandex_music import library as _lib
+
+    return {"ok": True, **_lib.get_charts(db)}
+
+
+# --- Контроль коррекций метаданных ---
+
+@router.get("/corrections")
+def corrections_list(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+    """Что Яндекс поправил в локальных метаданных: трек, поле, было -> стало."""
+    from app.services.yandex_music import library as _lib
+
+    return {"ok": True, **_lib.list_corrections(db, limit, offset)}
+
+
+@router.post("/corrections/revert")
+def corrections_revert(payload: dict, db: Session = Depends(get_db)):
+    """Откатить правки Яндекса по треку (все поля или fields=[...])."""
+    from app.services.yandex_music import library as _lib
+
+    track_id = str((payload or {}).get("track_id") or "")
+    if not track_id:
+        raise HTTPException(400, "track_id required")
+    fields = (payload or {}).get("fields")
+    try:
+        return _lib.revert_correction(db, track_id, list(fields) if fields else None)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:300]}

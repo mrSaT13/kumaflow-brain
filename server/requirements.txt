@@ -31,3 +31,6 @@ apscheduler==3.10.4
 beautifulsoup4==4.12.3
 requests==2.32.3
 lxml==5.3.0
+
+# Яндекс Музыка (Marshal yandex-music-api): импорт вкуса/истории/чартов.
+yandex-music==3.0.0
