@@ -453,6 +453,39 @@ def auto_merge_duplicates(db: Session = Depends(get_db)):
     return {"ok": True, **_dd.auto_merge_exact(db)}
 
 
+@router.get("/duplicates/fingerprint")
+def list_fingerprint_duplicates(threshold: float = 0.985, db: Session = Depends(get_db)):
+    """Группы аудио-дублей по фингерпринту (mfcc+chroma+tempo+key). threshold 0.9..0.999."""
+    from app.services import dedup_fingerprint as _fp
+
+    groups = _fp.find_fingerprint_groups(db, threshold=threshold)
+    dup_tracks = sum(len(g["tracks"]) - 1 for g in groups)
+    return {"groups": groups, "group_count": len(groups), "duplicate_tracks": dup_tracks,
+            "threshold": threshold}
+
+
+@router.post("/duplicates/auto-fingerprint")
+def auto_merge_fingerprint(payload: dict, db: Session = Depends(get_db)):
+    """Автослияние аудио-дублей: {threshold=0.985, dry_run=false}. Сшивает через merge_tracks."""
+    from app.services import dedup as _dd
+    from app.services import dedup_fingerprint as _fp
+
+    threshold = float((payload or {}).get("threshold") or 0.985)
+    dry_run = bool((payload or {}).get("dry_run", False))
+    groups = _fp.find_fingerprint_groups(db, threshold=threshold)
+    if dry_run:
+        return {"ok": True, "dry_run": True, "groups": len(groups),
+                "tracks": sum(len(g["tracks"]) - 1 for g in groups)}
+    merged = 0
+    for g in groups:
+        try:
+            r = _dd.merge_tracks(db, g["keep_id"], g["drop_ids"])
+            merged += int(r.get("merged", 0) or 0)
+        except Exception:
+            continue
+    return {"ok": True, "groups": len(groups), "merged": merged}
+
+
 @router.get("/dedup-settings")
 def get_dedup_settings(db: Session = Depends(get_db)):
     """Настройка автослияния дублей после сканирования."""

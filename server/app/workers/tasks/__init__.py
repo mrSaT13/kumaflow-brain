@@ -821,8 +821,11 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
         sample_seconds = int(settings.analysis_sample_seconds or 90)
         default_limit = int(settings.analysis_max_tracks_per_run or 0)
         music_dir = settings.music_dir or os.getenv("MUSIC_DIR", "")
+        per_track_timeout = int(getattr(settings, "analysis_per_track_timeout_sec", 300) or 300)
+        auto_continue = bool(getattr(settings, "analysis_auto_continue", True))
     except Exception:
         sample_seconds, default_limit, music_dir = 90, 0, os.getenv("MUSIC_DIR", "")
+        per_track_timeout, auto_continue = 300, True
     # limit из API: 0 = «пачками, но всю библиотеку». chunk — размер одной пачки.
     requested = kwargs.get("limit", None)
     if requested is not None and int(requested or 0) > 0:
@@ -902,19 +905,61 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                     return {"status": "failure", "error": "Отменено пользователем", "ok": ok, "failed": fail}
                 tmp_to_clean: Path | None = None
                 try:
-                    local_path = aa.resolve_local_file(tpath, music_dir)
-                    if local_path is not None:
-                        src = local_path
-                        n_local += 1
-                    else:
+                    # Видно в docker logs даже если трек зависнет (в БД пишем только итог/ошибки, чтобы не спамить 150k строк)
+                    logger.info("Анализ: {} — {} ({})", artist, title, tid)
+                    t0 = time.monotonic()
+
+                    def _do_one():
+                        _tmp: Path | None = None
+                        _local = aa.resolve_local_file(tpath, music_dir)
+                        if _local is not None:
+                            return ("local", _local, None, aa.analyze_file(_local, sample_seconds=sample_seconds, track_duration_sec=dur))
                         if not ext_id:
                             raise RuntimeError("нет external_id и нет локального файла")
                         if str(ext_id).startswith("disk:"):
                             raise RuntimeError(f"локальный файл не найден: {tpath} (проверьте MUSIC_DIR/volumes)")
-                        src = aa.download_from_navidrome(ext_id, cfg)
-                        tmp_to_clean = Path(src)
+                        _src = aa.download_from_navidrome(ext_id, cfg)
+                        _tmp = Path(_src)
+                        try:
+                            _feats = aa.analyze_file(_src, sample_seconds=sample_seconds, track_duration_sec=dur)
+                        except Exception:
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            raise
+                        return ("stream", _src, _tmp, _feats)
+
+                    import concurrent.futures as _fut
+
+                    _ex = _fut.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        _fut_obj = _ex.submit(_do_one)
+                        try:
+                            kind, src, _tmp_got, feats = _fut_obj.result(timeout=per_track_timeout)
+                        except _fut.TimeoutError:
+                            fail += 1
+                            _append_log(run_id, "warn", f"Пропущен зависший (>{per_track_timeout}с): {artist} — {title}")
+                            logger.warning("Skip slow track >{}s: {} — {}", per_track_timeout, artist, title)
+                            try:
+                                _ex.shutdown(wait=False, cancel_futures=True)
+                            except Exception:
+                                pass
+                            continue
+                    finally:
+                        # зависший поток librosa может ещё жить в фоне — следующий трек всё равно пойдёт;
+                        # shutdown(wait=False) чтобы не ждать его здесь
+                        try:
+                            _ex.shutdown(wait=False, cancel_futures=True)
+                        except Exception:
+                            pass
+                    if _tmp_got is not None:
+                        tmp_to_clean = _tmp_got
+                    if kind == "local":
+                        n_local += 1
+                    else:
                         n_stream += 1
-                    feats = aa.analyze_file(src, sample_seconds=sample_seconds, track_duration_sec=dur)
+                        tmp_to_clean = _tmp_got
                     with session_scope() as db:
                         f = db.get(TrackFeatures, tid)
                         if f is None:
@@ -948,12 +993,19 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                         from app.core.config import get_settings as _gs
 
                         s = _gs()
-                        if s.mutagen_writeback and local_path is not None:
+                        _local_for_tags = src if kind == "local" else None
+                        if s.mutagen_writeback and _local_for_tags is not None:
                             # только локальные файлы, только если rw
-                            _write_mood_tags(local_path, feats, backup=s.mutagen_writeback_backup)
+                            _write_mood_tags(Path(_local_for_tags), feats, backup=s.mutagen_writeback_backup)
                     except Exception as _e:
-                        logger.warning("mutagen writeback failed for {}: {}", local_path, _e)
+                        logger.warning("mutagen writeback failed for {}: {}", src, _e)
                     ok += 1
+                    try:
+                        _dt = time.monotonic() - t0
+                        if _dt > 30:
+                            logger.info("Долго: {} — {} за {:.0f}с", artist, title, _dt)
+                    except Exception:
+                        pass
                 except Exception as e:  # noqa: BLE001
                     fail += 1
                     _append_log(run_id, "warn", f"Не проанализирован: {artist} — {title}: {e}")
@@ -983,11 +1035,56 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
             summary += " Вся библиотека проанализирована."
         _append_log(run_id, "info", summary)
         _finish_run(run_id, "success")
+        # Автопродолжение: один job = один чанк, дальше ставим следующий сам (ночь переживает таймауты)
+        if remaining > 0 and do_all and auto_continue:
+            try:
+                from app.services.queue import enqueue as _enq
+
+                with session_scope() as db:
+                    _run = db.get(ScanRun, run_id)
+                    _srv_id = str(_run.server_id) if _run and _run.server_id else None
+                    _new_id = str(uuid.uuid4())
+                    if _srv_id:
+                        db.add(ScanRun(id=_new_id, server_id=_srv_id, phase="analysis",
+                                       status="running", total_items=remaining, processed_items=0,
+                                       started_at=datetime.utcnow()))
+                _job = _enq(sonic_analysis, _new_id, job_timeout=7200, force=force, limit=chunk_size)
+                with session_scope() as db:
+                    _nr = db.get(ScanRun, _new_id)
+                    if _nr is not None:
+                        try:
+                            _nr.metadata_extra = dict(_nr.metadata_extra or {}) | {"job_id": _job}
+                        except Exception:
+                            _nr.metadata_extra = {"job_id": _job}
+                        db.add(ScanLog(id=str(uuid.uuid4()), run_id=_new_id, level="info",
+                                       message=f"Автопродолжение анализа: осталось {remaining} (job {_job})"))
+                _append_log(run_id, "info", f"Поставлен следующий чанк: осталось {remaining} (run {_new_id[:8]})")
+            except Exception as _ce:  # noqa: BLE001
+                logger.warning("analysis auto-continue failed: {}", _ce)
+                _append_log(run_id, "warn", f"Автопродолжение не встало: {_ce}")
         return {"status": "success", "ok": ok, "failed": fail, "remaining": remaining, "total": total_pending_initial}
     except Exception as e:  # noqa: BLE001
         logger.exception("sonic_analysis failed: {}", e)
         _append_log(run_id, "error", str(e))
         _finish_run(run_id, "failure", str(e))
+        # Даже если RQ убил job по timeout — пробуем продолжить остаток новым job'ом
+        try:
+            _msg = str(e)
+            if do_all and auto_continue and ("timeout" in _msg.lower() or "exceeded" in _msg.lower()):
+                from app.services.queue import enqueue as _enq2
+
+                with session_scope() as db:
+                    _run = db.get(ScanRun, run_id)
+                    _srv_id = str(_run.server_id) if _run and _run.server_id else None
+                    _new_id = str(uuid.uuid4())
+                    if _srv_id:
+                        db.add(ScanRun(id=_new_id, server_id=_srv_id, phase="analysis",
+                                       status="running", total_items=0, processed_items=0,
+                                       started_at=datetime.utcnow()))
+                _job = _enq2(sonic_analysis, _new_id, job_timeout=7200, force=force, limit=chunk_size)
+                _append_log(_new_id, "info", f"Перезапуск после таймаута (прошлый run {run_id[:8]}, job {_job})")
+        except Exception as _ce2:  # noqa: BLE001
+            logger.warning("analysis resume-after-timeout failed: {}", _ce2)
         return {"status": "failure", "error": str(e)}
 
 
@@ -1584,7 +1681,7 @@ def daily_per_user(*args, **kwargs):
                 today = date.today()
                 with session_scope() as db:
                     # удалить старый daily этого юзера
-                    old = db.query(Playlist).filter(Playlist.is_auto_generated.is_(True), Playlist.server_id == users[0].server_id, Playlist.owner_user_id == u.id).all()
+                    old = db.query(Playlist).filter(Playlist.is_auto_generated.is_(True), Playlist.server_id == u.server_id, Playlist.owner_user_id == u.id).all()
                     for p in old:
                         if p.generated_for_date and p.generated_for_date.date() >= today:
                             db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
@@ -1764,19 +1861,51 @@ def taste_snapshots(*args, **kwargs):
             users = db.query(MediaUser).filter_by(server_id=server.id).all()
             db.commit()
         ok = 0
+        drift_sent = 0
         for u in users:
             try:
                 with session_scope() as db:
                     res = _drift.take_snapshot(db, str(u.id))
                     if res.get("ok"):
                         ok += 1
+                    # Drift radar: сравнить с 4-недельным снапшотом и пушнуть в колокол при сильном сдвиге
+                    try:
+                        cmp = _drift.compare(db, str(u.id), weeks_ago=4)
+                        if cmp.get("ok") and cmp.get("summary"):
+                            up = (cmp.get("genres_up") or [{}])[0] or {}
+                            dn = (cmp.get("genres_down") or [{}])[0] or {}
+                            try:
+                                du = abs(float(up.get("delta") or 0))
+                            except Exception:
+                                du = 0
+                            try:
+                                dd = abs(float(dn.get("delta") or 0))
+                            except Exception:
+                                dd = 0
+                            if du >= 1.0 or dd >= 1.0:
+                                from app.db.models import Notification as _N
+                                from app.services import notify as _notify
+
+                                exists = db.query(_N).filter(
+                                    _N.user_id == str(u.id), _N.kind == "drift",
+                                    _N.read_at.is_(None)).first()
+                                if not exists:
+                                    _notify.notify(
+                                        db, "drift", f"Дрейф вкуса: {cmp['summary']}",
+                                        f"{up.get('name','')} {up.get('old','')}→{up.get('new','')}; "
+                                        f"{dn.get('name','')} {dn.get('old','')}→{dn.get('new','')} "
+                                        f"(с {cmp.get('snapshot_week','')})",
+                                        user_id=str(u.id), link=f"/users/{u.id}")
+                                    drift_sent += 1
+                    except Exception:
+                        pass
             except Exception as e:  # noqa: BLE001
                 if run_id:
                     _append_log(run_id, "warn", f"Snapshot {u.username} fail: {e}")
         if run_id:
-            _append_log(run_id, "info", f"Слепки вкуса: {ok}/{len(users)}")
+            _append_log(run_id, "info", f"Слепки вкуса: {ok}/{len(users)}, дрейф-уведомлений: {drift_sent}")
             _finish_run(run_id, "success")
-        return {"status": "success", "users": len(users), "ok": ok}
+        return {"status": "success", "users": len(users), "ok": ok, "drift": drift_sent}
     except Exception as e:  # noqa: BLE001
         logger.exception("taste_snapshots failed: {}", e)
         if run_id:
@@ -1840,14 +1969,18 @@ def refresh_tastes(*args, **kwargs):
     import_user_tastes. Без ключа — мягкий успех с пометкой (фича выключена).
     """
     run_id = args[0] if args else None
+    only_user = kwargs.get("user_id") or (args[1] if len(args) > 1 else None)
     try:
         from app.db.models import MediaUser, UserCredential
         from app.services import vault as _vault
         from app.services.taste_import import import_user_tastes
 
         with session_scope() as db:
+            q = db.query(UserCredential)
+            if only_user:
+                q = q.filter_by(user_id=str(only_user))
             pairs = [(str(r.user_id), bytes(r.enc_password))
-                     for r in db.query(UserCredential).all()]
+                     for r in q.all()]
         if run_id:
             with session_scope() as db:
                 run = db.get(ScanRun, run_id)
@@ -1929,4 +2062,83 @@ def refresh_tastes(*args, **kwargs):
                                str(e)[:300], link="/scans")
         except Exception:
             pass
+        return {"status": "failure", "error": str(e)}
+
+
+def weekly_discovery_all(*args, **kwargs):
+    """Крон по понедельникам: Открытия недели (CLAP) для каждого пользователя."""
+    run_id = args[0] if args else None
+    try:
+        from datetime import date, datetime
+
+        from app.db.models import MediaUser, Playlist, PlaylistTrack, Track
+        from app.services.discovery import weekly_discovery as _wd
+        from app.services.media_server import resolve_active_server
+        from app.services.orchestrator import create_energy_wave
+
+        with session_scope() as db:
+            server = resolve_active_server(db)
+            users = db.query(MediaUser).filter_by(server_id=server.id).all()
+            db.commit()
+        ok = 0
+        for idx, u in enumerate(users):
+            if _is_cancelled(run_id):
+                break
+            try:
+                with session_scope() as db:
+                    res = _wd(db, str(u.id), n=30)
+                    tids = res.get("tracks") or []
+                    try:
+                        tracks = [db.get(Track, tid) for tid in tids]
+                        tracks = [t for t in tracks if t]
+                        waved = create_energy_wave(tracks)
+                        order = {str(t.id): i for i, t in enumerate(waved)}
+                        tids = sorted(tids, key=lambda tid: order.get(tid, 999))
+                    except Exception:
+                        pass
+                    for p in db.query(Playlist).filter(
+                            Playlist.server_id == u.server_id, Playlist.owner_user_id == u.id,
+                            Playlist.is_auto_generated.is_(True),
+                            Playlist.name.like("Открытия недели%")).all():
+                        db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
+                        db.delete(p)
+                    db.flush()
+                    today = date.today()
+                    import uuid as _uuid
+
+                    p = Playlist(id=str(_uuid.uuid4()), server_id=u.server_id, owner_user_id=u.id,
+                                 name=f"Открытия недели · {today.isoformat()}", is_auto_generated=True,
+                                 generated_for_date=datetime.combine(today, datetime.min.time()))
+                    db.add(p)
+                    db.flush()
+                    for pos, tid in enumerate(tids):
+                        db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+                    try:
+                        from app.services import notify as _notify
+
+                        _notify.notify(db, "discovery", "Открытия недели готовы",
+                                       f"{u.username}: {len(tids)} треков ({res.get('mode')})",
+                                       user_id=str(u.id), link=f"/playlists/{p.id}")
+                    except Exception:
+                        pass
+                    ok += 1
+                if run_id:
+                    _append_log(run_id, "info", f"Weekly {u.username}: {len(tids)} ({res.get('mode')})")
+            except Exception as e:  # noqa: BLE001
+                if run_id:
+                    _append_log(run_id, "warn", f"Weekly {u.username} fail: {e}")
+            if run_id:
+                with session_scope() as db:
+                    run = db.get(ScanRun, run_id) if run_id else None
+                    if run:
+                        run.processed_items = idx + 1
+        if run_id:
+            _append_log(run_id, "info", f"Открытия недели: {ok}/{len(users)}")
+            _finish_run(run_id, "success")
+        return {"status": "success", "users": len(users), "ok": ok}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("weekly_discovery_all failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
         return {"status": "failure", "error": str(e)}

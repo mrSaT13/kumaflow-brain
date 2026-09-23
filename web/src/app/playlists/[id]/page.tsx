@@ -3,10 +3,12 @@
 import Link from "next/link";
 import useSWR from "swr";
 import { useParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Send } from "lucide-react";
 import { Button, Card, EmptyState, PageHeader, Section, Badge } from "@/components/ui";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { warmCovers } from "@/lib/coverWarm";
 import { fmtDuration } from "@/lib/format";
 
 export default function PlaylistDetailPage() {
@@ -14,18 +16,24 @@ export default function PlaylistDetailPage() {
   const id = params.id;
   const { data, mutate } = useSWR(["playlist", id], () => api.getPlaylist(id));
   const [exporting, setExporting] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    const tids = (data?.tracks ?? []).slice(0, 40).map((t) => t.id);
+    if (tids.length) warmCovers(tids, 100, 8);
+  }, [data?.tracks]);
 
   async function exportToNavidrome() {
     setExporting(true);
     try {
       const r = await api.exportPlaylist(id);
-      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      if (!r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
       else {
-        alert(`В Navidrome: треков ${r.exported ?? 0}${r.skipped ? ` (пропущено файлов с диска: ${r.skipped})` : ""}. Обновите список плейлистов в клиенте.`);
+        toast(`В Navidrome: треков ${r.exported ?? 0}${r.skipped ? ` (пропущено файлов с диска: ${r.skipped})` : ""}.`, "ok");
         mutate();
       }
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setExporting(false);
     }

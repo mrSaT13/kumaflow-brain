@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useState } from "react";
 import { Shield, Trash2, UserPlus, RefreshCw, Heart } from "lucide-react";
 import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/components/ui";
+import { useConfirm, PasswordDialog } from "@/components/dialog";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 
 function TasteBadge({ id }: { id: string }) {
@@ -130,6 +132,8 @@ function CompareSection({ ids, users, onClear }: { ids: string[]; users: { id: s
 }
 
 export default function UsersPage() {
+  const [confirmNode, confirm] = useConfirm();
+  const toast = useToast();
   const { data, mutate } = useSWR("/api/users", () => api.listUsers());
   const [externalId, setExternalId] = useState("");
   const [username, setUsername] = useState("");
@@ -140,13 +144,14 @@ export default function UsersPage() {
   const [rememberPwd, setRememberPwd] = useState(true);
   const [importBusy, setImportBusy] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
+  const [pwdOpen, setPwdOpen] = useState<{ id: string; name: string } | null>(null);
 
   function toggleSelect(id: string) {
     setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev.slice(0, 9), id]);
   }
 
   async function create() {
-    if (!externalId.trim() || !username.trim()) return alert("Заполните ID и имя");
+    if (!externalId.trim() || !username.trim()) { toast("Заполните ID и имя", "info"); return; }
     setBusy(true);
     try {
       await api.createUser({ external_id: externalId.trim(), username: username.trim(), is_admin: isAdmin });
@@ -154,19 +159,20 @@ export default function UsersPage() {
       setUsername("");
       setIsAdmin(false);
       mutate();
+      toast("Пользователь добавлен.", "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
   }
 
   async function createWithImport() {
-    if (!navLogin.trim() || !navPassword) return alert("Укажите логин и пароль пользователя Navidrome");
+    if (!navLogin.trim() || !navPassword) { toast("Укажите логин и пароль пользователя Navidrome", "info"); return; }
     setBusy(true);
     try {
       const r = await api.createUserByCredentials({ username: navLogin.trim(), password: navPassword, remember: rememberPwd });
-      if (!r.ok) return alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      if (!r.ok) { toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err"); return; }
       const im = (r.import ?? {}) as Record<string, unknown>;
       // пароль запоминаем только в sessionStorage браузера (на сервер не сохраняется) —
       // повторный «импорт» уже не спросит его заново
@@ -176,11 +182,12 @@ export default function UsersPage() {
       setNavLogin("");
       setNavPassword("");
       mutate();
-      alert(
-        `Готово: пользователь «${r.user?.username}» — лайков: ${im.favorites_total ?? 0} (+${im.favorites_added ?? 0} новых), дизлайков: ${im.disliked ?? 0}, плейлистов: ${im.playlists ?? 0} (треков: ${im.playlist_tracks ?? 0}).`,
+      toast(
+        `Готово: «${r.user?.username}» — лайков: ${im.favorites_total ?? 0} (+${im.favorites_added ?? 0} новых), плейлистов: ${im.playlists ?? 0}.`,
+        "ok",
       );
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -193,24 +200,26 @@ export default function UsersPage() {
       pwd = sessionStorage.getItem(`navpwd:${id}`);
     } catch { pwd = null; }
     if (!pwd) {
-      const entered = window.prompt(`Пароль пользователя «${fallbackName}» в Navidrome (нужен для чтения его лайков, спрашиваю один раз):`, "");
-      if (entered === null) return;
-      if (!entered) return alert("Без пароля Navidrome не отдаст чужие лайки — введите пароль.");
-      pwd = entered;
+      setPwdOpen({ id, name: fallbackName });
+      return;
     }
+    await doImport(id, pwd);
+  }
+
+  async function doImport(id: string, pwd: string) {
     setImportBusy(id);
     try {
       const r = await api.importTastes(id, pwd);
-      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      if (!r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
       else {
         try {
           sessionStorage.setItem(`navpwd:${id}`, pwd);
         } catch { /* приватный режим */ }
-        alert(`Готово: лайков всего ${r.favorites_total ?? 0} (+${r.favorites_added ?? 0} новых), плейлистов ${r.playlists ?? 0}. Теперь cold-start для этого пользователя будет персональным.`);
+        toast(`Готово: лайков всего ${r.favorites_total ?? 0} (+${r.favorites_added ?? 0} новых), плейлистов ${r.playlists ?? 0}.`, "ok");
       }
       mutate();
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setImportBusy(null);
     }
@@ -222,7 +231,7 @@ export default function UsersPage() {
   }
 
   async function del(id: string) {
-    if (!confirm("Удалить пользователя?")) return;
+    if (!(await confirm({ title: "Удалить пользователя?", confirmText: "Удалить", danger: true }))) return;
     await api.deleteUser(id);
     mutate();
   }
@@ -231,11 +240,11 @@ export default function UsersPage() {
     setBusy(true);
     try {
       const r = await api.syncUsers();
-      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
-      else alert(`Готово: +${r.added ?? 0} новых, обновлено ${r.updated ?? 0}, всего ${r.total ?? 0}`);
+      if (!r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
+      else toast(`Готово: +${r.added ?? 0} новых, обновлено ${r.updated ?? 0}, всего ${r.total ?? 0}`, "ok");
       mutate();
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -243,6 +252,16 @@ export default function UsersPage() {
 
   return (
     <>
+      {confirmNode}
+      <PasswordDialog
+        open={!!pwdOpen}
+        title={pwdOpen ? `Пароль «${pwdOpen.name}» в Navidrome` : ""}
+        onClose={(pwd) => {
+          const cur = pwdOpen;
+          setPwdOpen(null);
+          if (pwd && cur) void doImport(cur.id, pwd);
+        }}
+      />
       <PageHeader
         title="Пользователи"
         subtitle="Источник данных для коллаборативной фильтрации. Лайки/плейлисты тянутся из Navidrome под логином самого пользователя."

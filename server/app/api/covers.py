@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.db import get_db
 from app.services.covers import cached_content_type, get_cover, get_disk_cover
@@ -19,25 +19,24 @@ def _etag_for(data: bytes) -> str:
 
 
 @router.get("/{cover_id}")
-def cover(cover_id: str, db=Depends(get_db), size: int = 300):
-    from fastapi import Request
-    from fastapi.responses import Response as _Resp
-
+def cover(cover_id: str, request: Request, db=Depends(get_db), size: int = 300):
     # size из query ?size=300
     data = get_cover(cover_id, size=size, cfg=dict(get_media_server_config(db)))
     if not data:
         return _placeholder_png()
     etag = _etag_for(data)
+    if request.headers.get("if-none-match", "").strip('\" ') == etag:
+        return Response(status_code=304)
     headers = {
         "Cache-Control": "public, max-age=604800, immutable",
         "ETag": f'"{etag}"',
-        "X-Cache": "HIT" if data else "MISS",
+        "X-Cache": "HIT",
     }
     return Response(content=data, media_type=cached_content_type(cover_id, size), headers=headers)
 
 
 @router.get("/track/{track_id}")
-def track_cover(track_id: str, db=Depends(get_db), size: int = 300):
+def track_cover(track_id: str, request: Request, db=Depends(get_db), size: int = 300):
     """Обложка трека: встроенная в файл (диск) либо coverArt из Navidrome."""
     import uuid as _uuid
 
@@ -54,13 +53,19 @@ def track_cover(track_id: str, db=Depends(get_db), size: int = 300):
     data = get_disk_cover(t.path)
     if data:
         ctype = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
-        headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{_etag_for(data)}"'}
+        etag = _etag_for(data)
+        if request.headers.get("if-none-match", "").strip('" ') == etag:
+            return Response(status_code=304)
+        headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{etag}"'}
         return Response(content=data, media_type=ctype, headers=headers)
     # 2) coverArt из Navidrome
     if t.cover_art_id:
         data = get_cover(t.cover_art_id, size=size, cfg=dict(get_media_server_config(db)))
         if data:
-            headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{_etag_for(data)}"'}
+            etag = _etag_for(data)
+            if request.headers.get("if-none-match", "").strip('" ') == etag:
+                return Response(status_code=304)
+            headers = {"Cache-Control": "public, max-age=604800, immutable", "ETag": f'"{etag}"'}
             return Response(content=data, media_type=cached_content_type(t.cover_art_id, size), headers=headers)
     return _placeholder_png()
 

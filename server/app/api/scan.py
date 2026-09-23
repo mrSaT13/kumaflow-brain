@@ -278,3 +278,18 @@ async def run_logs_stream(run_id: str):
                 break
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.delete("/runs")
+def purge_runs(keep_last: int = 20, db: Session = Depends(get_db)):
+    """Очистить историю задач и логи: удаляет завершённые runs + их логи, оставляет keep_last последних."""
+    keep_last = max(0, min(200, int(keep_last or 20)))
+    rows = db.query(ScanRun).order_by(ScanRun.started_at.desc()).all()
+    doomed = [r for r in rows if r.status in ("success", "failure")][keep_last:]
+    n_runs = n_logs = 0
+    for r in doomed:
+        n_logs += db.query(ScanLog).filter(ScanLog.run_id == r.id).delete()
+        db.delete(r)
+        n_runs += 1
+    db.commit()
+    return {"ok": True, "deleted_runs": n_runs, "deleted_logs": n_logs, "kept": len(rows) - n_runs}

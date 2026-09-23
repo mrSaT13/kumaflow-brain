@@ -91,7 +91,15 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`${res.status}: ${text}`);
+    // backend обычно отдаёт JSON {ok:false,error} или {detail} — показываем его, а не HTML
+    try {
+      const j = JSON.parse(text);
+      const msg = (j as { error?: string; detail?: string }).error ?? (j as { detail?: string }).detail ?? text;
+      throw new Error(`${res.status}: ${String(msg).slice(0, 400)}`);
+    } catch (e) {
+      if (e instanceof Error && /^\d+:/.test(e.message)) throw e;
+      throw new Error(`${res.status}: ${text.slice(0, 200)}`);
+    }
   }
   return res.json() as Promise<T>;
 }
@@ -168,11 +176,14 @@ export const api = {
   coldStart: (n = 30) => http<{ tracks: string[]; items: Track[]; steps: { step: number; name: string; items: number }[] }>(`/api/analysis/cold-start?n=${n}`),
 
   startLibraryScan: () => http<{ queued: boolean; run_id: string }>(`/api/scan/library`, { method: "POST" }),
-  startAnalysis: () => http<{ queued: boolean; run_id: string }>(`/api/scan/analysis`, { method: "POST" }),
+  startAnalysis: (limit = 0, force = false) => http<{ queued: boolean; run_id: string }>(`/api/scan/analysis${limit || force ? `?limit=${limit}${force ? "&force=true" : ""}` : ""}`, { method: "POST" }),
   startLyrics: () => http<{ queued: boolean; run_id: string }>(`/api/scan/lyrics`, { method: "POST" }),
   startClusters: () => http<{ queued: boolean; run_id: string }>(`/api/scan/clusters`, { method: "POST" }),
   startCollab: () => http<{ queued: boolean; run_id: string }>(`/api/scan/collab`, { method: "POST" }),
   startSmart: () => http<{ queued: boolean; run_id: string }>(`/api/scan/smart`, { method: "POST" }),
+  purgeRuns: (keep_last = 20) => http<{ ok: boolean; deleted_runs: number; deleted_logs: number }>(`/api/scan/runs?keep_last=${keep_last}`, { method: "DELETE" }),
+  clearAllHistory: () => http<{ ok: boolean; cleared_history: number; cleared_events: number }>(`/api/users/history`, { method: "DELETE" }),
+  clearUserHistory: (id: string) => http<{ ok: boolean }>(`/api/users/${id}/history`, { method: "DELETE" }),
   listRuns: () => http<{ runs: ScanRun[] }>(`/api/scan/runs`),
   currentRun: () => http<{ current: ScanRun | null }>(`/api/scan/runs/current`),
   runLogs: (id: string) => http<{ logs: LogLine[] }>(`/api/scan/runs/${id}/logs`),
@@ -183,6 +194,11 @@ export const api = {
     http<{ queued: boolean; playlist_id: string; tracks: number; steps: { step: number; name: string; items: number }[] }>(
       `/api/playlists/generate-daily`,
       { method: "POST", body: JSON.stringify(user_id ? { n, user_id } : { n }) },
+    ),
+  weeklyDiscovery: (user_id: string, n = 30) =>
+    http<{ playlist_id: string; tracks: number; mode: string; explanations: { track_id: string; score: number; because_of_title?: string | null; genre_match?: boolean; mood?: string | null; text: string }[]; steps: { step: number; name: string; items: number }[] }>(
+      `/api/playlists/weekly-discovery`,
+      { method: "POST", body: JSON.stringify({ user_id, n }) },
     ),
   aiGenerate: (query: string, n = 30, user_id?: string) =>
     http<{ playlist_id: string; name: string; comment?: string; tracks: number; from_fallback?: boolean }>(
@@ -278,6 +294,10 @@ export const api = {
     http<{ ok: boolean; favorites_total?: number; playlists?: number; error?: string }>(
       `/api/users/${id}/refresh-now`, { method: "POST" },
     ),
+  refreshAsync: (id: string) =>
+    http<{ ok: boolean; queued?: boolean; run_id?: string; job_id?: string; error?: string }>(
+      `/api/users/${id}/refresh-async`, { method: "POST" },
+    ),
   myWave: (user_id: string, n = 30, seed_track_id?: string, mood?: string) =>
     http<{ playlist_id: string; tracks: number; excluded_disliked: number; excluded_banned: number }>(
       `/api/playlists/my-wave`,
@@ -303,6 +323,15 @@ export const api = {
   duplicates: () =>
     http<{ groups: { key: string; keep_id: string; tracks: { id: string; title: string; artist_name?: string; album_name?: string; duration_sec?: number; play_count: number; starred: boolean; source: string }[] }[]; group_count: number; duplicate_tracks: number }>(
       `/api/library/duplicates`,
+    ),
+  fingerprintDuplicates: (threshold = 0.985) =>
+    http<{ groups: { type: string; score: number; keep_id: string; drop_ids: string[]; tracks: { id: string; title: string; artist_name?: string; duration_sec?: number }[] }[]; group_count: number; duplicate_tracks: number; threshold: number }>(
+      `/api/library/duplicates/fingerprint?threshold=${threshold}`,
+    ),
+  autoMergeFingerprint: (threshold = 0.985, dry_run = false) =>
+    http<{ ok: boolean; groups: number; merged?: number; tracks?: number }>(
+      `/api/library/duplicates/auto-fingerprint`,
+      { method: "POST", body: JSON.stringify({ threshold, dry_run }) },
     ),
   mergeDuplicates: (keep_id: string, drop_ids: string[]) =>
     http<{ ok: boolean; merged?: number; error?: string }>(

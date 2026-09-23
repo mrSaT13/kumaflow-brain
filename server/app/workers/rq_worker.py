@@ -27,25 +27,32 @@ def main() -> int:
                 with session_scope() as db:
                     jobs = db.query(CronJob).filter(CronJob.enabled.is_(True)).all()
                     for j in jobs:
-                        # простая проверка: если last_run_at сегодня — скип (daily)
-                        # точный cron парсим через CronTrigger
+                        # точный cron парсим через CronTrigger; last_run_at в UTC
                         try:
                             trig = CronTrigger.from_crontab(j.cron_expr)
                             now = __import__("datetime").datetime.utcnow()
-                            # если last_run уже после предыдущего fire — скип
-                            if j.last_run_at and trig.get_next_fire_time(None, j.last_run_at) and trig.get_next_fire_time(None, j.last_run_at) > now:
-                                continue
+                            if j.last_run_at:
+                                nxt = trig.get_next_fire_time(None, j.last_run_at)
+                                if nxt and nxt > now:
+                                    continue
                         except Exception:
                             pass
+                        from app.core.logging import get_logger as _gl2
+                        _clog = _gl2("cron")
                         if j.kind == "daily":
                             enqueue(__import__("app.workers.tasks", fromlist=["daily_per_user"]).daily_per_user, job_timeout=3600)
                             j.last_run_at = __import__("datetime").datetime.utcnow()
+                            _clog.info("cron daily enqueued")
                         elif j.kind == "smart":
                             enqueue(__import__("app.workers.tasks", fromlist=["smart_playlists"]).smart_playlists, job_timeout=3600)
                             j.last_run_at = __import__("datetime").datetime.utcnow()
                         elif j.kind == "snapshots":
                             enqueue(__import__("app.workers.tasks", fromlist=["taste_snapshots"]).taste_snapshots, job_timeout=1800)
                             j.last_run_at = __import__("datetime").datetime.utcnow()
+                        elif j.kind == "weekly":
+                            enqueue(__import__("app.workers.tasks", fromlist=["weekly_discovery_all"]).weekly_discovery_all, job_timeout=3600)
+                            j.last_run_at = __import__("datetime").datetime.utcnow()
+                            _clog.info("cron weekly discovery enqueued")
                         elif j.kind == "refresh_tastes":
                             import uuid as _uuid
 
@@ -78,8 +85,13 @@ def main() -> int:
                 get_logger("cron").warning("cron tick failed: {}", e)
 
         sched = BackgroundScheduler(daemon=True)
-        sched.add_job(_tick, "interval", minutes=60, id="kumaflow-cron")
+        sched.add_job(_tick, "interval", minutes=10, id="kumaflow-cron")
         sched.start()
+        # первый тик сразу при старте воркера, чтобы не ждать 10 мин после рестарта
+        try:
+            _tick()
+        except Exception:
+            pass
     except Exception as e:
         from app.core.logging import get_logger
         get_logger("cron").warning("scheduler not started: {}", e)

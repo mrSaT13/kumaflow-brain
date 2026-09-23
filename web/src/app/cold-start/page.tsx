@@ -5,6 +5,8 @@ import useSWR from "swr";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Heart, Loader2, Play, Sparkles } from "lucide-react";
 import { Button, Card, Input, PageHeader, Section } from "@/components/ui";
+import { PasswordDialog } from "@/components/dialog";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api, type ArtistEntry } from "@/lib/api";
 import { genreIcon } from "@/lib/genreIcon";
 
@@ -43,6 +45,8 @@ function StepDots({ page }: { page: number }) {
 }
 
 export default function ColdStartPage() {
+  const toast = useToast();
+  const [pwdOpen, setPwdOpen] = useState(false);
   const [page, setPage] = useState(0);
   const [userId, setUserId] = useState("");
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
@@ -112,15 +116,15 @@ export default function ColdStartPage() {
   }
 
   async function save() {
-    if (!userId) return alert("Выберите пользователя — вкусы сохраняются персонально");
+    if (!userId) { toast("Выберите пользователя — вкусы сохраняются персонально", "info"); return; }
     setSaving(true);
     try {
       const r = await api.seedTaste(userId, { genres: selectedGenres, artists: selectedArtists });
-      if (!r.ok) return alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      if (!r.ok) { toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err"); return; }
       setSeedResult(r);
       setPage(2);
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setSaving(false);
     }
@@ -133,22 +137,24 @@ export default function ColdStartPage() {
       pwd = sessionStorage.getItem(`navpwd:${userId}`);
     } catch { pwd = null; }
     if (!pwd) {
-      const entered = window.prompt("Пароль этого пользователя в Navidrome (нужен, чтобы забрать его ★, спрашиваю один раз):", "");
-      if (entered === null) return;
-      if (!entered) return alert("Без пароля Navidrome чужие лайки не отдаст.");
-      pwd = entered;
+      setPwdOpen(true);
+      return;
     }
+    await doImport(pwd);
+  }
+
+  async function doImport(pwd: string) {
     setImporting(true);
     try {
       const r = await api.importTastes(userId, pwd);
-      if (!r.ok) return alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      if (!r.ok) { toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err"); return; }
       try {
         sessionStorage.setItem(`navpwd:${userId}`, pwd);
       } catch { /* приватный режим */ }
       setSeedResult((prev) => prev ? { ...prev, favorites_total: r.favorites_total ?? prev.favorites_total } : prev);
-      alert(`Готово: лайков всего ${r.favorites_total ?? 0} (+${r.favorites_added ?? 0} новых), плейлистов ${r.playlists ?? 0}.`);
+      toast(`Готово: лайков всего ${r.favorites_total ?? 0} (+${r.favorites_added ?? 0} новых), плейлистов ${r.playlists ?? 0}.`, "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setImporting(false);
     }
@@ -161,7 +167,7 @@ export default function ColdStartPage() {
       const r = await api.generateDailyPlaylist(30, userId);
       setPlaylistId(r.playlist_id);
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setSaving(false);
     }
@@ -172,6 +178,14 @@ export default function ColdStartPage() {
 
   return (
     <>
+      <PasswordDialog
+        open={pwdOpen}
+        title="Пароль в Navidrome (заберём ★)"
+        onClose={(pwd) => {
+          setPwdOpen(false);
+          if (pwd) void doImport(pwd);
+        }}
+      />
       <PageHeader
         title="Настрой свой вкус"
         subtitle={titles[page]}

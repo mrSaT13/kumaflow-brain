@@ -132,6 +132,10 @@ def get_cover(cover_id: str, size: int = 300, cfg: dict | None = None) -> bytes 
                 if not _is_image_bytes(data):
                     cand.unlink(missing_ok=True)
                     continue
+                try:
+                    cand.touch()  # LRU: часто открываемые не сносит GC
+                except Exception:
+                    pass
                 return data
             except Exception:
                 pass

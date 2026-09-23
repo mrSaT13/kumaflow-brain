@@ -348,6 +348,69 @@ def my_wave(payload: dict, db: Session = Depends(get_db)):
             "excluded_banned": result.get("excluded_banned", 0), "mode": "my_wave"}
 
 
+@router.post("/weekly-discovery")
+def weekly_discovery(payload: dict, db: Session = Depends(get_db)):
+    """Открытия недели по CLAP: средний вектор лайков -> ближайшие неслушанные + объяснение."""
+    from app.db.models import MediaUser
+
+    user_id = str((payload or {}).get("user_id") or "")
+    n = int((payload or {}).get("n") or 30)
+    n = max(5, min(100, n))
+    if not user_id:
+        raise HTTPException(400, "user_id required")
+    u = db.get(MediaUser, user_id)
+    if not u:
+        try:
+            u = db.query(MediaUser).filter(MediaUser.external_id == user_id).first()
+        except Exception:
+            u = None
+    if not u:
+        raise HTTPException(404, "user not found")
+    server = resolve_active_server(db)
+    db.commit()
+    from app.services.discovery import weekly_discovery as _wd
+
+    res = _wd(db, str(u.id), n=n)
+    tids = res.get("tracks") or []
+    try:
+        from app.services.orchestrator import create_energy_wave
+
+        tracks = [db.get(Track, tid) for tid in tids]
+        tracks = [t for t in tracks if t]
+        waved = create_energy_wave(tracks)
+        order = {str(t.id): i for i, t in enumerate(waved)}
+        tids = sorted(tids, key=lambda tid: order.get(tid, 999))
+    except Exception:
+        pass
+    # прошлые открытия пользователя заменяем
+    for p in db.query(Playlist).filter(
+            Playlist.server_id == server.id, Playlist.owner_user_id == u.id,
+            Playlist.is_auto_generated.is_(True),
+            Playlist.name.like("Открытия недели%")).all():
+        db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
+        db.delete(p)
+    db.flush()
+    today = date.today()
+    p = Playlist(id=str(uuid.uuid4()), server_id=server.id, owner_user_id=u.id,
+                 name=f"Открытия недели · {today.isoformat()}", is_auto_generated=True,
+                 generated_for_date=datetime.combine(today, datetime.min.time()))
+    db.add(p)
+    db.flush()
+    for pos, tid in enumerate(tids):
+        db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+    try:
+        from app.services import notify as _notify
+
+        _notify.notify(db, "discovery", "Открытия недели готовы",
+                       f"{u.username}: {len(tids)} треков ({res.get('mode')})",
+                       user_id=str(u.id), link=f"/playlists/{p.id}")
+    except Exception:
+        pass
+    db.commit()
+    return {"playlist_id": str(p.id), "tracks": len(tids), "mode": res.get("mode"),
+            "explanations": res.get("explanations") or [], "steps": res.get("steps") or []}
+
+
 @router.post("/ai-generate")
 def ai_generate(payload: dict, db: Session = Depends(get_db)):
     """AI генератор как на мобиле: query -> candidates -> LLM -> playlist."""

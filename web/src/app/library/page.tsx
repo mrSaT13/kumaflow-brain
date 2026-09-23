@@ -5,7 +5,10 @@ import useSWR from "swr";
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Database, RefreshCw } from "lucide-react";
 import { Button, EmptyState, Input, PageHeader, Section } from "@/components/ui";
+import { useConfirm } from "@/components/dialog";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api, type Track } from "@/lib/api";
+import { warmCovers } from "@/lib/coverWarm";
 import { fmtDuration } from "@/lib/format";
 
 const PAGE_SIZE = 100;
@@ -27,6 +30,8 @@ function HealthStat({ label, value, hint }: { label: string; value: number; hint
 }
 
 export default function LibraryPage() {
+  const [confirmNode] = useConfirm();
+  const toast = useToast();
   const [q, setQ] = useState("");
   const [qDebounced, setQDebounced] = useState("");
   const [genre, setGenre] = useState<string>("");
@@ -71,22 +76,18 @@ export default function LibraryPage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  // prefetch обложек как на мобиле batch 8 (SafeImageCacheManager warm)
+  // prefetch обложек: очередь 8 (умный прогрев, server кэширует + 304 + LRU-touch)
   useEffect(() => {
     if (!data?.items?.length) return;
-    const ids = data.items.slice(0, 20).map((t: Track) => t.id);
-    // тихо префетчим track covers (server кэширует + 304)
-    ids.forEach((id) => {
-      const img = new Image();
-      img.src = api.trackCoverUrl(id, 100);
-    });
+    const ids = data.items.slice(0, 40).map((t: Track) => t.id);
+    warmCovers(ids, 100, 8);
     // также дергаем server prefetch для артистов (фон)
     api.prefetchCovers().catch(() => {});
   }, [data?.items]);
 
   async function syncReal() {
     if (isRunning) {
-      alert(`Уже выполняется: ${current?.current?.phase} — подождите`);
+      toast(`Уже выполняется: ${current?.current?.phase} — подождите`, "info");
       return;
     }
     setBusy(true);
@@ -94,10 +95,11 @@ export default function LibraryPage() {
       await api.startLibraryScan();
       setTimeout(() => mutate(), 1500);
       setTimeout(() => mutate(), 4000);
+      toast("Сканирование запущено.", "ok");
     } catch (e: unknown) {
-      const msg = String(e);
-      if (msg.includes("409")) alert("Задача уже выполняется — подождите завершения");
-      else alert(msg);
+      const msg = fmtErr(e);
+      if (msg.includes("409")) toast("Задача уже выполняется — подождите завершения", "info");
+      else toast(msg, "err");
     } finally {
       setBusy(false);
     }
@@ -115,6 +117,7 @@ export default function LibraryPage() {
 
   return (
     <>
+      {confirmNode}
       <PageHeader
         title="Библиотека"
         subtitle={
@@ -314,36 +317,56 @@ export default function LibraryPage() {
 }
 
 function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
+  const [confirmNode, confirm] = useConfirm();
+  const toast = useToast();
   const { data, mutate } = useSWR("/api/library/duplicates", () => api.duplicates());
+  const { data: fp, mutate: mutateFp } = useSWR("/api/library/duplicates/fingerprint", () => api.fingerprintDuplicates(0.985));
   const { data: settings, mutate: mutateSettings } = useSWR("/api/library/dedup-settings", () => api.getDedupSettings());
   const [busy, setBusy] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
   async function mergeGroup(keep_id: string, ids: string[]) {
-    if (!confirm(`Сшить ${ids.length} дубля в один? Статистика и лайки переедут.`)) return;
+    if (!(await confirm({ title: `Сшить ${ids.length} дубля в один?`, message: "Статистика и лайки переедут.", confirmText: "Сшить", danger: true }))) return;
     setBusy(true);
     try {
       const r = await api.mergeDuplicates(keep_id, ids);
-      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      if (!r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
+      else toast("Сшито.", "ok");
       mutate();
       refreshTracks();
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
   }
 
   async function autoAll() {
-    if (!confirm("Сшить ВСЕ точные дубли? Live/remix-версии не тронутся.")) return;
+    if (!(await confirm({ title: "Сшить ВСЕ точные дубли?", message: "Live/remix-версии не тронутся.", confirmText: "Сшить все", danger: true }))) return;
     setBusy(true);
     try {
       const r = await api.autoMergeDuplicates();
-      alert(`Групп: ${r.groups}, сшито треков: ${r.merged}`);
+      toast(`Групп: ${r.groups}, сшито треков: ${r.merged}`, "ok");
       mutate();
       refreshTracks();
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function autoFp() {
+    if (!(await confirm({ title: "Сшить аудио-дубли?", message: "Косинус фингерпринта ≥0.985 + длительность ±3с. Live/remix не трогаем.", confirmText: "Сшить", danger: true }))) return;
+    setBusy(true);
+    try {
+      const r = await api.autoMergeFingerprint(0.985, false);
+      toast(`Аудио-дубли: групп ${r.groups}, сшито ${r.merged ?? 0}`, "ok");
+      mutate();
+      mutateFp();
+      refreshTracks();
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -354,14 +377,17 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
       await api.saveDedupSettings(v);
       mutateSettings();
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     }
   }
 
   const groups = data?.groups ?? [];
   const shown = showAll ? groups : groups.slice(0, 10);
+  const fpGroups = fp?.groups ?? [];
 
   return (
+    <>
+      {confirmNode}
     <Section
       title={`Дубликаты · групп ${data?.group_count ?? 0}, лишних треков ${data?.duplicate_tracks ?? 0}`}
       action={
@@ -415,5 +441,41 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
         </div>
       )}
     </Section>
+    <Section
+      title={`Аудио-дубли · групп ${fp?.group_count ?? 0} (фингерпринт ≥0.985)`}
+      action={
+        <button className="kuma-pill hover:text-text text-xs" onClick={autoFp} disabled={busy || fpGroups.length === 0}>
+          Сшить аудио-дубли
+        </button>
+      }
+    >
+      {fpGroups.length === 0 ? (
+        <div className="kuma-card p-5 text-sm text-muted">Аудио-дублей не найдено. Нужен sonic-анализ (mfcc/chroma) — без него сравнивать нечего.</div>
+      ) : (
+        <div className="space-y-2">
+          {fpGroups.slice(0, 10).map((g) => (
+            <div key={g.keep_id} className="kuma-card p-4">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="kuma-pill">схожесть {(g.score * 100).toFixed(1)}%</span>
+                <span className="kuma-pill">{g.tracks.length} шт.</span>
+                <span className="flex-1" />
+                <button className="kuma-pill hover:text-text" disabled={busy} onClick={() => mergeGroup(g.keep_id, g.drop_ids)}>
+                  Объединить в один
+                </button>
+              </div>
+              <div className="mt-2 space-y-1">
+                {g.tracks.map((t) => (
+                  <div key={t.id} className={`flex items-center gap-2 text-xs ${t.id === g.keep_id ? "" : "text-muted"}`}>
+                    {t.id === g.keep_id && <span className="kuma-pill">останется</span>}
+                    <Link href={`/track/${t.id}`} className="kuma-link truncate">{t.artist_name ? `${t.artist_name} — ` : ""}{t.title}</Link>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+    </>
   );
 }

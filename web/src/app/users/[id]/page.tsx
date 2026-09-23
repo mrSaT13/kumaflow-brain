@@ -6,6 +6,8 @@ import { useParams } from "next/navigation";
 import { useState } from "react";
 import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
+import { PasswordDialog } from "@/components/dialog";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 import { moodLook } from "@/lib/moodStyle";
 
@@ -103,16 +105,18 @@ export default function UserProfilePage() {
   const { data: activity } = useSWR(["activity", id], () => api.userActivity(id, curYear));
   const [busy, setBusy] = useState(false);
   const [waveMood, setWaveMood] = useState("");
+  const toast = useToast();
+  const [pwdOpen, setPwdOpen] = useState(false);
 
   async function act(fn: () => Promise<unknown>, okMsg?: string) {
     setBusy(true);
     try {
       const r = (await fn()) as { ok?: boolean; error?: string } | undefined;
-      if (r && "ok" in r && !r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
-      else if (okMsg) alert(okMsg);
+      if (r && "ok" in r && !r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
+      else if (okMsg) toast(okMsg, "ok");
       mutate();
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -124,20 +128,28 @@ export default function UserProfilePage() {
       const r = await api.myWave(id, 30, undefined, waveMood || undefined);
       location.href = `/playlists/${r.playlist_id}`;
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncBg() {
+    // Фоновый синк вкусов: не блокирует UI, прогресс в «Задачи и логи»
+    setBusy(true);
+    try {
+      const r = await api.refreshAsync(id);
+      if (!r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
+      else toast(`Синк поставлен в фон (run ${r.run_id?.slice(0, 8)}). Следите в «Задачи и логи».`, "ok");
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
   }
 
   async function rememberPwd() {
-    const pwd = window.prompt("Пароль этого пользователя в Navidrome (сохранится шифром для автообновления):", "");
-    if (!pwd) return;
-    await act(async () => {
-      const r = await api.vaultStore(id, pwd);
-      mutateVault();
-      return r;
-    }, "Запомнено ✓ — вкусы будут обновляться ночью сами");
+    setPwdOpen(true);
   }
 
   if (isLoading) return (
@@ -468,10 +480,30 @@ export default function UserProfilePage() {
             >
               <RefreshCw className="w-4 h-4" /> Обновить сейчас
             </Button>
+            <Button
+              variant="ghost"
+              onClick={syncBg}
+              disabled={busy || !vault?.stored}
+              title="Поставить синк в очередь — не блокирует страницу, прогресс в «Задачи и логи»"
+            >
+              <RefreshCw className="w-4 h-4" /> Синк в фоне
+            </Button>
           </div>
           <div className="text-xs text-muted mt-2">Ночью (04:30) вкусы подтянутся сами. Пароль хранится только шифротекстом, ключ — в секретах compose, не в базе.</div>
         </Card>
       </Section>
+      <PasswordDialog
+        open={pwdOpen}
+        title="Пароль в Navidrome (сохранится шифром)"
+        onClose={(pwd) => {
+          setPwdOpen(false);
+          if (pwd) void act(async () => {
+            const r = await api.vaultStore(id, pwd);
+            mutateVault();
+            return r;
+          }, "Запомнено ✓ — вкусы будут обновляться ночью сами");
+        }}
+      />
     </>
   );
 }

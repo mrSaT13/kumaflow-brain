@@ -4,6 +4,7 @@ import useSWR from "swr";
 import { useEffect, useState } from "react";
 import { Check, Sparkles, Wifi } from "lucide-react";
 import { Badge, Button, Card, Input, PageHeader, Section } from "@/components/ui";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 
 function Field({ label, value, onChange, placeholder, type = "text" }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
@@ -64,6 +65,7 @@ export default function SettingsPage() {
   const [bridgeEnabled, setBridgeEnabled] = useState(false);
   const [bridgeResult, setBridgeResult] = useState<string | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     if (!media) return;
@@ -94,17 +96,17 @@ export default function SettingsPage() {
   }, [aiCfg]);
 
   async function saveMedia() {
-    if (!url.trim()) return alert("Укажите URL сервера");
-    if (!user.trim()) return alert("Укажите пользователя");
+    if (!url.trim()) { toast("Укажите URL сервера", "info"); return; }
+    if (!user.trim()) { toast("Укажите пользователя", "info"); return; }
     setBusy(true);
     setTestResult(null);
     try {
       const r = await api.saveMediaServer({ type, url: url.trim(), user: user.trim(), password, token: token.trim() });
-      if (!r.ok) return alert(r.error ?? "Ошибка сохранения");
+      if (!r.ok) { toast(r.error ?? "Ошибка сохранения", "err"); return; }
       await Promise.all([mutate(), mutateMedia()]);
-      alert("Сохранено ✓");
+      toast("Сохранено ✓", "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -137,11 +139,11 @@ export default function SettingsPage() {
         gemini_api_key: geminiKey.trim(),
         mistral_api_key: mistralKey.trim(),
       });
-      if (!r.ok) return alert(r.error ?? "Ошибка сохранения");
+      if (!r.ok) { toast(r.error ?? "Ошибка сохранения", "err"); return; }
       await Promise.all([mutate(), mutateAi()]);
-      alert("Сохранено ✓");
+      toast("Сохранено ✓", "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setAiBusy(false);
     }
@@ -152,9 +154,9 @@ export default function SettingsPage() {
     try {
       const r = await api.aiModels();
       setAiModels(r.available ?? []);
-      if (!r.available?.length) alert("Список моделей пуст — проверьте ключ/URL и сохраните настройки (для OLLAMA_CLOUD нужен токен с ollama.com/settings)");
+      if (!r.available?.length) toast("Список моделей пуст — проверьте ключ/URL и сохраните настройки (для OLLAMA_CLOUD нужен токен с ollama.com/settings)", "info");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setModelsBusy(false);
     }
@@ -164,11 +166,11 @@ export default function SettingsPage() {
     setModelsBusy(true);
     try {
       const r = await api.aiPull({ model: aiModel.trim() || undefined });
-      if (r.ok) alert(`Модель ${r.model ?? aiModel} скачана ✓ — теперь проверьте AI`);
-      else alert(`Ошибка скачки: ${r.error}`);
+      if (r.ok) toast(`Модель ${r.model ?? aiModel} скачана ✓ — теперь проверьте AI`, "ok");
+      else toast(`Ошибка скачки: ${r.error}`, "err");
       await loadModels();
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setModelsBusy(false);
     }
@@ -188,16 +190,16 @@ export default function SettingsPage() {
   }
 
   async function saveBridge() {
-    if (bridgeEnabled && !bridgeUrl.trim()) return alert("Укажите URL моста или выключите его");
+    if (bridgeEnabled && !bridgeUrl.trim()) { toast("Укажите URL моста или выключите его", "info"); return; }
     setBridgeBusy(true);
     setBridgeResult(null);
     try {
       const r = await api.saveBridge({ url: bridgeUrl.trim(), enabled: bridgeEnabled });
-      if (!r.ok) return alert(r.error ?? "Ошибка сохранения");
+      if (!r.ok) { toast(r.error ?? "Ошибка сохранения", "err"); return; }
       await Promise.all([mutate(), mutateBridge()]);
-      alert("Сохранено ✓");
+      toast("Сохранено ✓", "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBridgeBusy(false);
     }

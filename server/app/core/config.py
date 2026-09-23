@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     music_dir: str = ""
     analysis_sample_seconds: int = 90
     analysis_max_tracks_per_run: int = 0  # 0 = все непроанализированные за один прогон
+    analysis_per_track_timeout_sec: int = 300  # дедлайн на один трек (скачка+librosa); превышение = skip
+    analysis_auto_continue: bool = True  # сам ставить следующий чанк в очередь, пока есть остаток
 
     mutagen_writeback: bool = False  # если True — пишет mood/genre/key/bpm в теги файлов (только локальные)
     mutagen_writeback_backup: bool = False  # делать .bak копию перед записью

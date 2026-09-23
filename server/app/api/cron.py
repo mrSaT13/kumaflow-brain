@@ -20,6 +20,7 @@ def _ensure_defaults(db: Session):
         ("CLAP embed", "clap", "0 4 * * *"),
         ("Smart playlists", "smart", "0 6 * * *"),
         ("Taste snapshots", "snapshots", "0 7 * * 0"),
+        ("Weekly discovery", "weekly", "0 6 * * 1"),
         ("Cover GC 7d", "covers_gc", "0 5 * * 0"),
     ]
     # upsert по kind — подтягивает новые задачи и на старых базах
@@ -129,6 +130,13 @@ def run_now(job_id: str, db: Session = Depends(get_db)):
         from app.workers.tasks import taste_snapshots
 
         job = enqueue(taste_snapshots, job_timeout=1800)
+        j.last_run_at = datetime.utcnow()
+        db.commit()
+        return {"queued": True, "job_id": job}
+    if kind == "weekly":
+        from app.workers.tasks import weekly_discovery_all
+
+        job = enqueue(weekly_discovery_all, job_timeout=3600)
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job}

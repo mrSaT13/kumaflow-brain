@@ -2,23 +2,46 @@
 
 import useSWR from "swr";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ListMusic, Play, RefreshCw, Send, Sparkles, Trash2, Wand2, Eye, EyeOff, Search } from "lucide-react";
 import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/components/ui";
+import { useConfirm } from "@/components/dialog";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 import { fmtDate } from "@/lib/format";
 
+function usePersisted<T>(key: string, initial: T): [T, (v: T) => void] {
+  const [val, setVal] = useState<T>(initial);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw !== null) setVal(JSON.parse(raw) as T);
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const set = (v: T) => {
+    setVal(v);
+    try {
+      localStorage.setItem(key, JSON.stringify(v));
+    } catch { /* приватный режим */ }
+  };
+  return [val, set];
+}
+
 export default function PlaylistsPage() {
-  const [showHidden, setShowHidden] = useState(false);
+  const [confirmNode, confirm] = useConfirm();
+  const toast = useToast();
+  const [showHidden, setShowHidden] = usePersisted<boolean>("kf:pl:showHidden", false);
   const { data, mutate } = useSWR(["/api/playlists", showHidden], () => api.listPlaylists(showHidden), { refreshInterval: 4000 });
   const { data: usersData } = useSWR("/api/users", () => api.listUsers());
   const [busy, setBusy] = useState(false);
   const [coldUser, setColdUser] = useState("");
   const [coldN, setColdN] = useState(30);
   const [aiQuery, setAiQuery] = useState("");
-  const [plQuery, setPlQuery] = useState("");
-  const [plFilter, setPlFilter] = useState<"all" | "auto" | "manual" | "hidden">("all");
+  const [plQuery, setPlQuery] = usePersisted<string>("kf:pl:q", "");
+  const [plFilter, setPlFilter] = usePersisted<"all" | "auto" | "manual" | "hidden">("kf:pl:filter", "all");
   const [lastSteps, setLastSteps] = useState<{ step: number; name: string; items: number }[] | null>(null);
+  const [weekly, setWeekly] = useState<{ track_id: string; score: number; because_of_title?: string | null; text: string }[]>([]);
 
   const visiblePlaylists = (data?.playlists ?? []).filter((p) => {
     if (plFilter === "auto" && !p.is_auto_generated) return false;
@@ -36,8 +59,9 @@ export default function PlaylistsPage() {
       const r = await api.generateDailyPlaylist(coldN || 30, coldUser || undefined);
       setLastSteps(r.steps ?? null);
       mutate();
+      toast("Daily готов — откройте плейлист ниже.", "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -48,23 +72,23 @@ export default function PlaylistsPage() {
     try {
       const r = await api.coldStart(coldN || 30);
       setLastSteps(r.steps ?? null);
-      alert(`Cold-start: кандидатов ${r.tracks.length} (шаги: ${(r.steps ?? []).map((s) => `${s.name}=${s.items}`).join(", ")}). Чтобы сохранить их плейлистом — нажмите «Пройти холодный старт».`);
+      toast(`Cold-start: кандидатов ${r.tracks.length}. Чтобы сохранить — «Пройти холодный старт».`, "info");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
   }
 
   async function aiMix() {
-    if (!aiQuery.trim()) return alert("Опишите настроение/жанр — например «вечерний лоуфай для работы»");
+    if (!aiQuery.trim()) { toast("Опишите настроение/жанр — например «вечерний лоуфай для работы»", "info"); return; }
     setBusy(true);
     try {
       const r = await api.aiGenerate(aiQuery.trim(), coldN || 30, coldUser || undefined);
       mutate();
-      alert(`Готово: «${r.name}» — треков ${r.tracks}${r.from_fallback ? " (без AI, keyword-подбор)" : ""}. Откройте плейлист ниже.`);
+      toast(`Готово: «${r.name}» — треков ${r.tracks}${r.from_fallback ? " (без AI, keyword-подбор)" : ""}.`, "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -72,21 +96,21 @@ export default function PlaylistsPage() {
 
   async function myWave() {
     const uid = coldUser || (usersData?.users ?? [])[0]?.id;
-    if (!uid) return alert("Сначала добавьте пользователя на странице «Пользователи»");
+    if (!uid) { toast("Сначала добавьте пользователя на странице «Пользователи»", "info"); return; }
     setBusy(true);
     try {
       const r = await api.myWave(uid, coldN || 30);
       mutate();
-      alert(`Моя волна готова: треков ${r.tracks} (убрано дизлайков ${r.excluded_disliked}, банов ${r.excluded_banned}). Откройте плейлист ниже.`);
+      toast(`Моя волна готова: треков ${r.tracks} (убрано дизлайков ${r.excluded_disliked}, банов ${r.excluded_banned}).`, "ok");
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
   }
 
   async function del(id: string) {
-    if (!confirm("Удалить плейлист? (копия в Navidrome тоже будет удалена, если выгружалась)")) return;
+    if (!(await confirm({ title: "Удалить плейлист?", message: "Копия в Navidrome тоже будет удалена, если выгружалась.", confirmText: "Удалить", danger: true }))) return;
     await api.deletePlaylist(id);
     mutate();
   }
@@ -105,13 +129,13 @@ export default function PlaylistsPage() {
     setBusy(true);
     try {
       const r = await api.exportPlaylist(id);
-      if (!r.ok) alert(`Ошибка: ${r.error ?? "неизвестная"}`);
+      if (!r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
       else {
-        alert(`«${name}» теперь в Navidrome: треков ${r.exported ?? 0}${r.skipped ? ` (пропущено файлов с диска: ${r.skipped})` : ""}.`);
+        toast(`«${name}» теперь в Navidrome: треков ${r.exported ?? 0}${r.skipped ? ` (пропущено файлов с диска: ${r.skipped})` : ""}.`, "ok");
         mutate();
       }
     } catch (e: unknown) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setBusy(false);
     }
@@ -119,6 +143,7 @@ export default function PlaylistsPage() {
 
   return (
     <>
+      {confirmNode}
       <PageHeader
         title="Плейлисты"
         subtitle="Ежедневный плейлист пересоздаётся автоматически (если уже есть — удаляется и делается заново). Cold-start в 3 шага."
@@ -193,9 +218,9 @@ export default function PlaylistsPage() {
                 setBusy(true);
                 try {
                   const r = await api.buildClusters();
-                  alert(`Кластеризация запущена (задача ${r.run_id.slice(0, 8)}). Следите в «Задачи и логи».`);
+                  toast(`Кластеризация запущена (задача ${r.run_id.slice(0, 8)}). Следите в «Задачи и логи».`, "ok");
                 } catch (e: unknown) {
-                  alert(String(e));
+                  toast(fmtErr(e), "err");
                 } finally {
                   setBusy(false);
                 }
@@ -222,6 +247,52 @@ export default function PlaylistsPage() {
             </Button>
           </div>
           <div className="text-xs text-muted mt-2">Использует настроенного AI-провайдера (Настройки → AI). Без AI — подберёт по ключевым словам.</div>
+        </Card>
+      </Section>
+
+      <Section title="Открытия недели · CLAP">
+        <Card>
+          <div className="text-sm text-muted mb-3">
+            Средний вектор твоих лайков → ближайшие неслушанные по косинусу. Без CLAP-модели или при &lt;3 лайках — fallback на cold-start.
+          </div>
+          <div className="flex flex-col md:flex-row gap-2">
+            <select className="kuma-input" value={coldUser} onChange={(e) => setColdUser(e.target.value)}>
+              <option value="">Выбери пользователя…</option>
+              {(usersData?.users ?? []).map((u) => (
+                <option key={u.id} value={u.id}>{u.username}</option>
+              ))}
+            </select>
+            <Button
+              onClick={async () => {
+                if (!coldUser) { toast("Выбери пользователя для Открытий недели", "info"); return; }
+                setBusy(true);
+                try {
+                  const r = await api.weeklyDiscovery(coldUser, coldN || 30);
+                  mutate();
+                  setLastSteps(r.steps ?? null);
+                  setWeekly(r.explanations ?? []);
+                  toast(`Открытия недели готовы: ${r.tracks} треков (${r.mode}).`, "ok");
+                } catch (e: unknown) {
+                  toast(fmtErr(e), "err");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              disabled={busy}
+            >
+              <Sparkles className="w-4 h-4" /> Собрать открытия недели
+            </Button>
+          </div>
+          {weekly.length > 0 && (
+            <div className="mt-3 space-y-1.5">
+              {weekly.slice(0, 10).map((w) => (
+                <div key={w.track_id} className="text-xs text-muted">
+                  <span className="text-text font-medium">≈{w.score}</span> · {w.text}
+                </div>
+              ))}
+              {weekly.length > 10 && <div className="text-xs text-muted">…и ещё {weekly.length - 10}</div>}
+            </div>
+          )}
         </Card>
       </Section>
 

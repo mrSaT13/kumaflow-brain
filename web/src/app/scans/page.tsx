@@ -2,8 +2,10 @@
 
 import useSWR from "swr";
 import { useEffect, useRef, useState } from "react";
-import { Activity, FileText, RefreshCw, Sparkles, XCircle, Zap } from "lucide-react";
+import { Activity, FileText, RefreshCw, Sparkles, XCircle, Zap, Trash2, Play } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
+import { useConfirm } from "@/components/dialog";
+import { useToast, fmtErr } from "@/components/toasts";
 import { api, type LogLine } from "@/lib/api";
 import { fmtDate, PHASE_LABELS, STATUS_LABELS, STATUS_TONE } from "@/lib/format";
 
@@ -70,6 +72,8 @@ function LogView({ runId }: { runId: string | null }) {
 }
 
 export default function ScansPage() {
+  const [confirmNode, confirm] = useConfirm();
+  const toast = useToast();
   const { data: current, mutate: refreshCurrent } = useSWR("/api/scan/runs/current", () => api.currentRun(), {
     refreshInterval: 2000,
   });
@@ -81,33 +85,73 @@ export default function ScansPage() {
   const [tab, setTab] = useState<"active" | "history" | "logs">("active");
 
   async function cancel(id: string) {
-    if (!confirm("Отменить задачу? Воркер остановится на ближайшем чекпоинте.")) return;
+    if (!(await confirm({ title: "Отменить задачу?", message: "Воркер остановится на ближайшем чекпоинте.", confirmText: "Отменить", danger: true }))) return;
     setCancelling(id);
     try {
       await api.cancelRun(id);
       refreshRuns();
       refreshCurrent();
     } catch (e) {
-      alert(String(e));
+      toast(fmtErr(e), "err");
     } finally {
       setCancelling(null);
     }
   }
 
   async function start(kind: "library" | "analysis" | "lyrics" | "clusters" | "smart") {
-    let res: { run_id: string };
-    if (kind === "library") res = await api.startLibraryScan();
-    else if (kind === "analysis") res = await api.startAnalysis();
-    else if (kind === "lyrics") res = await api.startLyrics();
-    else if (kind === "smart") res = await api.startSmart();
-    else res = await api.startClusters();
-    setSelectedRun(res.run_id);
-    refreshRuns();
-    refreshCurrent();
+    try {
+      let res: { run_id: string };
+      if (kind === "library") res = await api.startLibraryScan();
+      else if (kind === "analysis") res = await api.startAnalysis();
+      else if (kind === "lyrics") res = await api.startLyrics();
+      else if (kind === "smart") res = await api.startSmart();
+      else res = await api.startClusters();
+      setSelectedRun(res.run_id);
+      refreshRuns();
+      refreshCurrent();
+      toast("Задача поставлена в очередь.", "ok");
+    } catch (e) {
+      toast(fmtErr(e), "err");
+    }
+  }
+
+  async function resumeAnalysis() {
+    // Продолжить с места остановки (повторные запуски пропускают уже готовые — resume через TrackFeatures IS NULL)
+    try {
+      const res = await api.startAnalysis();
+      setSelectedRun(res.run_id);
+      refreshRuns();
+      refreshCurrent();
+      toast("Анализ продолжен с места остановки.", "ok");
+    } catch (e) {
+      toast(fmtErr(e), "err");
+    }
+  }
+
+  async function purge() {
+    if (!(await confirm({ title: "Очистить историю задач?", message: "Удалит завершённые задачи и их логи, оставит 20 последних.", confirmText: "Очистить", danger: true }))) return;
+    try {
+      const r = await api.purgeRuns(20);
+      toast(`Очищено: задач ${r.deleted_runs}, логов ${r.deleted_logs}.`, "ok");
+      refreshRuns();
+    } catch (e) {
+      toast(fmtErr(e), "err");
+    }
+  }
+
+  async function clearHistory() {
+    if (!(await confirm({ title: "Очистить историю прослушиваний?", message: "Сотрёт PlayHistory + события у всех пользователей. Лайки и плейлисты не тронет.", confirmText: "Очистить", danger: true }))) return;
+    try {
+      const r = await api.clearAllHistory();
+      toast(`История очищена: ${r.cleared_history} записей.`, "ok");
+    } catch (e) {
+      toast(fmtErr(e), "err");
+    }
   }
 
   return (
     <>
+      {confirmNode}
       <PageHeader
         title="Задачи и логи"
         subtitle="История и live-статус всех фоновых задач"
@@ -119,6 +163,9 @@ export default function ScansPage() {
             <Button variant="ghost" onClick={() => start("analysis")}>
               <Sparkles className="w-4 h-4" /> Sonic
             </Button>
+            <Button variant="ghost" onClick={resumeAnalysis} title="Продолжить анализ с места остановки">
+              <Play className="w-4 h-4" /> Продолжить
+            </Button>
             <Button variant="ghost" onClick={() => start("lyrics")}>
               <FileText className="w-4 h-4" /> Тексты + AI
             </Button>
@@ -127,6 +174,12 @@ export default function ScansPage() {
             </Button>
             <Button variant="ghost" onClick={() => start("smart")}>
               <Sparkles className="w-4 h-4" /> Умные плейлисты
+            </Button>
+            <Button variant="ghost" onClick={purge} title="Удалить завершённые задачи и логи">
+              <Trash2 className="w-4 h-4" /> Очистить логи
+            </Button>
+            <Button variant="ghost" onClick={clearHistory} title="Стереть историю прослушиваний">
+              <Trash2 className="w-4 h-4" /> Очистить историю
             </Button>
           </div>
         }

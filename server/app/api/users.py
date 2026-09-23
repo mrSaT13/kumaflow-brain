@@ -157,7 +157,13 @@ def create_user_by_credentials(payload: TasteImportIn, db: Session = Depends(get
     db.commit()
     from app.services.taste_import import import_user_tastes
 
-    res = import_user_tastes(str(server.id), payload.username, payload.password)
+    try:
+        res = import_user_tastes(str(server.id), payload.username, payload.password)
+    except Exception as e:  # noqa: BLE001 — читаемая ошибка вместо голого 500
+        from app.core.logging import get_logger as _gl
+
+        _gl("api.users").exception("by-credentials failed")
+        return {"ok": False, "error": f"Импорт не удался: {str(e)[:400]}"}
     if res.get("status") != "success":
         return {"ok": False, "error": res.get("error")}
     u = db.get(MediaUser, res["user_id"])
@@ -504,6 +510,44 @@ def refresh_now(user_id: str, db: Session = Depends(get_db)):
     return {"ok": True, **res}
 
 
+@router.post("/{user_id}/refresh-async")
+def refresh_async(user_id: str, db: Session = Depends(get_db)):
+    """Фоновый синк вкусов: ставит refresh_tastes(user_id) в очередь, не блокируя HTTP (для PWA-кнопки)."""
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    from app.db.models import ScanLog as _SL
+    from app.db.models import ScanRun as _SR
+    from app.db.models import UserCredential as _UC
+    from app.services.queue import enqueue as _enq
+
+    u = _require_user(db, user_id)
+    row = db.query(_UC).filter_by(user_id=u.id).first()
+    if not row:
+        return {"ok": False, "error": "Пароль не запомнен — включите автообновление (vault) или импортируйте с паролем вручную"}
+    # защита от дубля: уже бежит одиночный синк этого юзера
+    busy = db.query(_SR).filter(
+        _SR.phase == "taste_refresh_single", _SR.status.in_(["queued", "running"])).first()
+    if busy:
+        return {"ok": False, "error": "Синк уже выполняется — дождитесь завершения", "run_id": str(busy.id)}
+    run = _SR(id=str(_uuid.uuid4()), server_id=u.server_id, phase="taste_refresh_single",
+              status="running", total_items=1, processed_items=0, started_at=_dt.utcnow(),
+              metadata_extra={"user_id": str(u.id)})
+    db.add(run)
+    db.flush()
+    from app.workers.tasks import refresh_tastes as _rt
+
+    job_id = _enq(_rt, str(run.id), job_timeout=600, user_id=str(u.id))
+    try:
+        run.metadata_extra = dict(run.metadata_extra or {}) | {"job_id": job_id}
+    except Exception:
+        run.metadata_extra = {"job_id": job_id}
+    db.add(_SL(id=str(_uuid.uuid4()), run_id=run.id, level="info",
+               message=f"Фоновый синк вкусов {u.username} (job {job_id})"))
+    db.commit()
+    return {"ok": True, "queued": True, "run_id": str(run.id), "job_id": job_id}
+
+
 def _resolve_track(db: Session, raw: str):
     """Наш uuid как есть, иначе external_id (мобильный id) -> трек."""
     from app.db.models import Track
@@ -606,6 +650,18 @@ def clear_history(user_id: str, db: Session = Depends(get_db)):
     u = _require_user(db, user_id)
     h = db.query(_PH).filter(_PH.user_id == str(u.id)).delete()
     e = db.query(_PE).filter(_PE.user_id == str(u.id)).delete()
+    db.commit()
+    return {'ok': True, 'cleared_history': h, 'cleared_events': e}
+
+
+@router.delete("/history")
+def clear_all_history(db: Session = Depends(get_db)):
+    """Стереть ВСЮ историю прослушиваний и событий (кнопка «Очистить историю»). Лайки/плейлисты не трогаем."""
+    from app.db.models import PlayEvent as _PE
+    from app.db.models import PlayHistory as _PH
+
+    h = db.query(_PH).delete()
+    e = db.query(_PE).delete()
     db.commit()
     return {'ok': True, 'cleared_history': h, 'cleared_events': e}
 

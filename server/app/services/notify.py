@@ -10,7 +10,7 @@ from app.core.logging import get_logger
 
 logger = get_logger("notify")
 
-KINDS = ("info", "success", "warn", "error")
+KINDS = ("info", "success", "warn", "error", "drift", "discovery")
 
 
 def notify(db, kind: str, title: str, body: str | None = None,

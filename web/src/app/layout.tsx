@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "@/styles/globals.css";
 import { MobileShell } from "@/components/MobileShell";
+import { ToastProvider } from "@/components/toasts";
 
 export const metadata: Metadata = {
   title: "KumaFlow Brain",
@@ -17,7 +18,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             __html: `(function(){try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.classList.add('dark');}catch(e){}})();`,
           }}
         />
-        <MobileShell>{children}</MobileShell>
+        <ToastProvider>
+          <MobileShell>{children}</MobileShell>
+        </ToastProvider>
       </body>
     </html>
   );
