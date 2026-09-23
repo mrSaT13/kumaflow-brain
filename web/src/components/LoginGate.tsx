@@ -37,7 +37,7 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
     }
   }
 
-  async function useToken() {
+  async function applyToken() {
     if (!token.trim()) {
       setErr("Вставьте токен");
       return;
@@ -111,11 +111,11 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
               <Input
                 value={token} onChange={(e) => setToken(e.target.value)} placeholder="вставьте токен"
                 type="password"
-                onKeyDown={(e) => { if (e.key === "Enter") void useToken(); }}
+                onKeyDown={(e) => { if (e.key === "Enter") void applyToken(); }}
               />
             </label>
             {err && <div className="text-xs text-red-500">{err}</div>}
-            <Button onClick={useToken} className="w-full">
+            <Button onClick={applyToken} className="w-full">
               <UserRound className="w-4 h-4" /> Использовать токен
             </Button>
             <div className="text-[11px] text-muted">
