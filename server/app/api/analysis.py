@@ -17,6 +17,41 @@ from app.services.queue import enqueue
 router = APIRouter()
 
 
+@router.get("/clap-status")
+def clap_status(db: Session = Depends(get_db)):
+    """Есть ли CLAP-модель в образе и сколько эмбеддингов в базе.
+
+    Если модели нет — «Открытия недели» считаются как cold-start fallback,
+    а CLAP-audio всегда стаб (см. services/clap.py).
+    """
+    from sqlalchemy import func as _func
+
+    from app.db.models import TrackEmbedding
+
+    available = False
+    files: list[dict] = []
+    try:
+        from app.services import clap as _clap
+
+        available = bool(_clap.is_available())
+        for p in sorted(_clap.MODELS_DIR.glob("*")):
+            if p.is_file():
+                try:
+                    files.append({"name": p.name, "bytes": int(p.stat().st_size)})
+                except OSError:
+                    files.append({"name": p.name, "bytes": 0})
+    except Exception:
+        pass
+    counts: dict[str, int] = {}
+    try:
+        for model, n in db.query(TrackEmbedding.model, _func.count()).group_by(TrackEmbedding.model).all():
+            counts[str(model)] = int(n)
+    except Exception:
+        pass
+    return {"available": available, "files": files, "embeddings": counts,
+            "audio_stub": True}
+
+
 @router.post("/clusters/build")
 def clusters_build(db: Session = Depends(get_db)):
     server = resolve_active_server(db)

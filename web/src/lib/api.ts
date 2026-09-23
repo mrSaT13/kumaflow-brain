@@ -348,6 +348,10 @@ export const api = {
     http<{ queued: boolean; job_id?: string; run_id?: string; error?: string }>(
       `/api/cron/${id}/run`, { method: "POST" },
     ),
+  clapStatus: () =>
+    http<{ available: boolean; files: { name: string; bytes: number }[]; embeddings: Record<string, number>; audio_stub: boolean }>(
+      `/api/analysis/clap-status`,
+    ),
   collabSimilar: (userId: string) =>
     http<{ users: { user_id: string; username: string; similarity: number; shared_likes: number; likes: number }[] }>(
       `/api/collab/similar-users/${userId}`,

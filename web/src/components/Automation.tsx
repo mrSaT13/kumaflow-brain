@@ -67,7 +67,26 @@ export default function Automation() {
   }
 
   const jobs = data?.jobs ?? [];
+  const { data: clap } = useSWR("/api/analysis/clap-status", () => api.clapStatus(), { refreshInterval: 30000 });
+  const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
   return (
+    <>
+    <Card>
+      <div className="flex items-center gap-2 flex-wrap text-sm">
+        <span className="font-medium">CLAP-модель</span>
+        <Badge tone={clap?.available ? "ok" : "warn"}>
+          {clap ? (clap.available ? "в образе" : "нет в образе") : "…"}
+        </Badge>
+        {clap && <span className="text-xs text-muted">эмбеддингов в базе: {clapN}</span>}
+        <Badge tone="warn">audio — стаб</Badge>
+      </div>
+      <div className="text-xs text-muted mt-2">
+        {clap && !clap.available
+          ? "Модели нет — «Открытия недели» считаются как cold-start (не семантика, а вкус+поведение). Причина обычно: сборка без сети (слой закэшировал пропуск) — пересоберите образ с доступом к HuggingFace."
+          : "Если модель есть, а эмбеддингов 0 — запустите задачу «CLAP-эмбеддинги» кнопкой «сейчас» ниже."}
+      </div>
+    </Card>
+    <div className="h-4" />
     <Card>
       {!data ? (
         <div className="text-sm text-muted">Загрузка…</div>
@@ -121,5 +140,6 @@ export default function Automation() {
         Тумблер — вкл/выкл задачу. Расписание — cron «мин час * * день-недели». «Сейчас» ставит задачу в фон (прогресс в «Задачи и логи»). Всё персональное (daily, smart, открытия) считается отдельно под каждого пользователя.
       </div>
     </Card>
+    </>
   );
 }
