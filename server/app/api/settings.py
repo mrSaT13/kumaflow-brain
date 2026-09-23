@@ -241,3 +241,20 @@ async def test_bridge(payload: dict | None = None, db: Session = Depends(get_db)
         return {"ok": True, "status": 200, "body": health}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
+
+
+@router.get("/automation")
+def get_automation(db: Session = Depends(get_db)):
+    """Флаги автоматизации (БД, без перезапуска)."""
+    from app.services import automation as _auto
+
+    return {"ok": True, "flags": _auto.get_flags(db)}
+
+
+@router.put("/automation")
+def save_automation(payload: dict, db: Session = Depends(get_db)):
+    """Сохранить флаги автоматизации. Принимает только известные ключи."""
+    from app.services import automation as _auto
+
+    flags = _auto.set_flags(dict(payload or {}), db)
+    return {"ok": True, "flags": flags}

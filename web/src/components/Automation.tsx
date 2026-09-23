@@ -68,7 +68,22 @@ export default function Automation() {
 
   const jobs = data?.jobs ?? [];
   const { data: clap } = useSWR("/api/analysis/clap-status", () => api.clapStatus(), { refreshInterval: 30000 });
+  const { data: auto, mutate: mutateAuto } = useSWR("/api/settings/automation", () => api.getAutomation(), { refreshInterval: 10000 });
   const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
+
+  async function toggleLyrics() {
+    const cur = auto?.flags?.analysis_fetch_lyrics ?? true;
+    setBusy(true);
+    try {
+      await api.saveAutomation({ analysis_fetch_lyrics: !cur });
+      mutateAuto();
+      toast(!cur ? "Автоподтяжка текстов включена ✓" : "Автоподтяжка текстов выключена", !cur ? "ok" : "info");
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <>
     <Card>
@@ -82,9 +97,27 @@ export default function Automation() {
       </div>
       <div className="text-xs text-muted mt-2">
         {clap && !clap.available
-          ? "Модели нет — «Открытия недели» считаются как cold-start (не семантика, а вкус+поведение). Причина обычно: сборка без сети (слой закэшировал пропуск) — пересоберите образ с доступом к HuggingFace."
+          ? "Модели нет — «Открытия недели» считаются как cold-start. Скачать один раз на сервере: docker compose exec backend python -m ml.download_clap (ляжет в volume deploy/models, переживёт пересборки), затем «CLAP-эмбеддинги» → «сейчас»."
           : "Если модель есть, а эмбеддингов 0 — запустите задачу «CLAP-эмбеддинги» кнопкой «сейчас» ниже."}
       </div>
+    </Card>
+    <div className="h-4" />
+    <Card>
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={auto?.flags?.analysis_fetch_lyrics ?? true}
+          disabled={busy}
+          onChange={toggleLyrics}
+          className="w-4 h-4 accent-black dark:accent-white shrink-0"
+        />
+        <span>
+          <span className="font-medium text-sm">Тексты + AI-настроение следом за анализом</span>
+          <span className="text-xs text-muted block">
+            Каждый проанализированный трек сразу тянет текст (LRCLIB) и AI-настроение в настроение-трека. Акустику (energy/valence) не перезаписывает — только добирает. Без AI-провайдера сохраняется только текст.
+          </span>
+        </span>
+      </label>
     </Card>
     <div className="h-4" />
     <Card>

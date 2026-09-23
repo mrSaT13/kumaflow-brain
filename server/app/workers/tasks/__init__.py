@@ -879,6 +879,7 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                 cfg = {}
 
         ok = fail = n_local = n_stream = total_processed = 0
+        n_lyr = n_lyr_ai = 0
         while True:
             # берём следующую пачку непроанализированных
             with session_scope() as db:
@@ -999,6 +1000,15 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                             _write_mood_tags(Path(_local_for_tags), feats, backup=s.mutagen_writeback_backup)
                     except Exception as _e:
                         logger.warning("mutagen writeback failed for {}: {}", src, _e)
+                    # --- AUTO-LYRICS: текст + AI-настроение сразу (тумблер automation) ---
+                    try:
+                        _lr = _auto_lyrics_for_track(str(tid))
+                        if _lr == "lyrics+ai":
+                            n_lyr_ai += 1
+                        elif _lr == "lyrics":
+                            n_lyr += 1
+                    except Exception:
+                        pass
                     ok += 1
                     try:
                         _dt = time.monotonic() - t0
@@ -1029,6 +1039,8 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                 q = q.filter(TrackFeatures.track_id.is_(None))
             remaining = q.count()
         summary = f"Готово — ок: {ok}, ошибок: {fail} (локальные файлы: {n_local}, стрим из Navidrome: {n_stream})."
+        if n_lyr or n_lyr_ai:
+            summary += f" Тексты следом: {n_lyr_ai} с AI-настроением, {n_lyr} только текст."
         if remaining > 0:
             summary += f" Осталось без анализа: {remaining} (прервано/ошибка?)."
         else:
@@ -1062,7 +1074,8 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
             except Exception as _ce:  # noqa: BLE001
                 logger.warning("analysis auto-continue failed: {}", _ce)
                 _append_log(run_id, "warn", f"Автопродолжение не встало: {_ce}")
-        return {"status": "success", "ok": ok, "failed": fail, "remaining": remaining, "total": total_pending_initial}
+        return {"status": "success", "ok": ok, "failed": fail, "remaining": remaining, "total": total_pending_initial,
+                "lyrics": n_lyr, "lyrics_ai": n_lyr_ai}
     except Exception as e:  # noqa: BLE001
         logger.exception("sonic_analysis failed: {}", e)
         _append_log(run_id, "error", str(e))
@@ -1256,6 +1269,62 @@ def lyrics_fetch_one(track_id: str) -> dict:
     return {"status": "success", "track_id": track_id, "ai_analyzed": bool(ai_result)}
 
 
+def _auto_lyrics_for_track(tid: str) -> str:
+    """Автоподтяжка текста + AI-настроения после sonic-анализа (тумблер automation).
+
+    Best-effort: никогда не валит анализ. Акустические valence/arousal/energy
+    AI-сентиментом НЕ перезаписываем — только добираем текст, moods и ai_* ключи.
+    Возвращает: 'lyrics+ai' | 'lyrics' | 'none' | 'skip'.
+    """
+    try:
+        from app.services import automation as _auto
+
+        if not _auto.analysis_fetch_lyrics_enabled():
+            return "skip"
+    except Exception:
+        return "skip"
+    try:
+        with session_scope() as db:
+            if db.query(Lyrics).filter(Lyrics.track_id == tid, Lyrics.provider == "lrclib").first():
+                return "skip"
+            t = db.get(Track, tid)
+            if not t:
+                return "none"
+            artist, title, album, dur = t.artist_name, t.title, t.album_name, t.duration_sec
+        res = lyrics_svc.fetch(artist=artist or "", title=title or "", album=album, duration_sec=dur)
+        if not res or not res.get("text"):
+            return "none"
+        try:
+            ai_res = lyrics_ai.analyze(res["text"])
+        except Exception:
+            ai_res = None
+        with session_scope() as db:
+            if not db.query(Lyrics).filter(Lyrics.track_id == tid, Lyrics.provider == "lrclib").first():
+                db.add(Lyrics(track_id=tid, provider="lrclib", text=res["text"],
+                              synced=res.get("synced"), language=res.get("language"),
+                              source_url=res.get("source_url")))
+            if ai_res:
+                f = db.get(TrackFeatures, tid)
+                if f is None:
+                    f = TrackFeatures(track_id=tid)
+                    db.add(f)
+                moods = (f.mood_labels or []) + ai_res.get("moods", [])
+                f.mood_labels = list(dict.fromkeys([str(m).lower() for m in moods if str(m).strip()]))[:8]
+                mv = dict(f.mood_vector or {})
+                if ai_res.get("sentiment"):
+                    mv["ai_sentiment"] = ai_res["sentiment"]
+                if ai_res.get("language"):
+                    mv["ai_language"] = ai_res["language"]
+                if ai_res.get("themes"):
+                    mv["ai_themes"] = ai_res["themes"]
+                f.mood_vector = mv
+            db.commit()
+        return "lyrics+ai" if ai_res else "lyrics"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("auto lyrics failed for {}: {}", tid, e)
+        return "none"
+
+
 def analyze_single(run_id: str, track_id: str) -> dict:
     """Sonic-анализ одного трека (кнопка на странице трека)."""
     from app.core.config import get_settings
@@ -1318,8 +1387,15 @@ def analyze_single(run_id: str, track_id: str) -> dict:
             if run:
                 run.processed_items = 1
         _append_log(run_id, "info", f"Готово: {label} — tempo {feats.get('tempo_bpm')}, key {feats.get('key_name')}")
+        _lr = "skip"
+        try:
+            _lr = _auto_lyrics_for_track(str(track_id))
+            if _lr in ("lyrics", "lyrics+ai"):
+                _append_log(run_id, "info", f"Текст подтянут следом ({_lr})")
+        except Exception:
+            pass
         _finish_run(run_id, "success")
-        return {"status": "success", "track_id": track_id}
+        return {"status": "success", "track_id": track_id, "lyrics": _lr}
     except Exception as e:  # noqa: BLE001
         _append_log(run_id, "error", str(e))
         _finish_run(run_id, "failure", str(e))

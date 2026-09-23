@@ -352,6 +352,12 @@ export const api = {
     http<{ available: boolean; files: { name: string; bytes: number }[]; embeddings: Record<string, number>; audio_stub: boolean }>(
       `/api/analysis/clap-status`,
     ),
+  getAutomation: () =>
+    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean } }>(`/api/settings/automation`),
+  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean }) =>
+    http<{ ok: boolean; flags: Record<string, unknown> }>(
+      `/api/settings/automation`, { method: "PUT", body: JSON.stringify(flags) },
+    ),
   collabSimilar: (userId: string) =>
     http<{ users: { user_id: string; username: string; similarity: number; shared_likes: number; likes: number }[] }>(
       `/api/collab/similar-users/${userId}`,
