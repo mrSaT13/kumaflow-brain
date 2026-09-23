@@ -19,7 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Сначала только зависимости — слой кэшируется, пока не меняется requirements.
 COPY server/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
-# CLAP модель кэшируем отдельно (build-cache): если ml/models уже скачана — skip
+# CLAP модель кэшируем отдельно (build-cache): если ml/models уже скачана — skip.
+# ВАЖНО: бинарники модели (~350МБ) в git не кладём (лимит GitHub 100МБ/файл,
+# models/ в .gitignore/.dockerignore) — качаем с HuggingFace при сборке.
+# ARG ниже — ручной cache-buster: если слой закэшировал пропуск без сети,
+# поднимите значение и пересоберите, иначе кэш будет переиспользовать промах.
+ARG CLAP_BUSTER=1
 COPY server/ml /app/ml
 RUN python -m ml.download_clap || echo "clap download skipped (offline build)"
 

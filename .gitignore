@@ -28,6 +28,7 @@ server/data/
 server/ml/models/
 deploy/navidrome_data/
 deploy/music/
+deploy/models/
 pgdata/
 
 # --- редакторы/ОС ---

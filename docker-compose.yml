@@ -80,6 +80,12 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
+    volumes:
+      # CLAP-модель (~350МБ) — отдельно от образа: скачивается один раз
+      # на сервере и переживает пересборки. Пусто = backend работает
+      # без CLAP («Открытия недели» = cold-start, видно в Автоматизации).
+      # Без :ro — чтобы качать прямо в volume: docker compose exec backend python -m ml.download_clap
+      - ./deploy/models:/app/ml/models
 
   worker:
     image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
@@ -123,6 +129,9 @@ services:
       ANALYSIS_MAX_TRACKS_PER_RUN: 0  # 0 = весь остаток за раз
     # volumes:
     #   - /путь/к/музыке/на/хосте:/music:ro
+    volumes:
+      # та же CLAP-модель, что у backend (эмбеддинги считает воркер)
+      - ./deploy/models:/app/ml/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.workers.rq_worker"]
