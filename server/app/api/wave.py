@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -125,18 +126,48 @@ def wave_live(user_id: str, db: Session = Depends(get_db)):
     tracks: list[dict] = []
     cur_idx = 0
     cur_raw = str(entry.get('current_track_id') or '')
+    found: list = []
     for raw in entry.get('queue') or []:
         t = _gt(db, str(raw))
         if t is None:
             continue
+        found.append((str(raw), t))
+        if len(found) >= 50:
+            break
+    # Настроение/энергия/темп из sonic+AI анализа — иначе на вебе «без настроения».
+    feats: dict[str, Any] = {}
+    try:
+        from app.db.models import TrackFeatures as _TF
+
+        feats = {str(f.track_id): f for f in
+                 db.query(_TF).filter(
+                     _TF.track_id.in_([str(t.id) for _, t in found])).all()}
+    except Exception:
+        feats = {}
+    for raw, t in found:
         tid = str(t.id)
         if cur_raw and (cur_raw == tid or cur_raw == str(raw)):
             cur_idx = len(tracks)
+        try:
+            moods = list((feats[tid].mood_labels or [])) if tid in feats else []
+        except Exception:
+            moods = []
+        try:
+            energy = float(feats[tid].energy) \
+                if tid in feats and feats[tid].energy is not None else None
+        except (TypeError, ValueError):
+            energy = None
+        try:
+            tempo = float(feats[tid].tempo_bpm) \
+                if tid in feats and feats[tid].tempo_bpm else None
+        except (TypeError, ValueError):
+            tempo = None
         tracks.append({'track_id': tid, 'title': t.title,
                        'artist_name': t.artist_name, 'album_name': t.album_name,
                        'genre': t.genre, 'cover_art_id': t.cover_art_id,
+                       'mood': str(moods[0]).lower() if moods else None,
+                       'moods': [str(m).lower() for m in moods[:3]],
+                       'energy': energy, 'tempo': tempo,
                        'reason': 'очередь телефона'})
-        if len(tracks) >= 50:
-            break
     return {'ok': True, 'user_id': str(u.id), 'queue': tracks,
             'current': cur_idx, 'age_sec': int(age)}

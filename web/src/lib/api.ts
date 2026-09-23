@@ -405,7 +405,7 @@ export const api = {
   waveLive: (user_id: string) =>
     http<{
       ok: boolean; user_id: string; current: number; age_sec?: number | null; stale?: boolean;
-      queue: { track_id: string; title: string; artist_name?: string; album_name?: string | null; genre?: string | null; cover_art_id?: string | null; reason: string }[];
+      queue: { track_id: string; title: string; artist_name?: string; album_name?: string | null; genre?: string | null; cover_art_id?: string | null; reason: string; mood?: string | null; moods?: string[]; energy?: number | null; tempo?: number | null }[];
     }>(`/api/wave/live?user_id=${encodeURIComponent(user_id)}`),
   listCron: () =>
     http<{ jobs: { id: string; name: string; kind: string; cron_expr: string; enabled: boolean; last_run_at?: string | null }[] }>(

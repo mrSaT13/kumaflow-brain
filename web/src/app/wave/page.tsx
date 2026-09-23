@@ -180,7 +180,7 @@ export default function WavePage() {
           if (prev.map((t) => t.track_id).join("|") === ids) return prev;
           setPlayingIdx(Math.max(0, Math.min(live.current ?? 0, live.queue.length - 1)));
           return live.queue.map((t) => ({
-            ...t, score: 1, mood: null, moods: [], energy: null, tempo: null,
+            ...t, score: 1,
           })) as WaveTrack[];
         });
       } catch {

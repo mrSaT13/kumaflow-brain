@@ -464,7 +464,16 @@ def ai_generate(payload: dict, db: Session = Depends(get_db)):
     for pos, tid in enumerate(ids):
         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
     db.commit()
-    return {"playlist_id": str(p.id), "name": res.get("name"), "comment": res.get("comment"), "tracks": len(ids), "from_fallback": res.get("from_fallback"), "ids": ids}
+    # ИИ-микс тоже уезжает в Navidrome за общим тумблером (как daily/smart/weekly)
+    push: dict | None = None
+    try:
+        from app.services.playlist_push import maybe_auto_push as _push
+
+        push = _push(db, str(p.id))
+    except Exception:
+        push = None
+    return {"playlist_id": str(p.id), "name": res.get("name"), "comment": res.get("comment"), "tracks": len(ids), "from_fallback": res.get("from_fallback"), "ids": ids,
+            "pushed": bool(push and push.get("ok")), "push": push}
 
 
 @router.post("/{playlist_id}/export")

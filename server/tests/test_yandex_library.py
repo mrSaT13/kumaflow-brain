@@ -208,8 +208,13 @@ def test_corrections_list_and_revert():
         db.commit()
         corr = lib.apply_metadata_corrections(db, str(t.id), {"year": 1975})
         assert corr["year"] == [2026, 1975]
-        db.add(TrackMetadataEnrich(track_id=str(t.id), source="yandex",
-                                   data={"title": "x", "corrected": corr}))
+        ex = db.query(TrackMetadataEnrich).filter_by(
+            track_id=str(t.id), source="yandex").first()
+        if ex is None:
+            db.add(TrackMetadataEnrich(track_id=str(t.id), source="yandex",
+                                       data={"title": "x", "corrected": corr}))
+        else:
+            ex.data = {"title": "x", "corrected": corr}
         db.commit()
         lst = lib.list_corrections(db)
         assert lst["total"] >= 1

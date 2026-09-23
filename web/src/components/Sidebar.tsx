@@ -53,7 +53,7 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
         <img src="/app-icon.png" alt="KumaFlow" className="w-6 h-6 rounded-full" />
         <div>
           <div className="font-semibold tracking-tight">KumaFlow</div>
-          <div className="text-[11px] text-muted">brain · v0.1.0</div>
+          <div className="text-[11px] text-muted">brain · v0.2.0</div>
         </div>
       </div>
       <nav suppressHydrationWarning className="flex-1 px-3 space-y-3 overflow-y-auto">
@@ -93,7 +93,7 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
               <img src="/app-icon.png" alt="KumaFlow" className="w-6 h-6 rounded-full" />
               <div>
                 <div className="font-semibold tracking-tight">KumaFlow</div>
-                <div className="text-[11px] text-muted">brain · v0.1.0</div>
+                <div className="text-[11px] text-muted">brain · v0.2.0</div>
               </div>
               <button onClick={onClose} className="ml-auto kuma-pill text-xs">✕</button>
             </div>
