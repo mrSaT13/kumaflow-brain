@@ -1,26 +1,21 @@
 "use client";
 
 import useSWR from "swr";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Check, Download, Heart, History, ListMusic } from "lucide-react";
 import { Button, Card } from "@/components/ui";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 import { fmtDate } from "@/lib/format";
 
 /** Яндекс Музыка (Marshal): персонифицированный токен, импорт вкуса/истории/чартов. */
 export default function YandexImport() {
-  const { data: users } = useSWR("/api/users", () => api.listUsers());
-  const [userId, setUserId] = useState("");
+  const { users, userId, setUserId } = useCurrentUser();
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [report, setReport] = useState<string | null>(null);
   const toast = useToast();
-
-  useEffect(() => {
-    const list = users?.users ?? [];
-    if (!userId && list.length > 0) setUserId(list[0].id);
-  }, [users, userId]);
 
   const { data: tokStatus, mutate: mutateTok } = useSWR(
     userId ? `/api/yandex/tok-${userId}` : null,
@@ -87,7 +82,7 @@ export default function YandexImport() {
         <label className="block">
           <div className="text-xs text-muted mb-1">Пользователь мозга</div>
           <select className="kuma-input" value={userId} onChange={(e) => setUserId(e.target.value)}>
-            {(users?.users ?? []).map((u) => (
+            {users.map((u) => (
               <option key={u.id} value={u.id}>{u.username}</option>
             ))}
           </select>

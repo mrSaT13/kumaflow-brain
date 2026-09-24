@@ -301,6 +301,7 @@ export const api = {
         external_id?: string | null; track_id?: string | null; title: string;
         artist_name: string; album_name?: string | null; username?: string | null;
         minutes_ago?: number | null; player?: string | null; cover_art_id?: string | null;
+        live_age_sec?: number | null;
       } | null;
       next: {
         track_id: string; title: string; artist_name?: string; album_name?: string | null;

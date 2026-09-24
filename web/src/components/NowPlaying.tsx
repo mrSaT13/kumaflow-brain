@@ -7,26 +7,17 @@ import { Radio, RefreshCw, Shuffle } from "lucide-react";
 import { Card } from "@/components/ui";
 import TrackCover from "@/components/TrackCover";
 import { api } from "@/lib/api";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 /** Виджет «Слушает сейчас + паутина next-5». Polling 10с, без вебсокетов (MVP). */
 export default function NowPlaying({ userId: propUserId }: { userId?: string }) {
-  const { data: users } = useSWR(propUserId ? null : "/api/users", () => api.listUsers());
-  const [selUser, setSelUser] = useState("");
+  const shared = useCurrentUser();
   const [offset, setOffset] = useState(0);
   const [seed, setSeed] = useState("");
-  useEffect(() => {
-    if (propUserId || selUser) return;
-    try {
-      const saved = localStorage.getItem("nowplaying_user") ?? "";
-      if (saved) setSelUser(saved);
-    } catch { /* ignore */ }
-  }, [propUserId, selUser]);
-  const userId = propUserId ?? selUser;
-  useEffect(() => {
-    if (!propUserId && selUser) {
-      try { localStorage.setItem("nowplaying_user", selUser); } catch { /* ignore */ }
-    }
-  }, [propUserId, selUser]);
+  // Общий юзер веба; пропсом можно зафиксировать (без селектора).
+  const userId = propUserId ?? shared.userId;
+  const setSelUser = shared.setUserId;
+  const usersList = shared.users;
   const { data, mutate } = useSWR(
     `/api/now-playing?u=${userId ?? "-"}&o=${offset}&s=${seed}`,
     () => api.nowPlaying(userId, 5, offset, seed || undefined),
@@ -48,21 +39,21 @@ export default function NowPlaying({ userId: propUserId }: { userId?: string }) 
     const idleUser = (data as { idle_for_user?: string }).idle_for_user;
     const lastAge = (data as { last_minutes_ago?: number }).last_minutes_ago;
     const wasStale = (data as { stale_dropped?: boolean }).stale_dropped;
-    const selName = (users?.users ?? []).find((u) => u.external_id === idleUser)?.username ?? idleUser;
+    const selName = usersList.find((u) => u.external_id === idleUser)?.username ?? idleUser;
     return (
       <Card>
         <div className="flex items-center gap-2 text-xs mb-3 flex-wrap">
           <span className="text-muted">Слушает сейчас</span>
           <span className="flex-1" />
-          {!propUserId && (users?.users?.length ?? 0) > 0 && (
+          {!propUserId && (usersList.length ?? 0) > 0 && (
             <select
               className="kuma-input kuma-input-inline !py-1 !px-2 text-xs w-36"
-              value={selUser}
+              value={userId}
               onChange={(e) => setSelUser(e.target.value)}
               title="Чей эфир смотреть"
             >
               <option value="">все</option>
-              {(users?.users ?? []).map((u) => (
+              {usersList.map((u) => (
                 <option key={u.id} value={u.id}>{u.username}</option>
               ))}
             </select>
@@ -89,15 +80,15 @@ export default function NowPlaying({ userId: propUserId }: { userId?: string }) 
         </Link>
         <span className="text-muted">открыть живую очередь мозга</span>
         <span className="flex-1" />
-        {!propUserId && (users?.users?.length ?? 0) > 0 && (
+        {!propUserId && (usersList.length ?? 0) > 0 && (
           <select
             className="kuma-input kuma-input-inline !py-1 !px-2 text-xs w-36"
-            value={selUser}
+            value={userId}
             onChange={(e) => { setSelUser(e.target.value); setOffset(0); }}
             title="Чей вкус учитывать в next-5"
           >
             <option value="">вкус: общий</option>
-            {(users?.users ?? []).map((u) => (
+            {usersList.map((u) => (
               <option key={u.id} value={u.id}>{u.username}</option>
             ))}
           </select>
@@ -146,9 +137,13 @@ export default function NowPlaying({ userId: propUserId }: { userId?: string }) 
               <span className={`relative inline-flex rounded-full h-2 w-2 ${stale ? "bg-amber-500" : "bg-green-500"}`} />
             </span>
             Слушает сейчас{playing.username ? ` · ${playing.username}` : ""}
-            {typeof age === "number" && age >= 1 && (
+            {playing.player === "phone" ? (
+              <span className="normal-case tracking-normal" title="Трек из живой очереди телефона, а не из Navidrome">
+                · телефон{(playing as { live_age_sec?: number }).live_age_sec != null ? ` · ${(playing as { live_age_sec?: number }).live_age_sec} сек назад` : ""}
+              </span>
+            ) : typeof age === "number" && age >= 1 ? (
               <span className="normal-case tracking-normal">· {age} мин назад{stale ? " (пауза/залипло?)" : ""}</span>
-            )}
+            ) : null}
           </div>
           <div className="mt-1 font-semibold truncate">
             {playing.artist_name} — {playing.title}

@@ -34,9 +34,12 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 # только pytorch .bin, ONNX нет вообще).
 # ARG ниже — ручной cache-buster: если слой закэшировал пропуск без сети,
 # поднимите значение и пересоберите, иначе кэш будет переиспользовать промах.
-ARG CLAP_BUSTER=3
+ARG CLAP_BUSTER=4
 COPY server/ml /app/ml
-RUN python -m ml.download_clap && ls -lh /app/ml/models && echo "--- onnx:" && ls -l /app/ml/models/*.onnx
+# Два вызова: -m (пакет) и прямой путь (если namespace-импорт чудной).
+# Fail-loud: download_clap даёт exit 1 без модели — сборка КРАСНЕЕТ,
+# а не запекает молча пустой образ того же размера.
+RUN (python -m ml.download_clap || python /app/ml/download_clap.py) && ls -lh /app/ml/models && echo "--- onnx:" && ls -l /app/ml/models/*.onnx
 
 # Затем код. Мусор (.venv, *.db, логи, кэш) отсекается корневым .dockerignore.
 COPY server/app /app/app

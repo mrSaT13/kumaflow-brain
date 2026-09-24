@@ -7,6 +7,7 @@ import { ArrowDown, ArrowRight, Heart, Loader2, Play, ThumbsDown } from "lucide-
 import { Button, Card, PageHeader, Section } from "@/components/ui";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 import TrackCover from "@/components/TrackCover";
 import { moodLook } from "@/lib/moodStyle";
 
@@ -56,8 +57,7 @@ const COMP_LABELS: { key: keyof WaveComp; label: string }[] = [
 ];
 
 export default function WavePage() {
-  const { data: users } = useSWR("/api/users", () => api.listUsers());
-  const [userId, setUserId] = useState("");
+  const { users, userId, setUserId } = useCurrentUser();
   const [mood, setMood] = useState("");
   const [queue, setQueue] = useState<WaveTrack[]>([]);
   const [playingIdx, setPlayingIdx] = useState(0);
@@ -86,10 +86,7 @@ export default function WavePage() {
   const busyRef = useRef(false);
   busyRef.current = busy;
 
-  const ids = useMemo(() => users?.users ?? [], [users]);
-  useEffect(() => {
-    if (!userId && ids.length > 0) setUserId(ids[0].id);
-  }, [ids, userId]);
+  const ids = useMemo(() => users ?? [], [users]);
 
   const { data: profile } = useSWR(userId ? ["wave-moods", userId] : null, () => api.userProfile(userId));
   const moodOptions = useMemo(() => (profile?.moods ?? []).map((m) => m.name), [profile]);
@@ -424,6 +421,11 @@ export default function WavePage() {
                       : `переход: ${cur.mood} → ${nxt.mood}`
                     : "мозг подбирает по аудио + вкусу + коллаборативке"}
                 </span>
+                {followPhone && (cur.reason === "очередь телефона") && phoneAge != null && phoneAge > 60 && (
+                  <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title="Телефон давно не публиковал очередь — текущий трек может уже смениться">
+                    очередь {phoneAge} сек назад — возможно устарело
+                  </span>
+                )}
                 {drift?.severity && (
                   <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title={drift.temp_banned_genres.length ? `Временно мимо: ${drift.temp_banned_genres.join(", ")}` : undefined}>
                     остываем: {drift.consecutive_skips} скипа подряд — энергию вниз

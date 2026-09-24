@@ -8,6 +8,7 @@ import { Button, Card, Input, PageHeader, Section } from "@/components/ui";
 import { PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api, type ArtistEntry } from "@/lib/api";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 import { genreIcon } from "@/lib/genreIcon";
 import { genreColor } from "@/lib/genreStyle";
 
@@ -41,6 +42,7 @@ export default function ColdStartPage() {
   const toast = useToast();
   const [pwdOpen, setPwdOpen] = useState(false);
   const [page, setPage] = useState(0);
+  const { users: sharedUsers, userId: sharedUserId, setUserId: setSharedUserId } = useCurrentUser();
   const [userId, setUserId] = useState("");
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
   const [selectedArtists, setSelectedArtists] = useState<string[]>([]);
@@ -57,6 +59,10 @@ export default function ColdStartPage() {
   const [playlistId, setPlaylistId] = useState<string | null>(null);
 
   const { data: usersData } = useSWR("/api/users", () => api.listUsers());
+  // Общий юзер веба — дефолт; ручной выбор тут тоже становится общим.
+  useEffect(() => {
+    if (!userId && sharedUserId) setUserId(sharedUserId);
+  }, [sharedUserId, userId]);
   const { data: genresData } = useSWR("/api/library/genres", () => api.genres());
 
   useEffect(() => {
@@ -188,9 +194,9 @@ export default function ColdStartPage() {
       <Section title="Пользователь">
         <Card>
           <div className="flex flex-col md:flex-row gap-3 md:items-center">
-            <select className="kuma-input kuma-input-inline md:w-72" value={userId} onChange={(e) => { setUserId(e.target.value); setSeedResult(null); setPlaylistId(null); }}>
+            <select className="kuma-input kuma-input-inline md:w-72" value={userId} onChange={(e) => { setUserId(e.target.value); setSharedUserId(e.target.value); setSeedResult(null); setPlaylistId(null); }}>
               <option value="">— выберите пользователя —</option>
-              {(usersData?.users ?? []).map((u) => (
+              {(usersData?.users ?? sharedUsers).map((u) => (
                 <option key={u.id} value={u.id}>{u.username}</option>
               ))}
             </select>

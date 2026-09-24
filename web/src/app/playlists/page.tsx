@@ -8,6 +8,7 @@ import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/c
 import { useConfirm } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 import { fmtDate } from "@/lib/format";
 
 function usePersisted<T>(key: string, initial: T): [T, (v: T) => void] {
@@ -33,9 +34,9 @@ export default function PlaylistsPage() {
   const toast = useToast();
   const [showHidden, setShowHidden] = usePersisted<boolean>("kf:pl:showHidden", false);
   const { data, mutate } = useSWR(["/api/playlists", showHidden], () => api.listPlaylists(showHidden), { refreshInterval: 4000 });
-  const { data: usersData } = useSWR("/api/users", () => api.listUsers());
+  const { users: usersList, userId: coldUser, setUserId: setColdUser } = useCurrentUser();
+  const usersData = { users: usersList };
   const [busy, setBusy] = useState(false);
-  const [coldUser, setColdUser] = useState("");
   const [coldN, setColdN] = useState(30);
   const [aiQuery, setAiQuery] = useState("");
   const [plQuery, setPlQuery] = usePersisted<string>("kf:pl:q", "");

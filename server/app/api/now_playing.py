@@ -316,13 +316,66 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
         return {"playing": None, "next": [], "source": "no-server"}
 
     want_username: str | None = None
+    brain_user = None
     if user_id:
         try:
             u = db.get(MediaUser, user_id)
+            if u is None:
+                try:
+                    u = db.query(MediaUser).filter(
+                        MediaUser.external_id == str(user_id)).first()
+                except Exception:
+                    u = None
             if u is not None:
+                brain_user = u
                 want_username = u.external_id
         except Exception:
             want_username = None
+
+    # Телефон — источник правды: если мобила недавно публиковала живую
+    # очередь (publish при каждом изменении, TTL 10 мин), "слушает сейчас" —
+    # её current, а не залипшая сессия Navidrome. Иначе виджет показывал
+    # трек из Navidrome, а клиент реально играл другой.
+    if brain_user is not None:
+        try:
+            from app.api.wave import _live_age as _w_age
+            from app.api.wave import _live_get as _w_get
+            from app.services.track_resolve import get_track as _gt
+
+            entry = _w_get(str(brain_user.id))
+            if entry and (entry.get("queue") or []):
+                age = _w_age(str(brain_user.id), entry)
+                if age <= 300:
+                    q = [str(x) for x in (entry.get("queue") or []) if str(x)]
+                    cur_raw = str(entry.get("current_track_id") or "") or (q[0] if q else "")
+                    t = _gt(db, cur_raw) if cur_raw else None
+                    if t is not None:
+                        try:
+                            from app.services.covers import resolve_track_cover_id as _rc2
+
+                            cover = _rc2(db, t)
+                        except Exception:
+                            cover = t.cover_art_id or None
+                        nxt = []
+                        try:
+                            nxt = _next_for_track(db, str(t.id), str(brain_user.id),
+                                                  n=n, offset=offset, jitter_seed=seed)
+                        except Exception:
+                            nxt = []
+                        return {"playing": {
+                            "external_id": t.external_id,
+                            "track_id": str(t.id),
+                            "title": t.title,
+                            "artist_name": t.artist_name,
+                            "album_name": t.album_name,
+                            "username": brain_user.username,
+                            "minutes_ago": 0,
+                            "player": "phone",
+                            "cover_art_id": cover,
+                            "live_age_sec": int(age),
+                        }, "next": nxt, "source": "phone", "offset": offset}
+        except Exception:
+            pass
 
     async def _fetch() -> list[dict]:
         from app.services.navidrome.client import SubsonicAuth, SubsonicClient

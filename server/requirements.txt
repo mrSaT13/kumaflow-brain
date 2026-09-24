@@ -24,6 +24,9 @@ mutagen==1.47.0
 onnxruntime==1.19.2
 voyager==2.0.1
 huggingface_hub==0.26.2
+# hf-xet обязателен: Xenova-репо лежат на XET-CAS, без него snapshot_download
+# падает и bake выходит пустым (было: молча тот же 1.79GiB, стало: красный CI).
+hf-xet
 transformers==4.46.3
 tokenizers==0.20.3
 apscheduler==3.10.4
