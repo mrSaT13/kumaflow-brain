@@ -18,6 +18,7 @@ node_modules/
 out/
 dist/
 .turbo/
+*.tsbuildinfo
 
 # --- данные и логи (не едут в git и в docker-контекст) ---
 *.db
