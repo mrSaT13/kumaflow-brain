@@ -48,7 +48,7 @@
 |---|---|---|
 | ![Плейлисты](docs/screenshots/playlists.png) | ![Холодный старт](docs/screenshots/cold-start.png) | ![Вкусы](docs/screenshots/taste-cloud.png) |
 
-> Положи файлы в `docs/screenshots/` с этими именами — README подхватит их сам. Другие скрины из подборки в README не кладём (причина — ниже).
+
 
 ## 🏗 Архитектура
 
