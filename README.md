@@ -80,7 +80,7 @@ graph LR
 
 ```bash
 git clone https://github.com/mrSaT13/kumaflow-brain.git kumaflow && cd kumaflow
-nano docker-compose.yml   # вписать 3x CHANGE_ME (см. таблицу ниже)
+nano docker-compose.yml   # заменить все CHANGE_ME_*: пароль PG, BRAIN_API_TOKEN (openssl rand -hex 32), URL Navidrome
 docker compose pull && docker compose up -d
 curl -s http://localhost:8000/api/health   # {"status":"ok"}
 ```

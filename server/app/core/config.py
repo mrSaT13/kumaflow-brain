@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -119,6 +119,38 @@ class Settings(BaseSettings):
     @property
     def redis_url(self) -> str:
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    # Поля-секреты: значение-плейсхолдер из публичного docker-compose.yml
+    # (CHANGE_ME_*) никогда не является валидным секретом — оно известно всем.
+    # Пусто = фича выключена (auth off / vault off), это легально.
+    _SECRET_FIELDS = (
+        "brain_api_token",
+        "taste_vault_key",
+        "postgres_password",
+        "navidrome_password",
+        "openai_api_key",
+        "ollama_cloud_api_key",
+        "gemini_api_key",
+        "mistral_api_key",
+        "yandex_music_token",
+        "jellyfin_token",
+        "emby_token",
+    )
+
+    @model_validator(mode="after")
+    def _reject_placeholder_secrets(self):
+        bad = [
+            name.upper()
+            for name in self._SECRET_FIELDS
+            if "CHANGE_ME" in (str(getattr(self, name, "") or "").upper())
+        ]
+        if bad:
+            raise ValueError(
+                f"placeholder secret(s) not replaced: {', '.join(bad)}. "
+                "Впиши реальные значения в docker-compose.yml на сервере "
+                "(репозиторий публичный — плейсхолдеры знают все)."
+            )
+        return self
 
 
 @lru_cache

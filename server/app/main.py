@@ -35,6 +35,13 @@ from app.services.queue import init_redis, shutdown_redis
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
+    if settings.env == "prod" and not (settings.brain_api_token or "").strip():
+        import logging as _logging
+
+        _logging.getLogger("kumaflow").warning(
+            "BRAIN_API_TOKEN пуст: API без авторизации (доверенная LAN). "
+            "Для доступа извне задай токен: openssl rand -hex 32."
+        )
     init_db()
     # зависшие задачи прошлого запуска (queued/running) — в failure, иначе
     # новые запуски той же фазы вечно упираются в 409 «уже выполняется»,
