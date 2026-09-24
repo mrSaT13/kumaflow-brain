@@ -34,7 +34,7 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 # только pytorch .bin, ONNX нет вообще).
 # ARG ниже — ручной cache-buster: если слой закэшировал пропуск без сети,
 # поднимите значение и пересоберите, иначе кэш будет переиспользовать промах.
-ARG CLAP_BUSTER=5
+ARG CLAP_BUSTER=6
 COPY server/ml /app/ml
 # Два вызова: -m (пакет) и прямой путь (если namespace-импорт чудной).
 # Fail-loud: download_clap даёт exit 1 без модели — сборка КРАСНЕЕТ,

@@ -46,8 +46,22 @@ OPTIONAL = ["vocab.json", "merges.txt", "tokenizer_config.json",
             "special_tokens_map.json", "preprocessor_config.json"]
 
 
+# Пороги размеров: json-конфиги legitimately крошечные
+# (config.json=699B, special_tokens_map.json=280B, preprocessor_config=541B),
+# поэтому общий порог >1024 давал ложный FATAL при всех файлах на месте.
+MIN_SIZE = {
+    "clap_text.onnx": 10 * 1024 * 1024,   # ~127МБ
+    "clap_audio.onnx": 10 * 1024 * 1024,  # ~34МБ
+}
+DEFAULT_MIN = 100  # json/txt: достаточно непустого файла
+
+
+def _need(name: str) -> int:
+    return MIN_SIZE.get(name, DEFAULT_MIN)
+
+
 def _ok() -> bool:
-    return all((DST / name).exists() and (DST / name).stat().st_size > 1024
+    return all((DST / name).exists() and (DST / name).stat().st_size >= _need(name)
                for name in WANT.values())
 
 
@@ -119,7 +133,7 @@ def _hub_fetch(repo_path: str, dst: Path, tries: int = 3) -> bool:
         try:
             got = hf_hub_download(repo_id=MODEL, filename=repo_path, token=token)
             src = Path(got)
-            if src.exists() and src.stat().st_size > 1024:
+            if src.exists() and src.stat().st_size >= _need(dst.name):
                 shutil.copy2(src, dst)
                 print(f"[clap] hub {repo_path} -> {dst.name} "
                       f"({dst.stat().st_size // 1048576}MB, try {attempt})")
@@ -143,7 +157,7 @@ def _http_fetch(repo_path: str, dst: Path, tries: int = 3) -> bool:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=120) as r, open(dst, "wb") as f:
                 shutil.copyfileobj(r, f, length=1024 * 256)
-            if dst.stat().st_size > 1024:
+            if dst.stat().st_size >= _need(dst.name):
                 print(f"[clap] http {repo_path} -> {dst.name} "
                       f"({dst.stat().st_size // 1048576}MB, try {attempt})")
                 return True
@@ -160,14 +174,14 @@ if not _ok():
     print("[clap] fallback: per-file download via hub, then plain HTTPS...")
     for src_rel, dst_name in WANT.items():
         dst = DST / dst_name
-        if dst.exists() and dst.stat().st_size > 1024:
+        if dst.exists() and dst.stat().st_size >= _need(dst.name):
             continue
         if _hub_fetch(src_rel, dst):
             continue
         _http_fetch(src_rel, dst)
     for extra in OPTIONAL:
         dst = DST / extra
-        if not dst.exists() or dst.stat().st_size <= 1024:
+        if not dst.exists() or dst.stat().st_size < _need(extra):
             try:
                 _http_fetch(extra, dst, tries=1)
             except Exception:
