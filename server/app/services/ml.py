@@ -75,6 +75,42 @@ def _cosine(a, b) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+AUDIO_EMB_MODEL = "clap_audio"
+
+
+def _audio_weight() -> float:
+    """Вес audio_emb в гибриде. 0 = фича выключена → поведение 1в1 как раньше."""
+    try:
+        from app.core.config import get_settings as _gs
+
+        s = _gs()
+        if not bool(getattr(s, "clap_audio_enabled", False)):
+            return 0.0
+        return max(0.0, min(1.0, float(getattr(s, "clap_audio_weight", 0.7))))
+    except Exception:
+        return 0.0
+
+
+def _load_emb_map(db, model: str = AUDIO_EMB_MODEL) -> dict[str, Any]:
+    """track_id -> нормализованный np-вектор. Пусто = фолбек на librosa."""
+    if not _HAS_NP or _audio_weight() <= 0:
+        return {}
+    try:
+        rows = db.query(TrackEmbedding).filter(TrackEmbedding.model == model).all()
+    except Exception:
+        return {}
+    out: dict[str, Any] = {}
+    for r in rows:
+        try:
+            v = np.frombuffer(r.vector, dtype=np.float32).astype(np.float32)
+            n = float(np.linalg.norm(v))
+            if n > 0:
+                out[str(r.track_id)] = v / n
+        except Exception:
+            continue
+    return out
+
+
 # ---------- 1. Content-based рекомендации ----------
 
 def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
@@ -98,6 +134,10 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
         feat_map = _load_feat_map(db)
         cluster_map_all = _load_cluster_map(db)
         cluster_map = cluster_map_all
+        # Гибрид: audio_emb (если есть и фича включена) + librosa. Иначе — старый путь.
+        emb_map = _load_emb_map(db)
+        emb_w = _audio_weight() if emb_map else 0.0
+        emb_t = emb_map.get(str(target.id)) if emb_map else None
 
         scored: list[tuple] = []
         for r in rows:
@@ -107,6 +147,15 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
             v_r = _feature_vector(r, f_r)
             if v_t is not None and v_r is not None:
                 sim = _cosine(v_t, v_r)
+                # Гибрид с audio_emb: только если оба вектора есть, иначе sim как был.
+                if emb_w > 0 and emb_t is not None:
+                    emb_r = emb_map.get(str(r.id))
+                    if emb_r is not None:
+                        try:
+                            sim_emb = float(np.dot(emb_t, emb_r))
+                            sim = (1.0 - emb_w) * float(sim) + emb_w * sim_emb
+                        except Exception:
+                            pass
             else:
                 # Фичей нет у цели ИЛИ у кандидата (не проанализирован):
                 # честный мета-скоринг вместо плоских 0.0/0.08.

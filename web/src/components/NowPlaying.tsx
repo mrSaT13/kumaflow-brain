@@ -45,10 +45,20 @@ export default function NowPlaying({ userId: propUserId }: { userId?: string }) 
 
   if (!data) return null;
   if (!playing) {
+    const idleUser = (data as { idle_for_user?: string }).idle_for_user;
+    const lastAge = (data as { last_minutes_ago?: number }).last_minutes_ago;
+    const wasStale = (data as { stale_dropped?: boolean }).stale_dropped;
+    const selName = (users?.users ?? []).find((u) => u.external_id === idleUser)?.username ?? idleUser;
     return (
       <Card>
         <div className="text-sm text-muted flex items-center gap-2">
-          <Radio className="w-4 h-4" /> Сейчас ничего не играет в Navidrome.
+          <Radio className="w-4 h-4" />
+          {selName
+            ? `${selName} сейчас ничего не слушает.`
+            : "Сейчас ничего не играет в Navidrome."}
+          {wasStale && typeof lastAge === "number" && (
+            <span className="text-xs">(последнее {lastAge} мин назад — похоже, пауза/залипло, скрыто)</span>
+          )}
         </div>
       </Card>
     );

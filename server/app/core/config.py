@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     mistral_api_key: str = ""
 
     clap_enabled: bool = False
+    # Аудио-эмбеддинги CPU ONNX (DCLAP-audio / MusiCNN) — opt-in для динозавров.
+    # Выкл по умолчанию: скоринг 1в1 как раньше (9 librosa-фич).
+    # Вкл: гибрид w*audio_emb + (1-w)*librosa, при отсутствии emb — автофолбек.
+    clap_audio_enabled: bool = False
+    clap_audio_threads: int = 1  # потоков ONNX на трек; 1 = не душит CPU
+    clap_audio_weight: float = 0.7  # вес audio_emb в гибриде (0..1)
     use_gpu_clustering: bool = False
 
     # Сейф паролей Navidrome (opt-in автообновление вкусов, Fernet).

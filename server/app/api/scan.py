@@ -22,6 +22,7 @@ from app.workers.tasks import (
     cluster_build,
     collab_build,
     clap_embed,
+    clap_embed_audio,
     smart_playlists,
 )
 
@@ -148,6 +149,13 @@ def start_smart(db: Session = Depends(get_db)):
 @router.post("/clap")
 def start_clap(db: Session = Depends(get_db)):
     run = _start_run("clap", clap_embed, db, job_timeout=3600)
+    return {"queued": True, "run_id": str(run.id)}
+
+
+@router.post("/clap-audio")
+def start_clap_audio(db: Session = Depends(get_db)):
+    """Backfill аудио-эмбеддингов CPU (opt-in CLAP_AUDIO_ENABLED). Без флага — тихо skip."""
+    run = _start_run("clap_audio", clap_embed_audio, db, job_timeout=7200)
     return {"queued": True, "run_id": str(run.id)}
 
 

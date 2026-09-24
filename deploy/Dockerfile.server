@@ -3,7 +3,10 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    ONNXRUNTIME_INTRA_OP_THREADS=1
 
 WORKDIR /app
 
@@ -21,14 +24,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Сначала только зависимости — слой кэшируется, пока не меняется requirements.
 COPY server/requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
-# CLAP модель кэшируем отдельно (build-cache): если ml/models уже скачана — skip.
-# ВАЖНО: бинарники модели (~350МБ) в git не кладём (лимит GitHub 100МБ/файл,
-# models/ в .gitignore/.dockerignore) — качаем с HuggingFace при сборке.
+# CLAP модель печём В ОБРАЗ (text+audio ~350МБ, build-cache): на сервере
+# ничего качать не надо — всё работает из коробки.
+# Бинарники в git не кладём (models/ в .gitignore/.dockerignore) — качаем
+# с HuggingFace при сборке. Пустой mount ./deploy/models НЕ делать:
+# он затенит запечённое (см. docker-compose.yml).
 # ARG ниже — ручной cache-buster: если слой закэшировал пропуск без сети,
 # поднимите значение и пересоберите, иначе кэш будет переиспользовать промах.
-ARG CLAP_BUSTER=1
+ARG CLAP_BUSTER=2
 COPY server/ml /app/ml
-RUN python -m ml.download_clap || echo "clap download skipped (offline build)"
+RUN python -m ml.download_clap && ls -lh /app/ml/models && echo "--- onnx:" && ls /app/ml/models/*.onnx || echo "clap download skipped (offline build)"
 
 # Затем код. Мусор (.venv, *.db, логи, кэш) отсекается корневым .dockerignore.
 COPY server/app /app/app

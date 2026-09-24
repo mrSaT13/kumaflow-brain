@@ -123,14 +123,11 @@ docker compose --profile bridge up -d
 </details>
 
 <details>
-<summary><b>🧠 Опционально: CLAP и ML-профиль</b></summary>
+<summary><b>🧠 CLAP из коробки: текст + аудио (запечено в образ)</b></summary>
 
-```bash
-docker compose --profile ml up -d                    # worker-clap
-docker compose exec backend python -m ml.download_clap  # скачать модель ~350 МБ в ./deploy/models
-```
-
-Без модели бэкенд работает — «Открытия недели» строятся через cold-start (видно в Автоматизации).
+Модель `laion/larger_clap_general` (~350МБ) запечена в backend-образ при сборке —
+качать ничего не надо, `worker-clap` стартует сам. Поиск по смыслу и аудио-гибрид
+в похожих работают сразу; без них был бы fallback на cold-start/keyword.
 
 </details>
 

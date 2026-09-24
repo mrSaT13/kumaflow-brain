@@ -82,6 +82,13 @@ services:
       # Логин/пароль можно вписать сюда ИЛИ позже в веб-UI (Настройки → Медиа-сервер)
       # NAVIDROME_USER: admin
       # NAVIDROME_PASSWORD: CHANGE_ME_navidrome_password
+      # CLAP из коробки (запечён в образ): текст-поиск + аудио-гибрид в похожих.
+      CLAP_ENABLED: "true"
+      CLAP_AUDIO_ENABLED: "true"
+      CLAP_AUDIO_THREADS: "1"
+      CLAP_AUDIO_WEIGHT: "0.7"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
       # CORS для прямых обращений к backend из браузера. Через веб-прокси
       # (http://<ip-сервера>:3000/api) CORS не нужен — там same-origin.
       # Адреса из локальной сети (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
@@ -91,12 +98,11 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
-    volumes:
-      # CLAP-модель (~350МБ) — отдельно от образа: скачивается один раз
-      # на сервере и переживает пересборки. Пусто = backend работает
-      # без CLAP («Открытия недели» = cold-start, видно в Автоматизации).
-      # Без :ro — чтобы качать прямо в volume: docker compose exec backend python -m ml.download_clap
-      - ./deploy/models:/app/ml/models
+    # Модели CLAP text+audio (~350МБ) ЗАПЕЧЕНЫ В ОБРАЗ (см. deploy/Dockerfile.server).
+    # НЕ монтировать ./deploy/models сюда: пустая папка хоста затенит запечённое.
+    # Кастомная модель (опционально, поверх запечённой):
+    # volumes:
+    #   - ./deploy/models:/app/ml/models:ro
 
   # Лёгкие задачи: high/default/light (taste, notify, scan, playlists).
   worker:
@@ -124,10 +130,13 @@ services:
       MEDIA_SERVER_TYPE: navidrome
       NAVIDROME_URL: http://host.docker.internal:4533
       QUEUES: high,default,light
+      CLAP_ENABLED: "true"
+      CLAP_AUDIO_ENABLED: "true"
+      CLAP_AUDIO_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
       ANALYSIS_SAMPLE_SECONDS: 90
       ANALYSIS_MAX_TRACKS_PER_RUN: 0  # 0 = весь остаток за раз
-    volumes:
-      - ./deploy/models:/app/ml/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.workers.rq_worker"]
@@ -157,19 +166,22 @@ services:
       MEDIA_SERVER_TYPE: navidrome
       NAVIDROME_URL: http://host.docker.internal:4533
       QUEUES: audio
+      CLAP_ENABLED: "true"
+      CLAP_AUDIO_ENABLED: "true"
+      CLAP_AUDIO_THREADS: "1"
+      CLAP_AUDIO_WEIGHT: "0.7"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
       ANALYSIS_SAMPLE_SECONDS: 90
       ANALYSIS_MAX_TRACKS_PER_RUN: 200  # чанками с resume, не всё за раз
-    volumes:
-      - ./deploy/models:/app/ml/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.workers.rq_worker", "audio"]
 
-  # CLAP-эмбеддинги — отдельно (модель ~350МБ, долгая загрузка).
+  # CLAP-эмбеддинги — отдельно (модель запечена в образ, стартует сам).
   worker-clap:
     image: ghcr.io/mrsat13/kumaflow-brain-backend:latest
     restart: unless-stopped
-    profiles: [ml]
     depends_on:
       postgres:
         condition: service_healthy
@@ -191,8 +203,12 @@ services:
       MEDIA_SERVER_TYPE: navidrome
       NAVIDROME_URL: http://host.docker.internal:4533
       QUEUES: clap
-    volumes:
-      - ./deploy/models:/app/ml/models
+      CLAP_ENABLED: "true"
+      CLAP_AUDIO_ENABLED: "true"
+      CLAP_AUDIO_THREADS: "1"
+      CLAP_AUDIO_WEIGHT: "0.7"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.workers.rq_worker", "clap"]

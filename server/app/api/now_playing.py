@@ -353,7 +353,9 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
     # Navidrome отдаёт и залипшие сессии — сортируем по свежести,
     # иначе виджет залипает на первом (старом) треке.
     entries = sorted([e for e in entries if isinstance(e, dict)], key=_age)
-    # предпочитаем запись нашего пользователя, иначе самую свежую
+    # ВАЖНО: если выбран конкретный пользователь мозга, чужую сессию
+    # НЕ подсовываем как "слушает сейчас" (был баг: Gaechka молчит,
+    # а виджет показывал ANTIDOTE). Нет своей записи = молчит.
     picked: dict | None = None
     if want_username:
         for e in entries:
@@ -361,10 +363,24 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
             if eu == want_username:
                 picked = e
                 break
-    if picked is None:
+        if picked is None:
+            return {"playing": None, "next": [], "source": "idle",
+                    "idle_for_user": want_username,
+                    "other_sessions": len(entries)}
+    else:
         picked = entries[0] if entries else None
     if not picked:
         return {"playing": None, "next": [], "source": "idle"}
+
+    # Залипшие сессии Navidrome (пауза/закрытый плеер): minutesAgo растёт,
+    # а запись висит. Старше 10 мин — считаем тишиной, а не "слушает".
+    STALE_MINUTES = 10.0
+    if _age(picked) >= STALE_MINUTES:
+        return {"playing": None, "next": [], "source": "idle",
+                "idle_for_user": want_username,
+                "last_minutes_ago": picked.get("minutesAgo"),
+                "last_title": picked.get("title"),
+                "stale_dropped": True}
 
     ext_id = str(picked.get("id") or "")
     local: Track | None = None

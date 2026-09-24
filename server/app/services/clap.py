@@ -155,10 +155,111 @@ def get_text_embedding(q: str, dim: int = 512) -> list[float] | None:
         return None
 
 
-def get_audio_embedding(path: str | Path, dim: int = 512) -> list[float] | None:
-    """Аудио -> эмбеддинг (если audio onnx есть). Пока stub — возвращает None."""
+def is_audio_available() -> bool:
+    """Аудио-ONNX доступен и фича включена (opt-in, динозавр-friendly)."""
+    try:
+        s = get_settings()
+        if not getattr(s, "clap_audio_enabled", False):
+            return False
+    except Exception:
+        return False
     p = _find_audio_onnx()
-    if not p or not Path(path).exists():
+    return bool(p and p.exists() and p.stat().st_size > 1024)
+
+
+def _get_audio_session():
+    global _sess_audio
+    if _sess_audio is not None:
+        return _sess_audio
+    p = _find_audio_onnx()
+    if not p:
         return None
-    # TODO: реализовать когда понадобится (librosa 48k 10s -> mel -> onnx)
-    return None
+    try:
+        import onnxruntime as ort  # type: ignore
+
+        try:
+            threads = int(getattr(get_settings(), "clap_audio_threads", 1) or 1)
+        except Exception:
+            threads = 1
+        threads = max(1, min(4, threads))
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = threads
+        opts.inter_op_num_threads = 1
+        _sess_audio = ort.InferenceSession(
+            str(p), sess_options=opts, providers=["CPUExecutionProvider"]
+        )
+        logger.info("clap audio session loaded: {} threads={}", p, threads)
+        return _sess_audio
+    except Exception as e:
+        logger.warning("clap audio session failed: {}", e)
+        return None
+
+
+def get_audio_embedding(path: str | Path, dim: int = 512) -> list[float] | None:
+    """Аудио -> нормализованный эмбеддинг CPU ONNX. None = фолбек на librosa.
+
+    Динозавр-friendly: opt-in флагом, 1 поток, ~10с моно 22кГц, ошибок наружу нет.
+    Без модели/флага — тихо None, скоринг идет по старым 9 фичам 1в1.
+    """
+    if not is_audio_available():
+        return None
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return None
+    try:
+        sess = _get_audio_session()
+        if sess is None:
+            return None
+        import librosa  # type: ignore
+
+        # Легкий вход: моно 22050, первые 10с (не весь трек — быстро и хватает
+        # для тембра/грува; librosa и так уже грузила 90с в analyze_file).
+        y, _ = librosa.load(str(p), sr=22050, mono=True, duration=10.0)
+        if y is None or len(y) < 22050:
+            return None
+        # mel 64x~430 — вход большинства CLAP-audio экспортов; если экспорт
+        # ждет другое — тихо fallback (не роняем анализ).
+        mel = librosa.feature.melspectrogram(y=y, sr=22050, n_mels=64)
+        mel = np.log1p(np.maximum(mel, 0)).astype(np.float32)
+        mel = mel[np.newaxis, np.newaxis, :, :]  # NCHW
+        ort_inputs = {}
+        try:
+            names = [i.name for i in sess.get_inputs()]
+        except Exception:
+            names = []
+        if names:
+            # подставляем в первый float-вход, остальные — нулями по shape
+            placed = False
+            for inp in sess.get_inputs():
+                try:
+                    shape = [d if isinstance(d, int) and d > 0 else 1 for d in inp.type]
+                except Exception:
+                    shape = []
+                if not placed and "float" in str(inp.type).lower():
+                    try:
+                        ort_inputs[inp.name] = mel.astype(np.float32)
+                        placed = True
+                    except Exception:
+                        continue
+            if not placed:
+                return None
+        else:
+            return None
+        out = sess.run(None, ort_inputs)
+        vec = np.array(out[0].reshape(-1), dtype=np.float32)
+        n = float(np.linalg.norm(vec))
+        if n <= 0:
+            return None
+        vec = vec / n
+        if vec.shape[0] != dim:
+            if vec.shape[0] > dim:
+                vec = vec[:dim]
+            else:
+                vec = np.pad(vec, (0, dim - vec.shape[0]))
+            n2 = float(np.linalg.norm(vec))
+            if n2 > 0:
+                vec = vec / n2
+        return vec.astype(np.float32).tolist()
+    except Exception as e:
+        logger.warning("clap audio embedding failed (fallback librosa): {}", e)
+        return None

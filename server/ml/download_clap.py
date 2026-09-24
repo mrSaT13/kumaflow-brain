@@ -52,7 +52,19 @@ except TypeError:
 
 # проверка: найти onnx
 onnxs = list(DST.rglob("*.onnx"))
-print(f"[clap] done, found {len(onnxs)} onnx: {[p.name for p in onnxs[:5]]}")
+print(f"[clap] done, found {len(onnxs)} onnx: {[p.name for p in onnxs[:10]]}")
+# Нормализация имён: экспорт laion может лежать с другими именами/вложенностью.
+# Наш рантайм ищет *text*.onnx / *audio*.onnx (см. app/services/clap.py),
+# но канонические clap_text.onnx / clap_audio.onnx ускоряют старт.
+import shutil
+_text = next((p for p in onnxs if "text" in p.name.lower()), None)
+_audio = next((p for p in onnxs if "audio" in p.name.lower()), None)
+if _text is not None and (DST / "clap_text.onnx") != _text:
+    shutil.copy2(_text, DST / "clap_text.onnx")
+    print(f"[clap] normalized {_text.name} -> clap_text.onnx")
+if _audio is not None and (DST / "clap_audio.onnx") != _audio:
+    shutil.copy2(_audio, DST / "clap_audio.onnx")
+    print(f"[clap] normalized {_audio.name} -> clap_audio.onnx")
 for f in NEED:
     p = DST / f
     if not p.exists():

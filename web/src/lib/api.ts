@@ -308,6 +308,11 @@ export const api = {
       }[];
       source: string;
       offset?: number;
+      idle_for_user?: string | null;
+      other_sessions?: number;
+      last_minutes_ago?: number | null;
+      last_title?: string | null;
+      stale_dropped?: boolean;
     }>(`/api/now-playing/?${qs.toString()}`);
   },
   userTastes: (id: string) =>

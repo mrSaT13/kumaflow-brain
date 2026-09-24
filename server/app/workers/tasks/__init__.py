@@ -15,6 +15,7 @@ from app.db.models import (
     ScanRun,
     ScanLog,
     Track,
+    TrackEmbedding,
     TrackFeatures,
     TrackCluster,
     Lyrics,
@@ -1038,6 +1039,26 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                                 n_lyr += 1
                     except Exception:
                         pass
+                    # --- AUDIO-EMB (opt-in, динозавр-friendly): best-effort, не роняет анализ ---
+                    try:
+                        from app.services.clap import get_audio_embedding as _gae
+                        from app.services.clap import is_audio_available as _iaa
+
+                        if _iaa():
+                            _vec = _gae(src)
+                            if _vec:
+                                with session_scope() as _db2:
+                                    _have = _db2.get(TrackEmbedding, (str(tid), "clap_audio"))
+                                    if _have is None:
+                                        import numpy as _np2
+
+                                        _db2.add(TrackEmbedding(
+                                            track_id=str(tid), model="clap_audio",
+                                            dim=len(_vec),
+                                            vector=_np2.array(_vec, dtype=_np2.float32).tobytes(),
+                                        ))
+                    except Exception as _e:
+                        logger.warning("audio-emb skip for {}: {}", tid, _e)
                     ok += 1
                     try:
                         _dt = time.monotonic() - t0
@@ -1744,7 +1765,7 @@ def clap_embed(*args, **kwargs):
                 text = f"{t.artist_name or ''} {t.title or ''} {t.genre or ''}".strip()
                 vec = get_text_embedding(text)
                 if vec:
-                    import struct
+                    import numpy as np  # локально: файл без глобального np
 
                     blob = np.array(vec, dtype=np.float32).tobytes()  # type: ignore
                     db.add(TrackEmbedding(track_id=t.id, model="clap_text", dim=len(vec), vector=blob))
@@ -1760,6 +1781,97 @@ def clap_embed(*args, **kwargs):
         return {"status": "success", "ok": ok}
     except Exception as e:  # noqa: BLE001
         logger.exception("clap_embed failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
+def clap_embed_audio(*args, **kwargs):
+    """Backfill аудио-эмбеддингов (opt-in CLAP_AUDIO_ENABLED).
+
+    Динозавр-friendly: чанками, отмена пользователем, тихо skip без модели.
+    Без флага/модели — success+skipped, скоринг остается на старых 9 фичах.
+    """
+    run_id = args[0] if args else None
+    try:
+        from app.services import audio_analysis as aa
+        from app.services.clap import get_audio_embedding, is_audio_available
+        from app.services.media_server import get_media_server_config
+
+        if not is_audio_available():
+            msg = "CLAP audio выключен (CLAP_AUDIO_ENABLED=false) или нет модели — скоринг по librosa, как раньше"
+            _append_log(run_id, "warn", msg)
+            _finish_run(run_id, "success")
+            return {"status": "success", "skipped": True, "reason": msg}
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            have = db.query(TrackEmbedding.track_id).filter(
+                TrackEmbedding.model == "clap_audio").subquery()
+            todos = db.query(Track).filter(~Track.id.in_(db.query(have.c.track_id))).all()
+            total = len(todos)
+            if run:
+                run.total_items = total
+                run.processed_items = 0
+            _append_log(run_id, "info", f"Audio-emb: {total} без эмбеддингов (CPU, 1 поток)")
+            try:
+                cfg = get_media_server_config(db)
+            except Exception:
+                cfg = {}
+            try:
+                from app.core.config import get_settings as _gs
+
+                music_dir = _gs().music_dir or ""
+            except Exception:
+                music_dir = ""
+        ok = 0
+        for idx, t in enumerate(todos):
+            if _is_cancelled(run_id):
+                break
+            try:
+                _local = aa.resolve_local_file(t.path, music_dir)
+                if _local is not None:
+                    _src = _local
+                    _tmp = None
+                elif t.external_id and not str(t.external_id).startswith("disk:"):
+                    _src = aa.download_from_navidrome(t.external_id, cfg)
+                    _tmp = Path(_src)
+                else:
+                    continue
+                try:
+                    vec = get_audio_embedding(_src)
+                finally:
+                    if _tmp is not None:
+                        try:
+                            _tmp.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                if vec:
+                    import numpy as _np
+
+                    with session_scope() as db:
+                        if db.get(TrackEmbedding, (str(t.id), "clap_audio")) is None:
+                            db.add(TrackEmbedding(track_id=str(t.id), model="clap_audio",
+                                                  dim=len(vec),
+                                                  vector=_np.array(vec, dtype=_np.float32).tobytes()))
+                            ok += 1
+            except Exception as e:  # noqa: BLE001 — один трек не валит пачку
+                logger.warning("audio-emb skip {}: {}", t.id, e)
+            if (idx + 1) % 10 == 0:
+                with session_scope() as db:
+                    run = db.get(ScanRun, run_id) if run_id else None
+                    if run:
+                        run.processed_items = idx + 1
+                _append_log(run_id, "info", f"Audio-emb {idx+1}/{total} ok:{ok}")
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            if run:
+                run.processed_items = total
+        _append_log(run_id, "info", f"Audio-emb готово ok:{ok}/{total}")
+        _finish_run(run_id, "success")
+        return {"status": "success", "ok": ok, "total": total}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("clap_embed_audio failed: {}", e)
         if run_id:
             _append_log(run_id, "error", str(e))
             _finish_run(run_id, "failure", str(e))
