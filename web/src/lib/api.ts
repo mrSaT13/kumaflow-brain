@@ -425,7 +425,7 @@ export const api = {
       `/api/cron/${id}/run`, { method: "POST" },
     ),
   clapStatus: () =>
-    http<{ available: boolean; files: { name: string; bytes: number }[]; embeddings: Record<string, number>; audio_stub: boolean; audio_available?: boolean; audio_enabled?: boolean; audio_weight?: number }>(
+    http<{ available: boolean; files: { name: string; bytes: number }[]; embeddings: Record<string, number>; audio_stub: boolean; audio_available?: boolean; audio_enabled?: boolean; audio_weight?: number; flag_enabled?: boolean; models_dir?: string; text_file?: string | null; audio_file?: string | null }>(
       `/api/analysis/clap-status`,
     ),
   getAutomation: () =>

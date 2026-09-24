@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
+import useSWR from "swr";
 import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
@@ -19,6 +20,7 @@ import {
   LogOut,
 } from "lucide-react";
 import { setBrowserToken } from "@/lib/api";
+import { api } from "@/lib/api";
 
 type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
 
@@ -48,6 +50,13 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
   const pathname = usePathname() ?? "";
   const [mounted, setMounted] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  // Версия — живая с backend (/api/version, без авторизации), а не хардкод:
+  // иначе после bump в config.py сайдбар врёт, пока не поправят строку.
+  const { data: ver } = useSWR("/api/version", () => api.version().catch(() => null), {
+    refreshInterval: 60000,
+    shouldRetryOnError: false,
+  });
+  const verLabel = `brain${ver?.version ? ` · v${ver.version}` : ""}`;
   useEffect(() => {
     setMounted(true);
     try {
@@ -78,7 +87,7 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
         {!collapsed && (
           <div className="min-w-0">
             <div className="font-semibold tracking-tight">KumaFlow</div>
-            <div className="text-[11px] text-muted">brain · v0.2.2</div>
+            <div className="text-[11px] text-muted">{verLabel}</div>
           </div>
         )}
         {!collapsed && (
@@ -159,7 +168,7 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
               <img src="/app-icon.png" alt="KumaFlow" className="w-6 h-6 rounded-full" />
               <div>
                 <div className="font-semibold tracking-tight">KumaFlow</div>
-                <div className="text-[11px] text-muted">brain · v0.2.2</div>
+                <div className="text-[11px] text-muted">{verLabel}</div>
               </div>
               <button onClick={onClose} className="ml-auto kuma-pill text-xs">✕</button>
             </div>

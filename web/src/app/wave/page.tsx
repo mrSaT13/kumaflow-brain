@@ -47,6 +47,11 @@ function appendFresh(prev: WaveTrack[], incoming: WaveTrack[]): WaveTrack[] {
   return [...prev, ...fresh];
 }
 
+// Очередь из GET /api/wave/live в формат страницы (как есть, без докрутки).
+function mapLiveQueue(q: { track_id: string }[]): WaveTrack[] {
+  return (q as WaveTrack[]).map((t) => ({ ...t, score: 1 }));
+}
+
 const COMP_LABELS: { key: keyof WaveComp; label: string }[] = [
   { key: "audio", label: "аудио" },
   { key: "genre", label: "жанр" },
@@ -63,6 +68,11 @@ export default function WavePage() {
   const [playingIdx, setPlayingIdx] = useState(0);
   const [busy, setBusy] = useState(false);
   const [liveRefill, setLiveRefill] = useState(true);
+  // Зеркало телефона: очередь пришла свежей публикацией с телефона —
+  // показываем как есть, серверная докрутка её НЕ трогает (ни авто-рефилл,
+  // ни перестройка по Navidrome). Любое локальное действие (Докрутить, клик
+  // по треку, смена юзера/настроения) возвращает управление мозгу.
+  const [phoneMirror, setPhoneMirror] = useState(false);
   const [followNavidrome, setFollowNavidrome] = useState(true);
   const [followPhone, setFollowPhone] = useState(true);
   const [phoneAge, setPhoneAge] = useState<number | null>(null);
@@ -161,6 +171,7 @@ export default function WavePage() {
       const tracks = (r.tracks ?? []) as WaveTrack[];
       setQueue((prev) => (reset ? tracks : appendFresh(prev, tracks)).slice(0, 100));
       touchLocal();
+      setPhoneMirror(false); // явная докрутка = управление у мозга, не у зеркала
       setDrift(r.drift ?? null);
       setAdaptive(r.adaptive ?? null);
       setLastBatch(tracks.length || null);
@@ -176,14 +187,31 @@ export default function WavePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, queue, mood, toast]);
 
-  // Холодный вход: очередь пуста, а в Navidrome что-то играет —
-  // сразу строим волну от него, жать «Запустить» не надо.
+  // Холодный вход: очередь пуста. Сначала — свежее зеркало телефона
+  // (показать как есть, НЕ строить волну поверх), иначе строим волну от
+  // того, что реально играет во внешнем плеере. Жать «Запустить» не надо.
   useEffect(() => {
-    if (!followNavidrome || !userId || queue.length > 0 || busyRef.current) return;
+    if (!userId || queue.length > 0 || busyRef.current) return;
     if (bootRef.current === `${userId}:${mood}`) return;
     bootRef.current = `${userId}:${mood}`;
     (async () => {
       try {
+        if (followPhone) {
+          try {
+            const live = await api.waveLive(userId);
+            if (live.queue?.length && (live.age_sec == null || live.age_sec <= 300)) {
+              setQueue(mapLiveQueue(live.queue).slice(0, 100));
+              setPlayingIdx(Math.max(0, Math.min(live.current ?? 0, live.queue.length - 1)));
+              setPhoneAge(live.age_sec ?? null);
+              setPhoneMirror(true);
+              return;
+            }
+            setPhoneAge(live.age_sec ?? null);
+          } catch {
+            /* телефона нет в сети — дальше по Navidrome */
+          }
+        }
+        if (!followNavidrome) return;
         const np = await api.nowPlaying(userId, 1);
         const tid = np.playing?.track_id;
         if (!tid) return;
@@ -200,6 +228,7 @@ export default function WavePage() {
         if (tracks.length > 0) {
           setQueue(tracks.slice(0, 100));
           setPlayingIdx(0);
+          setPhoneMirror(false);
           touchLocal();
         }
       } catch {
@@ -209,7 +238,7 @@ export default function WavePage() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, followNavidrome, mood]);
+  }, [userId, followNavidrome, followPhone, mood]);
 
   // Клик по строке = «это сейчас играет во внешнем плеере»: помечаем и копим play-событие.
   function markCurrent(i: number) {
@@ -220,15 +249,19 @@ export default function WavePage() {
       pendingEvents.current.push({ track_id: t.track_id, action: "play" });
     }
     setPlayingIdx(clamped);
+    setPhoneMirror(false); // ручной выбор = управление у мозга
     touchLocal();
   }
 
   // Авто-докрутка хвоста: осталось мало — добрать +10 с накопленными событиями.
+  // Зеркало телефона НЕ докручиваем — иначе серверная пачка затирает/разбавляет
+  // список телефона (пин-понг 10→20→10 по тику). Вернуть докрутку: «Докрутить»
+  // или клик по треку.
   useEffect(() => {
-    if (!liveRefill || queue.length === 0 || busy) return;
+    if (!liveRefill || phoneMirror || queue.length === 0 || busy) return;
     if (queue.length - 1 - playingIdx <= REFILL_THRESHOLD) void more(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playingIdx, queue.length, liveRefill]);
+  }, [playingIdx, queue.length, liveRefill, phoneMirror]);
 
   // Очередь с телефона: мобила публикует её в POST /api/wave/publish,
   // веб подхватывает и показывает как есть (свежесть < 5 мин).
@@ -240,22 +273,22 @@ export default function WavePage() {
     const tick = async () => {
       try {
         const live = await api.waveLive(userId);
-        if (stop || !live.queue?.length) return;
-        if (live.age_sec != null && live.age_sec > 300) {
-          setPhoneAge(live.age_sec);
+        if (stop) return;
+        setPhoneAge(live.age_sec ?? null);
+        if (!live.queue?.length || (live.age_sec != null && live.age_sec > 300)) {
+          // Телефон молчит/протух — зеркалить нечего, очередь живёт сама.
+          setPhoneMirror(false);
           return;
         }
-        setPhoneAge(live.age_sec ?? null);
         const phoneTs = Date.now() - (live.age_sec ?? 0) * 1000;
         if (lastLocalEdit.current > phoneTs) return; // локальные правки свежее — не затираем
         const ids = live.queue.map((t) => t.track_id).join("|");
         setQueue((prev) => {
           if (prev.map((t) => t.track_id).join("|") === ids) return prev;
           setPlayingIdx(Math.max(0, Math.min(live.current ?? 0, live.queue.length - 1)));
-          return live.queue.map((t) => ({
-            ...t, score: 1,
-          })) as WaveTrack[];
+          return mapLiveQueue(live.queue);
         });
+        setPhoneMirror(true);
       } catch {
         /* телефона нет в сети — живём своей очередью */
       }
@@ -267,6 +300,8 @@ export default function WavePage() {
   }, [followPhone, userId]);
 
   // Реал-тайм от внешнего плеера: что играет в Navidrome — подсвечиваем как current.
+  // В режиме зеркала телефона — ТОЛЬКО подсветка, без waveContinue: серверная
+  // докрутка поверх телефонного списка и есть то самое «очередь сбрасывается».
   useEffect(() => {
     if (!followNavidrome || !userId || queue.length === 0) return;
     let stop = false;
@@ -276,14 +311,13 @@ export default function WavePage() {
         const extId = np.playing?.track_id;
         if (stop || !extId || extId === lastSyncedExternal.current) return;
         const idx = queue.findIndex((t) => t.track_id === extId);
+        lastSyncedExternal.current = extId;
         if (idx >= 0) {
-          lastSyncedExternal.current = extId;
           if (idx !== playingIdx) {
             pendingEvents.current.push({ track_id: extId, action: "play" });
             setPlayingIdx(idx);
           }
-        } else {
-          lastSyncedExternal.current = extId;
+        } else if (!phoneMirror) {
           const r = await api.waveContinue({
             user_id: userId,
             queue: queue.map((t) => t.track_id),
@@ -304,7 +338,7 @@ export default function WavePage() {
     void tick();
     return () => { stop = true; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [followNavidrome, userId, queue.length, mood]);
+  }, [followNavidrome, userId, queue.length, mood, phoneMirror]);
 
   const curLook = moodLook(cur?.mood ?? "");
   const CurIcon = curLook.icon;
@@ -319,7 +353,7 @@ export default function WavePage() {
             <select
               className="kuma-input kuma-input-inline w-48"
               value={userId}
-              onChange={(e) => { setUserId(e.target.value); setQueue([]); setPlayingIdx(0); pendingEvents.current = []; lastLocalEdit.current = 0; }}
+              onChange={(e) => { setUserId(e.target.value); setQueue([]); setPlayingIdx(0); setPhoneMirror(false); pendingEvents.current = []; lastLocalEdit.current = 0; }}
             >
               {ids.map((u) => (
                 <option key={u.id} value={u.id}>{u.username}</option>
@@ -328,7 +362,7 @@ export default function WavePage() {
             <select
               className="kuma-input kuma-input-inline w-40"
               value={mood}
-              onChange={(e) => setMood(e.target.value)}
+              onChange={(e) => { setMood(e.target.value); setPhoneMirror(false); }}
               title="Настроение волны: авто — мозг решает сам по треку, времени суток и твоим вкусам; выбери вручную чтобы подрулить"
             >
               <option value="">Настроение: авто</option>
@@ -336,10 +370,10 @@ export default function WavePage() {
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
-            <Button onClick={() => more(queue.length === 0)} disabled={busy || !userId}>
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-              {queue.length === 0 ? "Запустить волну" : `Докрутить +${lastBatch ?? 10}`}
-            </Button>
+              <Button onClick={() => more(queue.length === 0)} disabled={busy || !userId}>
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                {queue.length === 0 ? "Запустить волну" : phoneMirror ? `Взять управление +${lastBatch ?? 10}` : `Докрутить +${lastBatch ?? 10}`}
+              </Button>
           </div>
         }
       />
@@ -445,7 +479,7 @@ export default function WavePage() {
                 <input type="checkbox" checked={liveRefill} onChange={(e) => setLiveRefill(e.target.checked)} />
                 Авто-докрутка (осталось ≤{REFILL_THRESHOLD} — добрать +{lastBatch ?? 10})
               </label>
-              <label className="flex items-center gap-1.5 cursor-pointer" title="Мобила шлёт очередь в POST /api/wave/publish — страница показывает её как есть">
+              <label className="flex items-center gap-1.5 cursor-pointer" title="Мобила шлёт очередь в POST /api/wave/publish — страница показывает её как есть, без своей докрутки. Свежая публикация телефона заменяет локальную очередь">
                 <input type="checkbox" checked={followPhone} onChange={(e) => setFollowPhone(e.target.checked)} />
                 Очередь с телефона{phoneAge != null && phoneAge <= 300 ? ` · ${phoneAge} сек назад` : ""}
               </label>
@@ -454,6 +488,11 @@ export default function WavePage() {
                 Подсвечивать, что играет в Navidrome
               </label>
               {busy && <span className="inline-flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> мозг докладывает…</span>}
+              {phoneMirror && (
+                <span className="text-[11px] rounded-full border border-emerald-300 px-2 py-0.5 text-emerald-700 dark:text-emerald-300" title="Очередь — зеркало телефона: авто-докрутка и перестройка по Navidrome выключены, хвост докручивает сам телефон через POST /api/wave/continue. Нажми «Взять управление» или кликни трек, чтобы рулить с веба.">
+                  зеркало телефона · мозг не докручивает
+                </span>
+              )}
             </div>
           </Card>
         </Section>

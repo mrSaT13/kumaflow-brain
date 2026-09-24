@@ -95,7 +95,13 @@ export default function Automation() {
       <div className="flex items-center gap-2 flex-wrap text-sm">
         <span className="font-medium">CLAP-модель</span>
         <Badge tone={clap?.available ? "ok" : "warn"}>
-          {clap ? (clap.available ? "в образе" : "нет в образе") : "…"}
+          {clap
+            ? clap.available
+              ? "в образе"
+              : (clap.files?.length ?? 0) > 0
+                ? "файлы есть, флаг выкл"
+                : "нет в образе"
+            : "…"}
         </Badge>
         {clap && <span className="text-xs text-muted">эмбеддингов в базе: {clapN}</span>}
         {clap && (
@@ -108,10 +114,17 @@ export default function Automation() {
           </Badge>
         )}
       </div>
+      {(clap?.files?.length ?? 0) > 0 && (
+        <div className="text-[11px] text-muted mt-1" title={clap?.models_dir || undefined}>
+          файлы: {clap!.files.map((f) => `${f.name} ${(f.bytes / 1048576).toFixed(0)}МБ`).join(" · ")}
+        </div>
+      )}
       <div className="text-xs text-muted mt-2">
-        {clap && !clap.available
-          ? "Текстовой модели нет — обновите образ (CLAP запечён в backend-образ, см. deploy/Dockerfile.server) и пересоберите: модель подтянется при сборке."
-          : "Если модель есть, а эмбеддингов 0 — запустите задачу «CLAP-эмбеддинги» кнопкой «сейчас» ниже (текст), аудио-эмбеддинги считаются следом за sonic-анализом и задачей «clap-audio»."}
+        {clap && !clap.available && (clap.files?.length ?? 0) > 0
+          ? "Файлы запечены в образ, но CLAP выключен флагом: проверь CLAP_ENABLED=true в docker-compose и пересоздай контейнер (docker compose up -d). Текст-модель подхватится без пересборки."
+          : clap && !clap.available
+            ? "Текстовой модели нет — обновите образ (CLAP запечён в backend-образ, см. deploy/Dockerfile.server): docker compose pull && docker compose up -d. Модель подтягивается при сборке образа, не на сервере."
+            : "Если модель есть, а эмбеддингов 0 — запустите задачу «CLAP-эмбеддинги» кнопкой «сейчас» ниже (текст), аудио-эмбеддинги считаются следом за sonic-анализом и задачей «clap-audio»."}
       </div>
     </Card>
     <div className="h-4" />

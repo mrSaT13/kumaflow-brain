@@ -34,6 +34,10 @@ def clap_status(db: Session = Depends(get_db)):
     audio_enabled = False
     audio_weight = 0.0
     files: list[dict] = []
+    flag_enabled = False
+    models_dir = ""
+    text_file: str | None = None
+    audio_file: str | None = None
     try:
         from app.services import clap as _clap
 
@@ -43,6 +47,7 @@ def clap_status(db: Session = Depends(get_db)):
             from app.core.config import get_settings as _gs
 
             _s = _gs()
+            flag_enabled = bool(getattr(_s, "clap_enabled", False))
             audio_enabled = bool(getattr(_s, "clap_audio_enabled", False))
             audio_weight = float(getattr(_s, "clap_audio_weight", 0.7) or 0.0)
         except Exception:
@@ -53,6 +58,20 @@ def clap_status(db: Session = Depends(get_db)):
                     files.append({"name": p.name, "bytes": int(p.stat().st_size)})
                 except OSError:
                     files.append({"name": p.name, "bytes": 0})
+        try:
+            _tp = _clap._find_text_onnx()
+            text_file = _tp.name if _tp else None
+        except Exception:
+            text_file = None
+        try:
+            _ap = _clap._find_audio_onnx()
+            audio_file = _ap.name if _ap else None
+        except Exception:
+            audio_file = None
+        try:
+            models_dir = str(_clap.MODELS_DIR)
+        except Exception:
+            models_dir = ""
     except Exception:
         pass
     counts: dict[str, int] = {}
@@ -64,7 +83,9 @@ def clap_status(db: Session = Depends(get_db)):
     return {"available": available, "files": files, "embeddings": counts,
             "audio_available": audio_available, "audio_enabled": audio_enabled,
             "audio_weight": audio_weight,
-            "audio_stub": not audio_available}
+            "audio_stub": not audio_available,
+            "flag_enabled": flag_enabled, "models_dir": models_dir,
+            "text_file": text_file, "audio_file": audio_file}
 
 
 @router.post("/clusters/build", dependencies=[Depends(require_admin)])
