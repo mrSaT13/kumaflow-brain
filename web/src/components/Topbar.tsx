@@ -3,6 +3,7 @@
 import { Bell, Menu, Moon, Sun } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import useSWR from "swr";
 import { api } from "@/lib/api";
 import PwaInstall from "@/components/PwaInstall";
@@ -42,9 +43,19 @@ function BellBox() {
     if (open) mutateCount();
   }, [open, mutateCount]);
 
+  // Закрытие по Escape — оверлей ниже ловит клики, но клавиатуру надо отдельно.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open ]);
+
   return (
     <div className="relative shrink-0">
-      <button onClick={openBox} className="kuma-pill relative" aria-label="Уведомления">
+      <button onClick={openBox} className="kuma-pill relative" aria-label="Уведомления" aria-expanded={open}>
         <Bell className="w-3 h-3" />
         {unread > 0 && (
           <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">
@@ -52,10 +63,13 @@ function BellBox() {
           </span>
         )}
       </button>
-      {open && (
+      {/* Портал в body: топбар висит на backdrop-blur, который становится
+          containing-block для fixed-потомков — без портала оверлей покрывал
+          только полоску топбара и клик «мимо» панель не закрывал. */}
+      {open && typeof document !== "undefined" && createPortal(
         <>
-          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 mt-2 w-80 max-w-[90vw] kuma-card p-2 z-30 max-h-96 overflow-auto">
+          <div className="fixed inset-0 z-50" onClick={() => setOpen(false)} />
+          <div className="fixed top-[60px] right-2 sm:right-4 z-50 w-80 max-w-[90vw] kuma-card p-2 max-h-96 overflow-auto shadow-xl">
             <div className="flex items-center justify-between px-2 py-1">
               <span className="text-sm font-medium">Уведомления</span>
               <button className="kuma-pill text-xs" onClick={readAll}>Прочитать все</button>
@@ -96,7 +110,8 @@ function BellBox() {
               </div>
             ))}
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   );
