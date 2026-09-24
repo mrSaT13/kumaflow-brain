@@ -202,6 +202,24 @@ def wave_live(user_id: str, db: Session = Depends(get_db)):
                      _TF.track_id.in_([str(t.id) for _, t in found])).all()}
     except Exception:
         feats = {}
+    # Оценки пользователя — чтобы веб показывал ♥/👎 и было видно,
+    # что лайк с телефона долетел (иначе зеркало молчит об оценках).
+    liked: set[str] = set()
+    disliked: set[str] = set()
+    try:
+        from app.db.models import Favorite as _Fav
+        from app.db.models import TrackDislike as _Dis
+
+        _ids = [str(t.id) for _, t in found]
+        if _ids:
+            liked = {str(r.track_id) for r in
+                     db.query(_Fav).filter(_Fav.user_id == str(u.id),
+                                           _Fav.track_id.in_(_ids)).all()}
+            disliked = {str(r.track_id) for r in
+                        db.query(_Dis).filter(_Dis.user_id == str(u.id),
+                                              _Dis.track_id.in_(_ids)).all()}
+    except Exception:
+        pass
     for raw, t in found:
         tid = str(t.id)
         if cur_raw and (cur_raw == tid or cur_raw == str(raw)):
@@ -226,6 +244,7 @@ def wave_live(user_id: str, db: Session = Depends(get_db)):
                        'mood': str(moods[0]).lower() if moods else None,
                        'moods': [str(m).lower() for m in moods[:3]],
                        'energy': energy, 'tempo': tempo,
+                       'like': True if tid in liked else (False if tid in disliked else None),
                        'reason': 'очередь телефона'})
     return {'ok': True, 'user_id': str(u.id), 'queue': tracks,
             'current': cur_idx, 'age_sec': int(age)}

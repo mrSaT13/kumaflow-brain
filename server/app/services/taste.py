@@ -114,7 +114,17 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
     (иначе двойной подсчёт с PlayHistory). Возвращает сводку применённых правил.
     limit: защита от гигантских пакетов (мобила шлёт историю страницами).
     """
-    now = datetime.utcnow()
+    from app.services.track_resolve import get_track as _gt
+
+    # Час/день недели — по «домашнему» времени сервера (иначе ночные скипы
+    # падали не в те паттерны при APP_TIMEZONE != UTC).
+    try:
+        from app.core.time import server_now as _server_now
+
+        _snow = _server_now()
+        _hour, _dow = _snow.hour, _snow.isoweekday() % 7
+    except Exception:
+        _hour, _dow = datetime.utcnow().hour, datetime.utcnow().isoweekday() % 7
     auto_dislikes: list[str] = []
     auto_bans: list[str] = []
     stored = 0
@@ -126,19 +136,22 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
     pend_dis: set[str] = set()
     pend_artist_dis: Counter = Counter()
     for e in (events or [])[:max(1, limit)]:
-        tid = str(e.get("track_id") or "")
+        raw_tid = str(e.get("track_id") or "")
         action = str(e.get("action") or "")
-        if not tid or action not in ACTIONS or db.get(Track, tid) is None:
+        # Мобила шлёт external_id (Navidrome song id) — резолвим в наш uuid.
+        _t = _gt(db, raw_tid) if raw_tid else None
+        if _t is None or action not in ACTIONS:
             skipped += 1
             continue
+        tid = str(_t.id)
         try:
             pos = e.get("position_sec")
             pos = int(pos) if pos is not None else None
         except (TypeError, ValueError):
             pos = None
         db.add(PlayEvent(user_id=user_id, track_id=tid, action=action,
-                         position_sec=pos, hour=now.hour,
-                         day_of_week=now.isoweekday() % 7))
+                         position_sec=pos, hour=_hour,
+                         day_of_week=_dow))
         stored += 1
         if action == "skip":
             n_skips = db.query(PlayEvent).filter_by(

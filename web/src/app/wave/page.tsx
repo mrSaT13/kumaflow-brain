@@ -3,7 +3,7 @@
 import Link from "next/link";
 import useSWR from "swr";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowRight, Loader2, Play } from "lucide-react";
+import { ArrowDown, ArrowRight, Heart, Loader2, Play, ThumbsDown } from "lucide-react";
 import { Button, Card, PageHeader, Section } from "@/components/ui";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
@@ -18,7 +18,7 @@ type WaveComp = {
 type WaveTrack = {
   track_id: string; title: string; artist_name?: string; score: number; reason: string;
   mood?: string | null; moods?: string[]; energy?: number | null; tempo?: number | null;
-  cover_art_id?: string | null; comp?: WaveComp | null;
+  cover_art_id?: string | null; comp?: WaveComp | null; like?: boolean | null;
 };
 
 type WaveEvent = { track_id: string; action: string; position_sec?: number };
@@ -505,6 +505,22 @@ export default function WavePage() {
                             </div>
                           ) : null}
                         </div>
+                        {t.like === true && (
+                          <span
+                            className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-rose-500/15 text-rose-500 shrink-0"
+                            title="В избранном — лайк с телефона долетел"
+                          >
+                            <Heart className="w-3.5 h-3.5 fill-current" />
+                          </span>
+                        )}
+                        {t.like === false && (
+                          <span
+                            className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-border text-muted shrink-0"
+                            title="Дизлайк — мозг учтёт в следующих докрутках"
+                          >
+                            <ThumbsDown className="w-3.5 h-3.5" />
+                          </span>
+                        )}
                         {t.mood && (
                           <span
                             className="hidden sm:inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium text-white shrink-0 shadow-sm"

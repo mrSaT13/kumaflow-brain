@@ -401,15 +401,17 @@ def rate_track(user_id: str, payload: RateIn, db: Session = Depends(get_db)):
 
     like=true → лайк, false → дизлайк (+проверка автобана артиста),
     null → снять оценку.
+
+    track_id — uuid ИЛИ external_id (мобила шлёт Navidrome song id).
     """
     from app.services import taste as _taste
+    from app.services.track_resolve import get_track as _gt
 
     u = _require_user(db, user_id)
-    try:
-        uuid.UUID(payload.track_id)
-    except ValueError:
-        raise HTTPException(400, "invalid track_id")
-    return _taste.record_rate(db, str(u.id), payload.track_id, payload.like)
+    t = _gt(db, str(payload.track_id or ""))
+    if t is None:
+        raise HTTPException(404, "track not found")
+    return _taste.record_rate(db, str(u.id), str(t.id), payload.like)
 
 
 @router.post("/{user_id}/events")
