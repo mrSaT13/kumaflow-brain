@@ -9,9 +9,11 @@ def test_placeholder_token_rejected():
         Settings(brain_api_token="CHANGE_ME_brain_token")
 
 
-def test_placeholder_postgres_rejected():
-    with pytest.raises(ValueError, match="POSTGRES_PASSWORD"):
-        Settings(env="prod", postgres_password="CHANGE_ME_postgres_password")
+def test_placeholder_postgres_warns_not_rejects():
+    # pgdata инициализируется паролем один раз: fail-fast на апгрейде клал
+    # рабочие связки и толкал к рассинхрону с pgdata. Только warning.
+    s = Settings(env="prod", postgres_password="CHANGE_ME_postgres_password")
+    assert s.env == "prod"
 
 
 def test_multiple_placeholders_listed_together():

@@ -64,8 +64,11 @@ services:
       POSTGRES_PASSWORD: CHANGE_ME_postgres_password
       POSTGRES_DB: kumaflow
       REDIS_HOST: redis
-      # ВАЖНО: backend/worker'ы НЕ стартуют со значениями CHANGE_ME_* (fail-fast).
-      # Сгенерировать токен: openssl rand -hex 32. Тот же токен — в плеер/мобилу.
+      # ВАЖНО: backend/worker'ы НЕ стартуют с плейсхолдерами токенов/ключей
+      # CHANGE_ME_* (fail-fast) — кроме POSTGRES_PASSWORD (там только warning:
+      # pgdata помнит пароль первой инициализации, смена только в env даст
+      # рассинхрон). Сгенерировать токен: openssl rand -hex 32. Тот же токен —
+      # в плеер/мобилу.
       BRAIN_API_TOKEN: CHANGE_ME_brain_token
       # Сейф паролей (opt-in автообновление вкусов, Fernet). Сгенерировать один раз:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

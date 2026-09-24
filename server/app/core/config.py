@@ -123,10 +123,15 @@ class Settings(BaseSettings):
     # Поля-секреты: значение-плейсхолдер из публичного docker-compose.yml
     # (CHANGE_ME_*) никогда не является валидным секретом — оно известно всем.
     # Пусто = фича выключена (auth off / vault off), это легально.
+    #
+    # postgres_password здесь НЕТ сознательно: пароль инициализирует pgdata
+    # один раз при первом старте, смена env потом НЕ меняет пароль в БД —
+    # fail-fast на апгрейде клал бы рабочие связки (backend+postgres с одним
+    # плейсхолдером) и толкал бы юзера сменить пароль только в env, что дало
+    # бы рассинхрон с pgdata (auth failed). Только warning (см. ниже).
     _SECRET_FIELDS = (
         "brain_api_token",
         "taste_vault_key",
-        "postgres_password",
         "navidrome_password",
         "openai_api_key",
         "ollama_cloud_api_key",
@@ -139,6 +144,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_placeholder_secrets(self):
+        import logging as _logging
+
         bad = [
             name.upper()
             for name in self._SECRET_FIELDS
@@ -149,6 +156,15 @@ class Settings(BaseSettings):
                 f"placeholder secret(s) not replaced: {', '.join(bad)}. "
                 "Впиши реальные значения в docker-compose.yml на сервере "
                 "(репозиторий публичный — плейсхолдеры знают все)."
+            )
+        # Внутренний пароль postgres с плейсхолдером — работает (обе стороны
+        # совпадают), но небезопасно: предупреждаем, не роняем.
+        if "CHANGE_ME" in (str(self.postgres_password or "").upper()):
+            _logging.getLogger("kumaflow").warning(
+                "POSTGRES_PASSWORD — плейсхолдер из публичного репозитория. "
+                "Срочно не горит (БД внутри docker-сети), но смени при случае: "
+                "ALTER USER ... PASSWORD + тот же пароль в compose для backend "
+                "и postgres одновременно (pgdata помнит старый пароль!)."
             )
         return self
 
