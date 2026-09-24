@@ -11,8 +11,9 @@
 пропускался и образ выходил того же размера (GHCR 1.79GiB дважды).
 
 Два пути скачивания (с фолбеком):
-  1. snapshot_download (нужен hf-xet: Xenova живёт на XET-CAS);
-  2. прямой HTTPS resolve/main (работает без hf-xet, plain http).
+  1. snapshot_download (нужен huggingface_hub>=0.30 + hf-xet: Xenova живёт на XET-CAS);
+  2. пофайловый hf_hub_download (тоже умеет XET);
+  3. прямой HTTPS resolve/main (последний шанс, для не-XET файлов).
 
 Запуск: python -m ml.download_clap  (или python ml/download_clap.py)
 Кэш: повторный запуск — skip если файлы уже есть и размер совпадает.
@@ -105,7 +106,32 @@ else:
     print("[clap] WARN: no snapshot_download, using plain HTTPS directly")
 
 
-# --- путь 2: прямой HTTPS (без hf-xet, пофайлово, с ретраями) ---
+# --- путь 2: пофайловый hf_hub_download (умеет XET-подписи/редиректы) ---
+# ВАЖНО: сырой urllib на /resolve/main/ для XET-репо отдаёт поинтер или 404,
+# поэтому фолбек обязан идти через huggingface_hub, а не через plain HTTPS.
+def _hub_fetch(repo_path: str, dst: Path, tries: int = 3) -> bool:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        print("[clap] WARN: no hf_hub_download, will try plain HTTPS")
+        return False
+    for attempt in range(1, tries + 1):
+        try:
+            got = hf_hub_download(repo_id=MODEL, filename=repo_path, token=token)
+            src = Path(got)
+            if src.exists() and src.stat().st_size > 1024:
+                shutil.copy2(src, dst)
+                print(f"[clap] hub {repo_path} -> {dst.name} "
+                      f"({dst.stat().st_size // 1048576}MB, try {attempt})")
+                return True
+            print(f"[clap] hub {repo_path}: tiny file, retry {attempt}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[clap] hub {repo_path} try {attempt} failed: {e}")
+    print(f"[clap] hub {repo_path} FAILED after {tries} tries")
+    return False
+
+
+# --- путь 3: прямой HTTPS (последний шанс, для не-XET файлов) ---
 def _http_fetch(repo_path: str, dst: Path, tries: int = 3) -> bool:
     url = f"https://huggingface.co/{MODEL}/resolve/main/{repo_path}"
     headers = {"User-Agent": "KumaFlowBrain/0.1"}
@@ -131,10 +157,12 @@ def _http_fetch(repo_path: str, dst: Path, tries: int = 3) -> bool:
 
 
 if not _ok():
-    print("[clap] fallback: plain HTTPS per-file download...")
+    print("[clap] fallback: per-file download via hub, then plain HTTPS...")
     for src_rel, dst_name in WANT.items():
         dst = DST / dst_name
         if dst.exists() and dst.stat().st_size > 1024:
+            continue
+        if _hub_fetch(src_rel, dst):
             continue
         _http_fetch(src_rel, dst)
     for extra in OPTIONAL:
