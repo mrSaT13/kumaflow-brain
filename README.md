@@ -78,8 +78,6 @@ graph LR
 
 ## 🚀 Быстрый старт за 5 минут
 
-Образы собирает GitHub Actions — на сервере только `pull + up`, собирать ничего не надо.
-
 ```bash
 git clone https://github.com/mrSaT13/kumaflow-brain.git kumaflow && cd kumaflow
 nano docker-compose.yml   # вписать 3x CHANGE_ME (см. таблицу ниже)
@@ -88,24 +86,6 @@ curl -s http://localhost:8000/api/health   # {"status":"ok"}
 ```
 
 Открой: веб — `http://<сервер>:3000` · API — `http://<сервер>:8000/api/health` · доки — `http://<сервер>:8000/api/docs`.
-
-### Что поменять в `docker-compose.yml`
-
-| Место | Значение |
-|---|---|
-| `POSTGRES_PASSWORD` (postgres + backend + все worker'ы) | длинный случайный пароль, один везде |
-| `BRAIN_API_TOKEN` | `openssl rand -hex 32` — тот же токен в плеер / мобилу |
-| `NAVIDROME_URL` | свой Navidrome: на том же хосте — `http://host.docker.internal:4533`, на другой машине — `http://<ip>:4533` |
-| `CORS_ORIGINS` | origin фронта: `http://<ip-или-домен>:3000` |
-
-> Логин/пароль Navidrome в файл можно не писать — задаются в веб-UI (Настройки → Медиа-сервер).
-> Репозиторий публичный: секреты живут только в копии на сервере, **никогда не делай `git push` с сервера**.
-
-Обновление после пуша в `main` (CI пересоберёт образы сам):
-
-```bash
-git pull && docker compose pull && docker compose up -d
-```
 
 <details>
 <summary><b>🎧 Sonic-анализ: как worker добирается до mp3</b></summary>
@@ -166,8 +146,6 @@ docker compose exec backend python -m ml.download_clap  # скачать мод�
 | 🔍 Анализ | `POST /api/analysis/search-by-text` (`embedding`/`keyword`) · `POST /api/scan/clap` |
 | 📚 Библиотека | `/api/library/*` · `/api/tracks/*` · `/api/covers/*` · `/api/lyrics/*` · `/api/collab/*` · `/api/cron` · `/api/settings/*` |
 
-Интеграция мобильного клиента — в [docs/mobile-integration.md](docs/mobile-integration.md).
-
 ## 🛠 Локальная разработка
 
 **Backend** (по умолчанию sqlite, Postgres не нужен):
@@ -210,7 +188,6 @@ cd deploy && docker compose up -d --build
 ├── server/                   # FastAPI + SQLAlchemy + RQ (Python 3.11)
 ├── web/                      # Next.js 14 + TypeScript + TailwindCSS
 ├── bridge/                   # мост метаданных (MusicBrainz / Last.fm)
-├── docs/mobile-integration.md# ТЗ для мобильного клиента
 └── .github/workflows/docker-publish.yml  # CI: сборка и пуш образов в GHCR
 ```
 
@@ -237,4 +214,4 @@ docker compose down -v                      # остановить И удали
 
 Copyright (C) 2026 mrSaT13.
 
-Проект под **GNU Affero General Public License v3.0 (AGPL-3.0)** — см. [LICENSE](LICENSE). Запускаешь изменённую версию на сервере — обязан отдать пользователям исходники (раздел 13 AGPL).
+Проект под **GNU Affero General Public License v3.0 (AGPL-3.0)** — см. [LICENSE](LICENSE).
