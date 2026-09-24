@@ -98,12 +98,20 @@ export default function Automation() {
           {clap ? (clap.available ? "в образе" : "нет в образе") : "…"}
         </Badge>
         {clap && <span className="text-xs text-muted">эмбеддингов в базе: {clapN}</span>}
-        <Badge tone="warn">audio — стаб</Badge>
+        {clap && (
+          <Badge tone={clap.audio_available && clap.audio_enabled ? "ok" : "default"}>
+            {clap.audio_available && clap.audio_enabled
+              ? `audio — гибрид ×${clap.audio_weight ?? 0.7}`
+              : clap.audio_available
+                ? "audio — модель есть, флаг выкл"
+                : "audio — нет модели"}
+          </Badge>
+        )}
       </div>
       <div className="text-xs text-muted mt-2">
         {clap && !clap.available
-          ? "Модели нет — «Открытия недели» считаются как cold-start. Скачать один раз на сервере: docker compose exec backend python -m ml.download_clap (ляжет в volume deploy/models, переживёт пересборки), затем «CLAP-эмбеддинги» → «сейчас»."
-          : "Если модель есть, а эмбеддингов 0 — запустите задачу «CLAP-эмбеддинги» кнопкой «сейчас» ниже."}
+          ? "Текстовой модели нет — обновите образ (CLAP запечён в backend-образ, см. deploy/Dockerfile.server) и пересоберите: модель подтянется при сборке."
+          : "Если модель есть, а эмбеддингов 0 — запустите задачу «CLAP-эмбеддинги» кнопкой «сейчас» ниже (текст), аудио-эмбеддинги считаются следом за sonic-анализом и задачей «clap-audio»."}
       </div>
     </Card>
     <div className="h-4" />

@@ -19,22 +19,34 @@ router = APIRouter()
 
 @router.get("/clap-status")
 def clap_status(db: Session = Depends(get_db)):
-    """Есть ли CLAP-модель в образе и сколько эмбеддингов в базе.
+    """Есть ли CLAP-модели в образе и сколько эмбеддингов в базе.
 
-    Если модели нет — «Открытия недели» считаются как cold-start fallback,
-    а CLAP-audio всегда стаб (см. services/clap.py).
+    available — текст-модель (поиск по смыслу); audio_* — аудио-ветка
+    (гибрид в похожих). Без аудио-модели/флага — тихий фолбек на librosa.
     """
     from sqlalchemy import func as _func
 
     from app.db.models import TrackEmbedding
 
     available = False
+    audio_available = False
+    audio_enabled = False
+    audio_weight = 0.0
     files: list[dict] = []
     try:
         from app.services import clap as _clap
 
         available = bool(_clap.is_available())
-        for p in sorted(_clap.MODELS_DIR.glob("*")):
+        audio_available = bool(_clap.is_audio_available())
+        try:
+            from app.core.config import get_settings as _gs
+
+            _s = _gs()
+            audio_enabled = bool(getattr(_s, "clap_audio_enabled", False))
+            audio_weight = float(getattr(_s, "clap_audio_weight", 0.7) or 0.0)
+        except Exception:
+            pass
+        for p in sorted(_clap.MODELS_DIR.rglob("*.onnx")):
             if p.is_file():
                 try:
                     files.append({"name": p.name, "bytes": int(p.stat().st_size)})
@@ -49,7 +61,9 @@ def clap_status(db: Session = Depends(get_db)):
     except Exception:
         pass
     return {"available": available, "files": files, "embeddings": counts,
-            "audio_stub": True}
+            "audio_available": audio_available, "audio_enabled": audio_enabled,
+            "audio_weight": audio_weight,
+            "audio_stub": not audio_available}
 
 
 @router.post("/clusters/build")

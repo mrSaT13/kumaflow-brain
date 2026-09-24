@@ -51,6 +51,23 @@ export default function NowPlaying({ userId: propUserId }: { userId?: string }) 
     const selName = (users?.users ?? []).find((u) => u.external_id === idleUser)?.username ?? idleUser;
     return (
       <Card>
+        <div className="flex items-center gap-2 text-xs mb-3 flex-wrap">
+          <span className="text-muted">Слушает сейчас</span>
+          <span className="flex-1" />
+          {!propUserId && (users?.users?.length ?? 0) > 0 && (
+            <select
+              className="kuma-input kuma-input-inline !py-1 !px-2 text-xs w-36"
+              value={selUser}
+              onChange={(e) => setSelUser(e.target.value)}
+              title="Чей эфир смотреть"
+            >
+              <option value="">все</option>
+              {(users?.users ?? []).map((u) => (
+                <option key={u.id} value={u.id}>{u.username}</option>
+              ))}
+            </select>
+          )}
+        </div>
         <div className="text-sm text-muted flex items-center gap-2">
           <Radio className="w-4 h-4" />
           {selName

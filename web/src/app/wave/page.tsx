@@ -76,6 +76,13 @@ export default function WavePage() {
   const pendingEvents = useRef<WaveEvent[]>([]);
   const lastSyncedExternal = useRef<string>("");
   const bootRef = useRef<string>("");
+  // Когда локально меняли очередь (докрутка/клик) — слепок телефона старше
+  // этого момента её не затирает (иначе тик каждые 10с возвращал очередь
+  // телефона 44-сек давности и "волна не обновлялась").
+  const lastLocalEdit = useRef<number>(0);
+  function touchLocal() {
+    lastLocalEdit.current = Date.now();
+  }
   const busyRef = useRef(false);
   busyRef.current = busy;
 
@@ -156,6 +163,7 @@ export default function WavePage() {
       });
       const tracks = (r.tracks ?? []) as WaveTrack[];
       setQueue((prev) => (reset ? tracks : appendFresh(prev, tracks)).slice(0, 100));
+      touchLocal();
       setDrift(r.drift ?? null);
       setAdaptive(r.adaptive ?? null);
       setLastBatch(tracks.length || null);
@@ -195,6 +203,7 @@ export default function WavePage() {
         if (tracks.length > 0) {
           setQueue(tracks.slice(0, 100));
           setPlayingIdx(0);
+          touchLocal();
         }
       } catch {
         /* внешний плеер молчит — ждём ручного запуска */
@@ -214,6 +223,7 @@ export default function WavePage() {
       pendingEvents.current.push({ track_id: t.track_id, action: "play" });
     }
     setPlayingIdx(clamped);
+    touchLocal();
   }
 
   // Авто-докрутка хвоста: осталось мало — добрать +10 с накопленными событиями.
@@ -225,6 +235,8 @@ export default function WavePage() {
 
   // Очередь с телефона: мобила публикует её в POST /api/wave/publish,
   // веб подхватывает и показывает как есть (свежесть < 5 мин).
+  // Но: если локально очередь меняли ПОСЛЕ публикации телефона (докрутка,
+  // клик) — старый слепок её не затирает, ждём свежей публикации.
   useEffect(() => {
     if (!followPhone || !userId) return;
     let stop = false;
@@ -237,6 +249,8 @@ export default function WavePage() {
           return;
         }
         setPhoneAge(live.age_sec ?? null);
+        const phoneTs = Date.now() - (live.age_sec ?? 0) * 1000;
+        if (lastLocalEdit.current > phoneTs) return; // локальные правки свежее — не затираем
         const ids = live.queue.map((t) => t.track_id).join("|");
         setQueue((prev) => {
           if (prev.map((t) => t.track_id).join("|") === ids) return prev;
@@ -283,6 +297,7 @@ export default function WavePage() {
           });
           if (stop) return;
           setQueue((prev) => appendFresh(prev, (r.tracks ?? []) as WaveTrack[]).slice(0, 100));
+          touchLocal();
         }
       } catch {
         /* внешний плеер молчит — очередь живёт сама */
@@ -307,7 +322,7 @@ export default function WavePage() {
             <select
               className="kuma-input kuma-input-inline w-48"
               value={userId}
-              onChange={(e) => { setUserId(e.target.value); setQueue([]); setPlayingIdx(0); pendingEvents.current = []; }}
+              onChange={(e) => { setUserId(e.target.value); setQueue([]); setPlayingIdx(0); pendingEvents.current = []; lastLocalEdit.current = 0; }}
             >
               {ids.map((u) => (
                 <option key={u.id} value={u.id}>{u.username}</option>
