@@ -251,6 +251,52 @@ def get_automation(db: Session = Depends(get_db)):
     return {"ok": True, "flags": _auto.get_flags(db)}
 
 
+TIMEZONE_OPTIONS = [
+    "UTC", "+2", "+3", "+4", "+5", "+6", "+7", "+8", "+9", "+10", "+11", "+12",
+    "Europe/Moscow", "Europe/Samara", "Asia/Yekaterinburg", "Asia/Omsk",
+    "Asia/Krasnoyarsk", "Asia/Irkutsk", "Asia/Yakutsk", "Asia/Vladivostok",
+    "Asia/Dubai", "Asia/Yerevan", "Asia/Tbilisi", "Europe/Minsk",
+]
+
+
+@router.get("/timezone")
+def get_timezone(db: Session = Depends(get_db)):
+    """Часовой пояс «домашнего» времени из веб-настроек (без лезть в compose).
+    Применяется без перезапуска: крон, daily-границы, волна, подписи времени."""
+    from app.core.time import db_tz_name, resolve_tz_name
+
+    from app.core.config import get_settings as _gs
+
+    return {"ok": True, "timezone": resolve_tz_name(),
+            "from_db": bool(db_tz_name()),
+            "env_default": _gs().app_timezone or "UTC",
+            "options": TIMEZONE_OPTIONS}
+
+
+@router.put("/timezone")
+def save_timezone(payload: dict, db: Session = Depends(get_db)):
+    """Сохранить часовой пояс. Невалидное имя → 400, ничего не пишем."""
+    from app.core.time import _tz_cache, parse_tz
+
+    v = str((payload or {}).get("timezone") or "").strip()
+    if not v:
+        return {"ok": False, "error": "timezone required"}
+    try:
+        parse_tz(v)
+    except ValueError:
+        return {"ok": False, "error": f"unknown timezone: {v}"}
+    row = db.get(AppSetting, "app_timezone")
+    if row is None:
+        db.add(AppSetting(key="app_timezone", value={"timezone": v}))
+    else:
+        row.value = {"timezone": v}
+    db.commit()
+    _tz_cache.update(name=v, ts=0.0)
+    from app.core.time import resolve_tz_name as _r
+
+    return {"ok": True, "timezone": _r()}
+
+
 @router.put("/automation")
 def save_automation(payload: dict, db: Session = Depends(get_db)):
     """Сохранить флаги автоматизации. Принимает только известные ключи."""

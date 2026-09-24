@@ -48,7 +48,13 @@ def _client_cls():
 # --- Токен пользователя (шифр как в vault) ---
 
 def save_user_token(db, user_id: str, token: str) -> dict:
-    """Проверить токен через account_status и запомнить шифром."""
+    """Проверить токен через account_status и запомнить шифром.
+
+    Вместе с токеном кладём uid+login: методам users_likes_* в
+    yandex-music>=2 нужен явный user_id, иначе API отвечает
+    ownerOtherwiseUserBindingError («User should be authenticated
+    or ownerUid defined») — импорт молча умирал на этом.
+    """
     from app.db.models import AppSetting
     from app.services import vault as _vault
 
@@ -62,18 +68,24 @@ def save_user_token(db, user_id: str, token: str) -> dict:
         me = client.account_status() if hasattr(client, "account_status") else None
         account = getattr(me, "account", None)
         login = getattr(account, "login", None) if account is not None else None
+        uid = getattr(account, "uid", None) if account is not None else None
     except Exception as e:  # noqa: BLE001 — сеть/401/прочее отдаём текстом
         return {"ok": False, "error": f"Токен не принят Яндексом: {str(e)[:200]}"}
     _vault.ensure_vault_key()
     blob = base64.b64encode(_vault.encrypt_password(token)).decode()
     key = _token_key(user_id)
+    value = {"enc": blob}
+    if uid is not None:
+        value["uid"] = str(uid)
+    if login:
+        value["login"] = str(login)
     row = db.get(AppSetting, key)
     if row is None:
-        db.add(AppSetting(key=key, value={"enc": blob}))
+        db.add(AppSetting(key=key, value=value))
     else:
-        row.value = {"enc": blob}
+        row.value = value
     db.commit()
-    return {"ok": True, "login": login}
+    return {"ok": True, "login": login, "uid": str(uid) if uid is not None else None}
 
 
 def has_user_token(db, user_id: str) -> bool:
@@ -115,6 +127,56 @@ def get_client(db, user_id: str, client=None):
         return _client_cls()(token).init()
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"Яндекс недоступен: {str(e)[:200]}"}
+
+
+def resolve_yandex_uid(db, user_id: str, client=None):
+    """uid владельца токена: из сейфа → account_status (с добором в сейф).
+
+    Нужен методам users_likes_*/users_dislikes_* (yandex-music>=2 требует
+    явный user_id). None — только если Яндекс вообще не отвечает.
+    """
+    from app.db.models import AppSetting
+
+    try:
+        row = db.get(AppSetting, _token_key(user_id))
+        if row is not None and isinstance(row.value, dict) and row.value.get("uid"):
+            return str(row.value["uid"])
+    except Exception:
+        pass
+    c = client if client is not None else get_client(db, user_id)
+    if isinstance(c, dict):
+        return None
+    try:
+        me = c.account_status() if hasattr(c, "account_status") else None
+        account = getattr(me, "account", None)
+        uid = getattr(account, "uid", None) if account is not None else None
+        if uid is None:
+            return None
+        uid = str(uid)
+        try:
+            row = db.get(AppSetting, _token_key(user_id))
+            if row is not None and isinstance(row.value, dict):
+                row.value = dict(row.value) | {"uid": uid}
+                db.commit()
+        except Exception:
+            pass
+        return uid
+    except Exception:
+        return None
+
+
+def _user_list(client, method: str, uid):
+    """Вызов users_likes_*/users_dislikes_* с uid и фолбэком без него
+    (старые версии либы принимали вызов без user_id)."""
+    fn = getattr(client, method, None)
+    if fn is None:
+        raise RuntimeError(f"нет метода {method} в клиенте Яндекс Музыки")
+    if uid:
+        try:
+            return fn(user_id=uid)
+        except TypeError:
+            pass
+    return fn()
 
 
 # --- Настройки-тумблеры ---
@@ -272,12 +334,13 @@ def import_taste(db, user_id: str, client=None, max_tracks: int = 400) -> dict:
     c = get_client(db, user_id, client)
     if isinstance(c, dict):
         return c
+    uid = resolve_yandex_uid(db, user_id, c)
     try:
-        liked_shorts = list(c.users_likes_tracks() or [])
-        disliked_shorts = list(c.users_dislikes_tracks() or [])
-        liked_artists = [_ym_name(a) for a in (c.users_likes_artists() or [])]
-        disliked_artists = [_ym_name(a) for a in (c.users_dislikes_artists() or [])]
-        liked_albums = list(c.users_likes_albums() or [])
+        liked_shorts = list(_user_list(c, "users_likes_tracks", uid) or [])
+        disliked_shorts = list(_user_list(c, "users_dislikes_tracks", uid) or [])
+        liked_artists = [_ym_name(a) for a in (_user_list(c, "users_likes_artists", uid) or [])]
+        disliked_artists = [_ym_name(a) for a in (_user_list(c, "users_dislikes_artists", uid) or [])]
+        liked_albums = list(_user_list(c, "users_likes_albums", uid) or [])
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"Яндекс не отдал лайки: {str(e)[:200]}"}
 

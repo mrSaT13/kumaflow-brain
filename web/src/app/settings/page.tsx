@@ -30,10 +30,65 @@ function Row({ k, v }: { k: string; v: unknown }) {
 
 function DiagRow({ k, v }: { k: string; v: string }) {
   return (
-    <div className="flex items-start justify-between gap-3">
-      <dt className="text-muted shrink-0">{k}</dt>
-      <dd className="text-right break-all">{v || "—"}</dd>
+    <div className="flex items-start gap-3 py-1.5 border-b border-border last:border-0">
+      <span className="text-xs text-muted w-40 shrink-0">{k}</span>
+      <span className="text-xs font-mono break-all">{v}</span>
     </div>
+  );
+}
+
+function TimezoneCard() {
+  const { data, mutate } = useSWR("/api/settings/timezone", () => api.getTimezone());
+  const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  useEffect(() => {
+    if (data?.timezone) setVal(data.timezone);
+  }, [data]);
+  async function save() {
+    if (!val.trim()) { toast("Выберите часовой пояс", "info"); return; }
+    setBusy(true);
+    try {
+      const r = await api.saveTimezone(val.trim());
+      if (!r.ok) { toast(r.error ?? "Не сохранилось", "err"); return; }
+      toast(`Часовой пояс: ${r.timezone} — применён без перезапуска`, "ok");
+      mutate();
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+  const opts = data?.options?.length ? data.options : ["UTC"];
+  return (
+    <Section title="Время">
+      <Card>
+        <div className="text-sm text-muted mb-3">
+          «Домашнее» время сервера: границы суток daily-плейлистов, срабатывание крона,
+          контекст утро/вечер в волне и подписи времени. Сейчас:{" "}
+          <span className="kuma-pill">{data ? data.timezone : "…"}</span>
+          {!data?.from_db && <span className="text-xs"> (из compose, в вебе не менялся)</span>}
+        </div>
+        <div className="flex gap-2 flex-wrap items-end">
+          <label className="block min-w-52">
+            <div className="text-xs text-muted mb-1">Часовой пояс</div>
+            <select className="kuma-input kuma-input-inline w-64" value={val} onChange={(e) => setVal(e.target.value)}>
+              {!opts.includes(val) && val && <option value={val}>{val}</option>}
+              {opts.map((o) => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+          </label>
+          <Button onClick={save} disabled={busy}>
+            <Check className="w-4 h-4" /> {busy ? "Сохранение…" : "Сохранить"}
+          </Button>
+        </div>
+        <div className="text-xs text-muted mt-2">
+          Для UTC+4 подойдут <code className="kuma-pill">Europe/Samara</code> или просто <code className="kuma-pill">+4</code>.
+          Применяется сразу, перезапуск контейнеров не нужен.
+        </div>
+      </Card>
+    </Section>
   );
 }
 
@@ -283,6 +338,8 @@ export default function SettingsPage() {
         </Card>
       </Section>
       }
+
+      {tab === "connections" && <TimezoneCard />}
 
       {tab === "yandex" && <Section title="Яндекс Музыка — вкус, история, чарты">
         <YandexImport />

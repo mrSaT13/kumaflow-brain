@@ -423,6 +423,10 @@ export const api = {
     ),
   getAutomation: () =>
     http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean } }>(`/api/settings/automation`),
+  getTimezone: () =>
+    http<{ ok: boolean; timezone: string; from_db: boolean; env_default: string; options: string[] }>(`/api/settings/timezone`),
+  saveTimezone: (timezone: string) =>
+    http<{ ok: boolean; timezone?: string; error?: string }>(`/api/settings/timezone`, { method: "PUT", body: JSON.stringify({ timezone }) }),
   saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean }) =>
     http<{ ok: boolean; flags: Record<string, unknown> }>(
       `/api/settings/automation`, { method: "PUT", body: JSON.stringify(flags) },

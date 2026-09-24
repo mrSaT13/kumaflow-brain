@@ -24,7 +24,6 @@ def _tick_once() -> None:
 
     from apscheduler.triggers.cron import CronTrigger
 
-    from app.core.time import local_today as _local_today
     from app.core.time import server_tz as _server_tz
     from app.core.time import utcnow as _utcnow
     from app.db.database import session_scope
