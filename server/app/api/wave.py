@@ -137,11 +137,12 @@ def wave_continue(payload: dict, request: Request, db: Session = Depends(get_db)
 
 
 @router.get('/seeds')
-def wave_seeds(user_id: str, characteristic: str | None = None,
+def wave_seeds(user_id: str, request: Request, characteristic: str | None = None,
                limit: int = 5, db: Session = Depends(get_db)):
     """Сиды волны для клиента (топ+recent+random как в мобиле)."""
     from app.services import wave as _wave
 
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
     seeds = _wave.select_seeds(db, str(u.id), characteristic,
                                limit=max(1, min(10, int(limit or 5))))
@@ -167,10 +168,11 @@ def wave_publish(payload: dict, request: Request, db: Session = Depends(get_db))
 
 
 @router.get('/live')
-def wave_live(user_id: str, db: Session = Depends(get_db)):
+def wave_live(user_id: str, request: Request, db: Session = Depends(get_db)):
     """Живая очередь телефона + обогащение для веба. age_sec — свежесть."""
     from app.services.track_resolve import get_track as _gt
 
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
     entry = _live_get(str(u.id))
     if not entry:

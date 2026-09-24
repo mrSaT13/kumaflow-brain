@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.core.auth import enforce_user_binding, require_scope
+from app.core.auth import enforce_user_binding, require_admin, require_scope
 from app.db.models import MediaUser
 from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
 from app.services.media_server import resolve_active_server
@@ -79,8 +79,8 @@ def list_users(db: Session = Depends(get_db)):
     return {"users": [_to_dict(u) for u in rows]}
 
 
-@router.post("", include_in_schema=False)
-@router.post("/")
+@router.post("", include_in_schema=False, dependencies=[Depends(require_admin)])
+@router.post("/", dependencies=[Depends(require_admin)])
 def create_user(payload: UserIn, db: Session = Depends(get_db)):
     server = resolve_active_server(db)
     db.commit()
@@ -104,7 +104,7 @@ def create_user(payload: UserIn, db: Session = Depends(get_db)):
     return {"user": _to_dict(u)}
 
 
-@router.patch("/{user_id}")
+@router.patch("/{user_id}", dependencies=[Depends(require_admin)])
 def update_user(user_id: str, payload: UserPatch, db: Session = Depends(get_db)):
     try:
         uuid.UUID(user_id)
@@ -122,7 +122,7 @@ def update_user(user_id: str, payload: UserPatch, db: Session = Depends(get_db))
     return {"user": _to_dict(u)}
 
 
-@router.delete("/{user_id}")
+@router.delete("/{user_id}", dependencies=[Depends(require_admin)])
 def delete_user(user_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(user_id)
@@ -136,7 +136,7 @@ def delete_user(user_id: str, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.post("/sync")
+@router.post("/sync", dependencies=[Depends(require_admin)])
 def sync_users(db: Session = Depends(get_db)):
     """Синхронизировать пользователей из Navidrome (getUsers) — сразу, без очереди."""
     from app.workers.tasks import sync_navidrome_users
@@ -706,7 +706,7 @@ def clear_history(user_id: str, db: Session = Depends(get_db)):
     return {'ok': True, 'cleared_history': h, 'cleared_events': e}
 
 
-@router.delete("/history")
+@router.delete("/history", dependencies=[Depends(require_admin)])
 def clear_all_history(db: Session = Depends(get_db)):
     """Стереть ВСЮ историю прослушиваний и событий (кнопка «Очистить историю»). Лайки/плейлисты не трогаем."""
     from app.db.models import PlayEvent as _PE

@@ -7,15 +7,16 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import require_admin, require_brain_auth
 from app.db.models import ScanLog, ScanRun, Track, TrackCluster, TrackFeatures
 from app.services.media_server import resolve_active_server
 from app.services.queue import enqueue
 from app.workers.tasks import cluster_build
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
-@router.post("/build")
+@router.post("/build", dependencies=[Depends(require_admin)])
 def build(db: Session = Depends(get_db)):
     """Пересобрать кластеры: создаёт задачу (видно в истории и логах)."""
     server = resolve_active_server(db)

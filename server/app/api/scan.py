@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.core.auth import require_admin, require_brain_auth
 from app.db import get_db, models
 from app.db.models import ScanRun, ScanLog
 from app.services.demo import ensure_demo_server, seed_demo_library
@@ -27,7 +28,7 @@ from app.workers.tasks import (
 )
 
 logger = get_logger("api.scan")
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 def _run_to_dict(r: ScanRun) -> dict:
@@ -94,7 +95,7 @@ def _start_run(phase: str, fn, db: Session, *, total: int = 0, job_kwargs: dict 
     return run
 
 
-@router.post("/library")
+@router.post("/library", dependencies=[Depends(require_admin)])
 def start_library_scan(db: Session = Depends(get_db)):
     cfg = get_media_server_config(db)
     is_real = bool(cfg.get("url") and cfg["url"] not in ("http://localhost", "https://localhost"))
@@ -108,7 +109,7 @@ def start_library_scan(db: Session = Depends(get_db)):
     return {"queued": True, "run_id": str(run.id)}
 
 
-@router.post("/analysis")
+@router.post("/analysis", dependencies=[Depends(require_admin)])
 def start_analysis(force: bool = False, limit: int = 0, db: Session = Depends(get_db)):
     """Реальный sonic-анализ. force=1 — пересчитать всё, limit=N — взять N треков."""
     total = db.query(models.Track).count()
@@ -117,26 +118,26 @@ def start_analysis(force: bool = False, limit: int = 0, db: Session = Depends(ge
     return {"queued": True, "run_id": str(run.id)}
 
 
-@router.post("/lyrics")
+@router.post("/lyrics", dependencies=[Depends(require_admin)])
 def start_lyrics(db: Session = Depends(get_db)):
     total = db.query(models.Track).count()
     run = _start_run("lyrics", lyrics_fetch, db, total=total, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 
-@router.post("/clusters")
+@router.post("/clusters", dependencies=[Depends(require_admin)])
 def start_clusters(db: Session = Depends(get_db)):
     run = _start_run("clusters", cluster_build, db, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 
-@router.post("/collab")
+@router.post("/collab", dependencies=[Depends(require_admin)])
 def start_collab(db: Session = Depends(get_db)):
     run = _start_run("collab", collab_build, db, job_timeout=900)
     return {"queued": True, "run_id": str(run.id)}
 
 
-@router.post("/smart")
+@router.post("/smart", dependencies=[Depends(require_admin)])
 def start_smart(db: Session = Depends(get_db)):
     """Умные автоплейлисты для каждого пользователя (открытия/забытые/ночь/спорт)."""
     from app.db.models import MediaUser
@@ -146,13 +147,13 @@ def start_smart(db: Session = Depends(get_db)):
     return {"queued": True, "run_id": str(run.id)}
 
 
-@router.post("/clap")
+@router.post("/clap", dependencies=[Depends(require_admin)])
 def start_clap(db: Session = Depends(get_db)):
     run = _start_run("clap", clap_embed, db, job_timeout=3600)
     return {"queued": True, "run_id": str(run.id)}
 
 
-@router.post("/clap-audio")
+@router.post("/clap-audio", dependencies=[Depends(require_admin)])
 def start_clap_audio(db: Session = Depends(get_db)):
     """Backfill аудио-эмбеддингов CPU (opt-in CLAP_AUDIO_ENABLED). Без флага — тихо skip."""
     run = _start_run("clap_audio", clap_embed_audio, db, job_timeout=7200)
@@ -176,7 +177,7 @@ def current_run(db: Session = Depends(get_db)):
     return {"current": _run_to_dict(r) if r else None}
 
 
-@router.post("/runs/{run_id}/cancel")
+@router.post("/runs/{run_id}/cancel", dependencies=[Depends(require_admin)])
 def cancel_run(run_id: str, db: Session = Depends(get_db)):
     try:
         uuid.UUID(run_id)
@@ -288,7 +289,7 @@ async def run_logs_stream(run_id: str):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-@router.delete("/runs")
+@router.delete("/runs", dependencies=[Depends(require_admin)])
 def purge_runs(keep_last: int = 20, db: Session = Depends(get_db)):
     """Очистить историю задач и логи: удаляет завершённые runs + их логи, оставляет keep_last последних."""
     keep_last = max(0, min(200, int(keep_last or 20)))

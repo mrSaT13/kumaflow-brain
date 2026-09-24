@@ -8,8 +8,9 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import require_brain_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 def _to_dict(n) -> dict:

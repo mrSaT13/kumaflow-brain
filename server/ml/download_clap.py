@@ -1,84 +1,86 @@
 #!/usr/bin/env python
 """Скачать CLAP ONNX для CPU (build-cache).
 
-Модель: laion/larger_clap_general (HTSAT-unfused, 512-dim, ~350MB).
-Кладёт в server/ml/models/: clap_text.onnx, clap_audio.onnx, tokenizer.json, config.json
-Запуск: python ml/download_clap.py  (или в Dockerfile.server RUN python ml/download_clap.py)
+Источник: Xenova/clap-htsat-unfused (ONNX-экспорт LAION CLAP, quantized):
+  onnx/text_model_quantized.onnx (~127МБ) -> clap_text.onnx
+  onnx/audio_model_quantized.onnx (~34МБ)  -> clap_audio.onnx
+  + tokenizer.json, config.json
+
+Почему не laion/*: в laion/larger_clap_general и laion/clap-htsat-unfused
+лежат только pytorch_model.bin (pickle) — ONNX там нет, bake молча
+пропускался и образ выходил того же размера (см. GHCR 1.79GiB дважды).
+
+Запуск: python ml/download_clap.py  (или в Dockerfile.server)
 Кэш: повторный запуск — skip если файлы уже есть и размер совпадает.
-Env: HF_TOKEN / HUGGINGFACE_HUB_TOKEN optional для приватных/rate-limit.
+Env: HF_TOKEN / HUGGINGFACE_HUB_TOKEN optional для rate-limit.
+Выход: 0 — всё на месте; 1 — модели нет (сборка Docker должна УПАСТЬ,
+а не запекать пустой образ).
 """
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
-MODEL = "laion/larger_clap_general"
+MODEL = "Xenova/clap-htsat-unfused"
 DST = Path(__file__).parent / "models"
 DST.mkdir(parents=True, exist_ok=True)
 
-NEED = ["clap_text.onnx", "clap_audio.onnx", "tokenizer.json", "config.json"]
+# (путь в репо -> каноническое имя у нас)
+WANT = {
+    "onnx/text_model_quantized.onnx": "clap_text.onnx",
+    "onnx/audio_model_quantized.onnx": "clap_audio.onnx",
+    "tokenizer.json": "tokenizer.json",
+    "config.json": "config.json",
+}
 
-def _has_all() -> bool:
-    return all((DST / f).exists() and (DST / f).stat().st_size > 1024 for f in NEED)
 
-if _has_all():
+def _ok() -> bool:
+    return all((DST / name).exists() and (DST / name).stat().st_size > 1024
+               for name in WANT.values())
+
+
+if _ok():
     print(f"[clap] already in {DST} — skip download")
     sys.exit(0)
 
 try:
     from huggingface_hub import snapshot_download
 except ImportError:
-    print("[clap] huggingface_hub not found — pip install huggingface_hub")
+    print("[clap] FATAL: huggingface_hub not found — pip install huggingface_hub")
     sys.exit(1)
 
 token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN") or None
-print(f"[clap] downloading {MODEL} -> {DST} (this may take a few minutes, ~350MB)...")
-# allow_patterns у snapshot_download поддерживает fnmatch
-# У laion/larger_clap_general ONNX лежит как *onnx* + tokenizer
+print(f"[clap] downloading {MODEL} -> {DST} (~165MB quantized)...")
 try:
-    snapshot_download(
+    snap = snapshot_download(
         repo_id=MODEL,
         local_dir=str(DST),
         local_dir_use_symlinks=False,
         token=token,
-        allow_patterns=["*.onnx", "*.json", "*.txt", "*.model"],
-        # игнор больших .bin/.safetensors (PyTorch) — экономим трафик
-        ignore_patterns=["*.safetensors", "*.bin", "*.pt", "*.ckpt"],
+        allow_patterns=["onnx/text_model_quantized.onnx",
+                        "onnx/audio_model_quantized.onnx",
+                        "tokenizer.json", "config.json"],
     )
-except TypeError:
-    # старые версии без allow_patterns/ignore_patterns
-    snapshot_download(repo_id=MODEL, local_dir=str(DST), local_dir_use_symlinks=False, token=token)
+except Exception as e:
+    print(f"[clap] FATAL: snapshot_download failed: {e}")
+    sys.exit(1)
 
-# проверка: найти onnx
+# раскладываем в канонические имена (snapshot кладёт с подпапкой onnx/)
+for src_rel, dst_name in WANT.items():
+    src = Path(snap) / src_rel if not (DST / src_rel).exists() else (DST / src_rel)
+    dst = DST / dst_name
+    if src.exists() and src != dst:
+        shutil.copy2(src, dst)
+        print(f"[clap] {src_rel} -> {dst_name} ({dst.stat().st_size // 1048576}MB)")
+
 onnxs = list(DST.rglob("*.onnx"))
-print(f"[clap] done, found {len(onnxs)} onnx: {[p.name for p in onnxs[:10]]}")
-# Нормализация имён: экспорт laion может лежать с другими именами/вложенностью.
-# Наш рантайм ищет *text*.onnx / *audio*.onnx (см. app/services/clap.py),
-# но канонические clap_text.onnx / clap_audio.onnx ускоряют старт.
-import shutil
-_text = next((p for p in onnxs if "text" in p.name.lower()), None)
-_audio = next((p for p in onnxs if "audio" in p.name.lower()), None)
-if _text is not None and (DST / "clap_text.onnx") != _text:
-    shutil.copy2(_text, DST / "clap_text.onnx")
-    print(f"[clap] normalized {_text.name} -> clap_text.onnx")
-if _audio is not None and (DST / "clap_audio.onnx") != _audio:
-    shutil.copy2(_audio, DST / "clap_audio.onnx")
-    print(f"[clap] normalized {_audio.name} -> clap_audio.onnx")
-for f in NEED:
-    p = DST / f
-    if not p.exists():
-        # пробуем найти рекурсивно и скопировать наверх
-        found = next(DST.rglob(f), None)
-        if found and found != p:
-            import shutil
-            shutil.copy2(found, p)
-            print(f"[clap] copied {found} -> {p}")
-if _has_all():
-    print("[clap] OK — all files present")
-else:
-    print(f"[clap] WARN — some files missing in {DST}:")
-    for f in NEED:
-        p = DST / f
-        print(f"  {f}: {'OK '+str(p.stat().st_size) if p.exists() else 'MISSING'}")
-    # не фатально — text encoder может работать без audio
+print(f"[clap] onnx in {DST}: {[(p.name, p.stat().st_size) for p in onnxs]}")
+if not _ok():
+    print("[clap] FATAL: после скачивания нет всех файлов:")
+    for name in WANT.values():
+        p = DST / name
+        print(f"  {name}: {'OK ' + str(p.stat().st_size) if p.exists() else 'MISSING'}")
+    sys.exit(1)
+print("[clap] OK — text+audio+tokenizer на месте")

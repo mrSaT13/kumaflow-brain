@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.core.auth import require_admin, require_brain_auth
 from app.db import get_db, models
 from app.db.models import MediaServer, Track, Album, Artist, MediaUser, TrackFeatures
 
@@ -56,7 +57,7 @@ def _server_similar_songs(seed_external_id: str, count: int = 20) -> list[dict] 
     _SIMILAR_DEADLINE = None
     return songs
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 @router.get("/overview")
@@ -419,7 +420,7 @@ def list_duplicates(limit: int = Query(200, le=1000), db: Session = Depends(get_
     return {"groups": groups, "group_count": len(groups), "duplicate_tracks": dup_tracks}
 
 
-@router.post("/duplicates/merge")
+@router.post("/duplicates/merge", dependencies=[Depends(require_admin)])
 def merge_duplicates(payload: dict, db: Session = Depends(get_db)):
     """Сшить дубли вручную: {keep_id, drop_ids[]} — статистика суммируется,
     лайки/история/плейлисты/фичи переезжают на keep."""
@@ -442,7 +443,7 @@ def merge_duplicates(payload: dict, db: Session = Depends(get_db)):
     return _dd.merge_tracks(db, keep_id, drop_ids)
 
 
-@router.post("/duplicates/auto")
+@router.post("/duplicates/auto", dependencies=[Depends(require_admin)])
 def auto_merge_duplicates(db: Session = Depends(get_db)):
     """Автослияние ВСЕХ точных групп (то же, что чекбокс «автоматом»).
 
@@ -464,7 +465,7 @@ def list_fingerprint_duplicates(threshold: float = 0.985, db: Session = Depends(
             "threshold": threshold}
 
 
-@router.post("/duplicates/auto-fingerprint")
+@router.post("/duplicates/auto-fingerprint", dependencies=[Depends(require_admin)])
 def auto_merge_fingerprint(payload: dict, db: Session = Depends(get_db)):
     """Автослияние аудио-дублей: {threshold=0.985, dry_run=false}. Сшивает через merge_tracks."""
     from app.services import dedup as _dd
@@ -496,7 +497,7 @@ def get_dedup_settings(db: Session = Depends(get_db)):
     return {"auto_merge": bool(val.get("auto_merge", False))}
 
 
-@router.post("/dedup-settings")
+@router.post("/dedup-settings", dependencies=[Depends(require_admin)])
 def save_dedup_settings(payload: dict, db: Session = Depends(get_db)):
     from app.db.models import AppSetting
 

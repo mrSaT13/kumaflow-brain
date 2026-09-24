@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import require_admin, require_brain_auth
 from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
 from app.services.media_server import resolve_active_server
 from app.services.ml import (
@@ -14,7 +15,7 @@ from app.services.ml import (
 )
 from app.services.queue import enqueue
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 @router.get("/clap-status")
@@ -66,7 +67,7 @@ def clap_status(db: Session = Depends(get_db)):
             "audio_stub": not audio_available}
 
 
-@router.post("/clusters/build")
+@router.post("/clusters/build", dependencies=[Depends(require_admin)])
 def clusters_build(db: Session = Depends(get_db)):
     server = resolve_active_server(db)
     db.commit()

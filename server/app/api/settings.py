@@ -4,11 +4,12 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.auth import require_admin
 from app.db import get_db
 from app.db.models import AppSetting
 from app.services import ai
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 @router.get("", include_in_schema=False)

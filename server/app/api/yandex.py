@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import check_body_user, require_admin, require_brain_auth
 from app.db.models import Track
 from app.services.yandex_music.client import get_yandex_config, save_yandex_config, fetch_metadata_sync
 from app.services.queue import enqueue
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 def _require_user(db: Session, user_id: str):
@@ -41,13 +42,13 @@ def get_config(db: Session = Depends(get_db)):
     return {"token": "***" if cfg["token"] else "", "enabled": cfg["enabled"], "has_token": bool(cfg["token"])}
 
 
-@router.post("/config")
+@router.post("/config", dependencies=[Depends(require_admin)])
 def save_config(payload: dict, db: Session = Depends(get_db)):
     val = save_yandex_config(db, payload or {})
     return {"ok": True, "saved": {"enabled": val["enabled"], "has_token": bool(val["token"])}}
 
 
-@router.post("/test")
+@router.post("/test", dependencies=[Depends(require_admin)])
 def test(payload: dict | None = None, db: Session = Depends(get_db)):
     artist = (payload or {}).get("artist") or "Земфира"
     title = (payload or {}).get("title") or "Искала"
@@ -60,7 +61,7 @@ def test(payload: dict | None = None, db: Session = Depends(get_db)):
     return {"ok": True, "result": res}
 
 
-@router.post("/enrich")
+@router.post("/enrich", dependencies=[Depends(require_admin)])
 def enrich(limit: int = 20, db: Session = Depends(get_db)):
     """Обогатить до limit треков без yandex-метаданных (фоновая задача)."""
     from app.db.models import TrackMetadataEnrich
@@ -106,10 +107,12 @@ def track_meta(track_id: str, db: Session = Depends(get_db)):
 # --- Персональный токен Яндекс Музыки (шифр в БД, как vault) ---
 
 @router.post("/user-token")
-def user_token_save(payload: dict, db: Session = Depends(get_db)):
+def user_token_save(payload: dict, request: Request, db: Session = Depends(get_db)):
     from app.services.yandex_music import library as _lib
 
-    u = _require_user(db, str((payload or {}).get("user_id") or ""))
+    _uid = str((payload or {}).get("user_id") or "")
+    check_body_user(getattr(request.state, "brain_token", None), _uid)
+    u = _require_user(db, _uid)
     try:
         return _lib.save_user_token(db, str(u.id), str((payload or {}).get("token") or ""))
     except Exception as e:  # noqa: BLE001
@@ -117,17 +120,19 @@ def user_token_save(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/user-token-status")
-def user_token_status(user_id: str, db: Session = Depends(get_db)):
+def user_token_status(user_id: str, request: Request, db: Session = Depends(get_db)):
     from app.services.yandex_music import library as _lib
 
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
     return {"ok": True, "stored": _lib.has_user_token(db, str(u.id))}
 
 
 @router.delete("/user-token")
-def user_token_forget(user_id: str, db: Session = Depends(get_db)):
+def user_token_forget(user_id: str, request: Request, db: Session = Depends(get_db)):
     from app.services.yandex_music import library as _lib
 
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
     return _lib.forget_user_token(db, str(u.id))
 
@@ -141,7 +146,7 @@ def import_settings_get(db: Session = Depends(get_db)):
     return {"ok": True, "settings": _lib.get_import_settings(db)}
 
 
-@router.put("/import-settings")
+@router.put("/import-settings", dependencies=[Depends(require_admin)])
 def import_settings_put(payload: dict, db: Session = Depends(get_db)):
     from app.services.yandex_music import library as _lib
 
@@ -151,11 +156,13 @@ def import_settings_put(payload: dict, db: Session = Depends(get_db)):
 # --- Импорт библиотеки пользователя в taste engine ---
 
 @router.post("/import-taste")
-def import_taste(payload: dict, db: Session = Depends(get_db)):
+def import_taste(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Лайки/дизлайки из Яндекс Музыки -> вкус мозга. Тумблера нет, всегда доступен."""
     from app.services.yandex_music import library as _lib
 
-    u = _require_user(db, str((payload or {}).get("user_id") or ""))
+    _uid = str((payload or {}).get("user_id") or "")
+    check_body_user(getattr(request.state, "brain_token", None), _uid)
+    u = _require_user(db, _uid)
     try:
         return _lib.import_taste(db, str(u.id))
     except Exception as e:  # noqa: BLE001
@@ -166,11 +173,13 @@ def import_taste(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/import-history")
-def import_history(payload: dict, db: Session = Depends(get_db)):
+def import_history(payload: dict, request: Request, db: Session = Depends(get_db)):
     """История прослушиваний -> PlayHistory/events. Только при history_enabled."""
     from app.services.yandex_music import library as _lib
 
-    u = _require_user(db, str((payload or {}).get("user_id") or ""))
+    _uid = str((payload or {}).get("user_id") or "")
+    check_body_user(getattr(request.state, "brain_token", None), _uid)
+    u = _require_user(db, _uid)
     try:
         limit = int((payload or {}).get("limit") or 300)
     except (TypeError, ValueError):
@@ -186,7 +195,7 @@ def import_history(payload: dict, db: Session = Depends(get_db)):
 
 # --- Чарты/новинки для cold start ---
 
-@router.post("/charts/refresh")
+@router.post("/charts/refresh", dependencies=[Depends(require_admin)])
 def charts_refresh(db: Session = Depends(get_db)):
     from app.services.yandex_music import library as _lib
 
@@ -213,7 +222,7 @@ def corrections_list(limit: int = 50, offset: int = 0, db: Session = Depends(get
     return {"ok": True, **_lib.list_corrections(db, limit, offset)}
 
 
-@router.post("/corrections/revert")
+@router.post("/corrections/revert", dependencies=[Depends(require_admin)])
 def corrections_revert(payload: dict, db: Session = Depends(get_db)):
     """Откатить правки Яндекса по треку (все поля или fields=[...])."""
     from app.services.yandex_music import library as _lib

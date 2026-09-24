@@ -5,9 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.db.models import CronJob
+from app.core.auth import require_admin, require_brain_auth
 from app.services.queue import enqueue
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 import uuid
 from datetime import datetime
@@ -50,7 +51,7 @@ def list_jobs(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(require_admin)])
 def create_job(payload: dict, db: Session = Depends(get_db)):
     j = CronJob(
         id=str(uuid.uuid4()),
@@ -65,7 +66,7 @@ def create_job(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True, "id": str(j.id)}
 
 
-@router.put("/{job_id}")
+@router.put("/{job_id}", dependencies=[Depends(require_admin)])
 def update_job(job_id: str, payload: dict, db: Session = Depends(get_db)):
     j = db.get(CronJob, job_id)
     if not j:
@@ -78,7 +79,7 @@ def update_job(job_id: str, payload: dict, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.delete("/{job_id}")
+@router.delete("/{job_id}", dependencies=[Depends(require_admin)])
 def delete_job(job_id: str, db: Session = Depends(get_db)):
     j = db.get(CronJob, job_id)
     if j:
@@ -87,7 +88,7 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.post("/{job_id}/run")
+@router.post("/{job_id}/run", dependencies=[Depends(require_admin)])
 def run_now(job_id: str, db: Session = Depends(get_db)):
     j = db.get(CronJob, job_id)
     if not j:

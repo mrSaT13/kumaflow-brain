@@ -6,14 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import require_admin, require_brain_auth
 from app.services.demo import ensure_demo_server
 from app.services.queue import enqueue
 from app.workers.tasks import collab_build
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
-@router.post("/rebuild")
+@router.post("/rebuild", dependencies=[Depends(require_admin)])
 def rebuild():
     return {"queued": True, "job_id": enqueue(collab_build)}
 

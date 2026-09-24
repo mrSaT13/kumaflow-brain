@@ -22,13 +22,15 @@ from app.core.config import get_settings
 
 _bearer = HTTPBearer(auto_error=False)
 
-# Пути, всегда открытые (health/docs + управление токенами и логин из LAN-веба;
-# сами токены защищают API, а не веб-морду).
+# Пути, всегда открытые (health/docs + логин из LAN-веба; сами токены
+# защищают API, а не веб-морду). tokens/meta открыт чтобы UI мог показать
+# состояние; CRUD токенов требует admin (первое создание при пустой базе
+# открыто — иначе из начальной LAN-настройки было бы не выйти).
 OPEN_PATHS = (
     "/api/health",
     "/api/docs",
     "/api/openapi.json",
-    "/api/settings/tokens",
+    "/api/settings/tokens/meta",
     "/api/settings/login",
     "/api/settings/whoami",
 )
@@ -110,6 +112,24 @@ def require_scope(*allowed: str):
         raise HTTPException(403, f"token lacks scope (need: {'|'.join(allowed)})")
 
     return _dep
+
+
+def require_admin(
+    request: Request,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    """Только админ: info None (открытая LAN без токенов) или admin-скоуп.
+
+    Обычный per-user токен (wave/sync/...) сюда не проходит — так обычный
+    пользователь не может дёргать сканы, настройки, токены и чужие данные.
+    """
+    info = _auth_state(request, creds)
+    if info is None:
+        return None
+    if info.get("is_admin"):
+        request.state.brain_token = info
+        return None
+    raise HTTPException(403, "admin token required")
 
 
 def enforce_user_binding(request: Request):

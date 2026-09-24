@@ -7,11 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db, models
+from app.core.auth import require_admin, require_brain_auth
 from app.db.models import ScanLog, ScanRun, Track, TrackFeatures, TrackCluster, Lyrics, TrackMetadataEnrich
 from app.services.queue import enqueue
 from app.workers.tasks import analyze_single
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 def _track_source(t: Track) -> str:
@@ -146,7 +147,7 @@ def get_track(track_id: str, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/{track_id}/analyze")
+@router.post("/{track_id}/analyze", dependencies=[Depends(require_admin)])
 def analyze_track_now(track_id: str, db: Session = Depends(get_db)):
     """Sonic-анализ одного трека прямо сейчас (кнопка на странице трека)."""
     try:

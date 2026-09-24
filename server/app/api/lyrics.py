@@ -6,13 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import require_admin, require_brain_auth
 from app.db.models import Lyrics, Track
 from app.services.queue import enqueue
 from app.services import lyrics as lyrics_svc
 from app.services import lyrics_ai
 from app.db.models import TrackFeatures
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 @router.post("/fetch")
@@ -85,7 +86,7 @@ def get_lyrics(track_id: str, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/backfill-language")
+@router.post("/backfill-language", dependencies=[Depends(require_admin)])
 def backfill_language(db: Session = Depends(get_db)):
     """Разовый прогон: проставить language у старых текстов (было None)."""
     from app.services.lyrics import detect_lyrics_language as _det

@@ -217,33 +217,28 @@ def get_audio_embedding(path: str | Path, dim: int = 512) -> list[float] | None:
         y, _ = librosa.load(str(p), sr=22050, mono=True, duration=10.0)
         if y is None or len(y) < 22050:
             return None
-        # mel 64x~430 — вход большинства CLAP-audio экспортов; если экспорт
-        # ждет другое — тихо fallback (не роняем анализ).
+        # log-mel 64 полосы. Раскладку подгоняем под вход модели:
+        # Xenova audio_model ждёт [B, T, M], иные экспорты — NCHW.
         mel = librosa.feature.melspectrogram(y=y, sr=22050, n_mels=64)
-        mel = np.log1p(np.maximum(mel, 0)).astype(np.float32)
-        mel = mel[np.newaxis, np.newaxis, :, :]  # NCHW
+        mel = np.log1p(np.maximum(mel, 0)).astype(np.float32)  # [M, T]
         ort_inputs = {}
         try:
-            names = [i.name for i in sess.get_inputs()]
+            inputs = list(sess.get_inputs())
+            first = inputs[0]
+            dims = [int(d) if isinstance(d, int) else -1
+                    for d in (first.shape or [])]
         except Exception:
-            names = []
-        if names:
-            # подставляем в первый float-вход, остальные — нулями по shape
-            placed = False
-            for inp in sess.get_inputs():
-                try:
-                    shape = [d if isinstance(d, int) and d > 0 else 1 for d in inp.type]
-                except Exception:
-                    shape = []
-                if not placed and "float" in str(inp.type).lower():
-                    try:
-                        ort_inputs[inp.name] = mel.astype(np.float32)
-                        placed = True
-                    except Exception:
-                        continue
-            if not placed:
+            inputs, first, dims = [], None, []
+        try:
+            if first is not None and len(dims) == 3:
+                ort_inputs[first.name] = mel.T[np.newaxis, :, :]  # [1, T, M]
+            elif first is not None and len(dims) == 4:
+                ort_inputs[first.name] = mel[np.newaxis, np.newaxis, :, :]  # NCHW
+            elif first is not None:
+                ort_inputs[first.name] = mel.T[np.newaxis, :, :]
+            else:
                 return None
-        else:
+        except Exception:
             return None
         out = sess.run(None, ort_inputs)
         vec = np.array(out[0].reshape(-1), dtype=np.float32)

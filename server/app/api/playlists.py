@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db, models
-from app.core.auth import require_scope
+from app.core.auth import check_body_user as _check_body_user, require_admin, require_scope
 from app.db.models import Playlist, PlaylistTrack, Track
 from app.services.demo import ensure_demo_server as _ensure_demo  # noqa: F401 (реэкспорт для совместимости)
 from app.services.media_server import resolve_active_server
@@ -57,6 +57,19 @@ def _to_dict(p: Playlist, db: Session, owners: dict[str, str] | None = None) -> 
     }
 
 
+def _assert_owner_or_admin(request, playlist: Playlist) -> None:
+    """Удалять/выгружать чужой плейлист обычным токеном нельзя."""
+    from fastapi import HTTPException as _HE
+
+    info = getattr(getattr(request, "state", None), "brain_token", None)
+    if info is None or info.get("is_admin"):
+        return None
+    owner = (info or {}).get("owner_user_id")
+    if owner and playlist.owner_user_id and str(playlist.owner_user_id) == str(owner):
+        return None
+    raise _HE(403, "not your playlist")
+
+
 def _owner_map(db: Session, rows: list[Playlist]) -> dict[str, str]:
     from app.db.models import MediaUser
 
@@ -79,7 +92,7 @@ def list_playlists(show_hidden: bool = False, db: Session = Depends(get_db)):
     return {"playlists": items, "hidden_count": len(hidden)}
 
 
-@router.post("/{playlist_id}/hide")
+@router.post("/{playlist_id}/hide", dependencies=[Depends(require_admin)])
 def hide_playlist(playlist_id: str, db: Session = Depends(get_db)):
     """Скрыть из списка (не удаляет, открывает по прямой ссылке)."""
     from app.db.models import AppSetting
@@ -101,7 +114,7 @@ def hide_playlist(playlist_id: str, db: Session = Depends(get_db)):
     return {"ok": True, "is_hidden": True}
 
 
-@router.post("/{playlist_id}/unhide")
+@router.post("/{playlist_id}/unhide", dependencies=[Depends(require_admin)])
 def unhide_playlist(playlist_id: str, db: Session = Depends(get_db)):
     from app.db.models import AppSetting
 
@@ -190,8 +203,10 @@ def get_playlist(playlist_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/generate-daily")
-def generate_daily(payload: GenerateIn | None = None, db: Session = Depends(get_db)):
+def generate_daily(payload: GenerateIn | None = None, request: Request = None, db: Session = Depends(get_db)):
     """Ежедневный: per-user cold-start + оркестратор волной. Если query указан — AI генератор."""
+    _check_body_user(getattr(getattr(request, "state", None), "brain_token", None),
+                     (payload.user_id if payload else None))
     n = (payload.n if payload else 30) or 30
     server = resolve_active_server(db)
     db.commit()
@@ -299,7 +314,7 @@ def generate_daily(payload: GenerateIn | None = None, db: Session = Depends(get_
 
 
 @router.post("/my-wave")
-def my_wave(payload: dict, db: Session = Depends(get_db)):
+def my_wave(payload: dict, request: Request, db: Session = Depends(get_db)):
     """«Моя волна» как у Яндекс Музыки: бесконечный персональный поток вкуса.
 
     Body: {user_id (обязательно), n=30, seed_track_id?, mood?}.
@@ -310,6 +325,7 @@ def my_wave(payload: dict, db: Session = Depends(get_db)):
     from app.services.ml import cold_start_playlist
 
     user_id = str((payload or {}).get("user_id") or "")
+    _check_body_user(getattr(request.state, "brain_token", None), user_id)
     n = int((payload or {}).get("n") or 30)
     n = max(5, min(100, n))
     seed = (payload or {}).get("seed_track_id")
@@ -428,8 +444,10 @@ def weekly_discovery(payload: dict, request: Request, db: Session = Depends(get_
 
 
 @router.post("/ai-generate")
-def ai_generate(payload: dict, db: Session = Depends(get_db)):
+def ai_generate(payload: dict, request: Request, db: Session = Depends(get_db)):
     """AI генератор как на мобиле: query -> candidates -> LLM -> playlist."""
+    _check_body_user(getattr(request.state, "brain_token", None),
+                     str((payload or {}).get("user_id") or "") or None)
     q = (payload.get("query") or payload.get("q") or "").strip()
     n = int(payload.get("n") or payload.get("desiredCount") or 30)
     user_id = payload.get("user_id")
@@ -477,7 +495,7 @@ def ai_generate(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/{playlist_id}/export")
-def export_playlist(playlist_id: str, db: Session = Depends(get_db)):
+def export_playlist(playlist_id: str, request: Request, db: Session = Depends(get_db)):
     """Выгрузить плейлист в Navidrome (чтобы появился в родном клиенте).
 
     Создаёт плейлист через Subsonic createPlaylist из треков Navidrome
@@ -485,6 +503,11 @@ def export_playlist(playlist_id: str, db: Session = Depends(get_db)):
     пересоздаёт удалённый плейлист заново. ID в Navidrome запоминаем.
     """
     from app.services.playlist_push import push_playlist_to_navidrome as _push_shared
+
+    _p = db.get(Playlist, playlist_id)
+    if _p is None:
+        raise HTTPException(404, "not found")
+    _assert_owner_or_admin(request, _p)
 
     res = _push_shared(db, playlist_id)
     if not res.get("ok"):
@@ -496,7 +519,7 @@ def export_playlist(playlist_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{playlist_id}")
-def delete_playlist(playlist_id: str, db: Session = Depends(get_db)):
+def delete_playlist(playlist_id: str, request: Request, db: Session = Depends(get_db)):
     try:
         uuid.UUID(playlist_id)
     except ValueError:
@@ -504,6 +527,7 @@ def delete_playlist(playlist_id: str, db: Session = Depends(get_db)):
     p = db.get(Playlist, playlist_id)
     if not p:
         raise HTTPException(404, "not found")
+    _assert_owner_or_admin(request, p)
     remote_id = p.external_id
     db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
     db.delete(p)
@@ -534,7 +558,7 @@ def delete_playlist(playlist_id: str, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.post("/fetch-lyrics")
+@router.post("/fetch-lyrics", dependencies=[Depends(require_admin)])
 def fetch_lyrics_now(db: Session = Depends(get_db)):
     """Запустить загрузку текстов + AI-анализ настроения прямо сейчас (как scan)."""
     server = resolve_active_server(db)

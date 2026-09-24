@@ -125,7 +125,7 @@ docker compose --profile bridge up -d
 <details>
 <summary><b>🧠 CLAP из коробки: текст + аудио (запечено в образ)</b></summary>
 
-Модель `laion/larger_clap_general` (~350МБ) запечена в backend-образ при сборке —
+Модель `Xenova/clap-htsat-unfused` quantized (~165МБ) запечена в backend-образ при сборке —
 качать ничего не надо, `worker-clap` стартует сам. Поиск по смыслу и аудио-гибрид
 в похожих работают сразу; без них был бы fallback на cold-start/keyword.
 

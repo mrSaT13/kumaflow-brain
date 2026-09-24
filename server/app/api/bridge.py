@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.core.auth import require_brain_auth
 from app.services import bridge as bridge_svc
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 @router.get("/status")

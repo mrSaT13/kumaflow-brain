@@ -16,7 +16,9 @@ import {
   Radio,
   ChevronsLeft,
   ChevronsRight,
+  LogOut,
 } from "lucide-react";
+import { setBrowserToken } from "@/lib/api";
 
 type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
 
@@ -133,6 +135,20 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
         ))}
       </nav>
       {!collapsed && <div className="px-6 py-4 text-[11px] text-muted">made with ♥ для аудиофилов</div>}
+      <div className={clsx("pb-4", collapsed ? "px-2" : "px-3")}>
+        <button
+          onClick={() => { setBrowserToken(""); window.location.reload(); }}
+          title={collapsed ? "Выйти (убрать токен браузера)" : undefined}
+          className={clsx(
+            "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors w-full",
+            collapsed && "justify-center px-0",
+            "text-muted hover:text-text hover:bg-surface/60",
+          )}
+        >
+          <LogOut className="w-4 h-4 shrink-0" />
+          {!collapsed && <span className="truncate">Выйти</span>}
+        </button>
+      </div>
     </aside>
       {/* mobile drawer */}
       {open && (
@@ -174,6 +190,15 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
                 </div>
               ))}
             </nav>
+            <div className="px-3 pb-4">
+              <button
+                onClick={() => { setBrowserToken(""); window.location.reload(); onClose?.(); }}
+                className="flex items-center gap-3 px-3 py-3 rounded-lg text-[15px] transition-colors w-full text-muted hover:text-text hover:bg-surface/60"
+              >
+                <LogOut className="w-5 h-5" />
+                Выйти
+              </button>
+            </div>
           </aside>
         </div>
       )}
