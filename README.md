@@ -1,155 +1,188 @@
-# KumaFlow Brain
+<div align="center">
 
-Self-hosted music intelligence layer for your media server (Navidrome, Jellyfin, Emby, Lyrion).
+<img src="web/public/app-icon.png" width="128" alt="KumaFlow Brain" />
 
-Индексирует библиотеку, делает настоящий sonic-анализ реальных аудиофайлов
-(темп, тональность, энергия, танцевальность, настроение — движок librosa,
-файлы берутся с диска worker'а или стримом из Navidrome),
-подтягивает тексты из открытых источников, CLAP-поиск по смыслу, Yandex-обогащение
-и генерирует ежедневные плейлисты per-user (копия логики мобильного KumaFlow: холодный старт, AI генератор, оркестратор волной).
+# 🐻‍❄️ KumaFlow Brain
 
-## Структура
+**Self-hosted music intelligence layer for your media server**
 
-```
-.
-├── docker-compose.yml        # ДЕПЛОЙ на сервер: готовые образы из GHCR (без сборки)
-├── .env.example              # единственный env для всего стека на сервере
-├── deploy/
-│   ├── docker-compose.yml    # локальная разработка: сборка из исходников
-│   ├── Dockerfile.server     # backend + worker
-│   └── Dockerfile.web        # frontend
-├── bridge/                   # мост метаданных (MusicBrainz / Last.fm), опционально
-├── .github/workflows/
-│   └── docker-publish.yml    # CI: сборка и пуш образов в GHCR при пуше в main
-├── server/                   # FastAPI + SQLAlchemy + RQ (Python 3.11)
-└── web/                      # Next.js 14 (App Router) + TypeScript + TailwindCSS
-```
+*Sonic-анализ · CLAP-поиск по смыслу · Ежедневные плейлисты · Моя волна*
 
-Порты по умолчанию: `3000` — веб, `8000` — API, `8001` — мост (опционально), `5432` — Postgres, `6379` — Redis, `4533` — Navidrome (опционально).
+[![CI](https://github.com/mrSaT13/kumaflow-brain/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/mrSaT13/kumaflow-brain/actions)
+[![Backend](https://img.shields.io/badge/ghcr-backend-blue?logo=docker)](https://github.com/mrSaT13/kumaflow-brain/pkgs/container/kumaflow-brain-backend)
+[![Web](https://img.shields.io/badge/ghcr-web-black?logo=docker)](https://github.com/mrSaT13/kumaflow-brain/pkgs/container/kumaflow-brain-web)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue?logo=python)](server/)
+[![Next.js 14](https://img.shields.io/badge/Next.js-14-black?logo=next.js)](web/)
+
+[🚀 Быстрый старт](#-быстрый-старт-за-5-минут) · [✨ Фичи](#-что-умеет) · [📸 Скриншоты](#-скриншоты) · [🏗 Архитектура](#-архитектура) · [📖 API](#-api) · [🛠 Разработка](#-локальная-разработка)
+
+</div>
+
+> 🧩 **Экосистема KumaFlow:** 🧠 **Brain** (этот репозиторий — серверный анализ и рекомендации) + 🎵 **[KumaFlow Player](https://github.com/mrSaT13/kumaflow)** — десктоп / web-плеер для Navidrome/Subsonic (Windows · macOS · Linux · Docker, Electron-форк Aonsoku с Vibe Similarity и Smart Auto-DJ).
 
 ---
 
-## Вариант A — тестовый сервер (рекомендуется)
+> Индексирует библиотеку **Navidrome / Jellyfin / Emby / Lyrion**, делает настоящий sonic-анализ аудиофайлов (темп, тональность, энергия, танцевальность, настроение — движок `librosa`), подтягивает тексты, ищет по смыслу через **CLAP**, обогащает через **Yandex Music / Last.fm** и генерирует ежедневные плейлисты per-user — как в мобильном KumaFlow.
 
-Образы собирает GitHub Actions, на сервере только `pull + up`.
+## ✨ Что умеет
 
-### 1. Один раз: создать репозиторий и запушить
+| | Возможность |
+|---|---|
+| 🎧 | **Sonic-анализ** — tempo, key, energy, danceability, mood. Файлы берутся с диска worker'а (`/music`) или стримом из Navidrome через Subsonic `download` |
+| 🔍 | **CLAP-поиск по смыслу** — `laion/larger_clap_general` 512-dim (~350 МБ), `mode: embedding` (Voyager HNSW) или fallback `keyword` |
+| 🌊 | **Моя волна** — динамическая очередь `POST /api/wave/continue` + live-очередь телефона на странице `/wave`, сиды, автобан артиста после 3 дизлайков |
+| 📻 | **Daily-плейлисты per-user** — холодный старт (`0.6 floor`), AI-генератор, оркестратор волной, крон `0 3 * * *` через APScheduler |
+| 👤 | **Taste engine** — профиль вкусов, история, коллаборативные рекомендации, sync с мобильным клиентом, Vault (Fernet-шифр паролей) |
+| 📝 | **Тексты песен** — открытые провайдеры (lyrics.ovh, musixmatch) + кэш |
+| 🖼 | **Обложки как на мобиле** — size-aware, `ETag` + `Cache-Control 7d`, LRU до 2 ГБ, prefetch батчами по 8 |
+| 🤖 | **Ollama Cloud parity** — `api/chat` + Bearer, `/api/tags`, pull модели из UI |
+| 🌉 | **Мост метаданных** — MusicBrainz + Last.fm (опциональный сервис `:8001`) |
+| 💾 | **Ночные бэкапы** — `pg_dump` в `./backups`, ротация 14 дней |
 
-```bash
-git clone https://github.com/mrSaT13/kumaflow-brain.git kumaflow
-cd kumaflow
-git add -A
-git commit -m "KumaFlow Brain: github-ready deploy"
-git branch -M main
-git remote add origin https://github.com/mrSaT13/kumaflow-brain.git
-git push -u origin main
+Веб-UI (`:3000`): библиотека · трек · волна · плейлисты · история · cold-start · сканы · пользователи · Wrapped · настройки.
+
+## 📸 Скриншоты
+
+| Плейлисты: cold-start + AI-микс + CLAP-открытия | Холодный старт: жанры | Профиль вкуса: облако жанров + топ артистов |
+|---|---|---|
+| ![Плейлисты](docs/screenshots/playlists.png) | ![Холодный старт](docs/screenshots/cold-start.png) | ![Вкусы](docs/screenshots/taste-cloud.png) |
+
+> Положи файлы в `docs/screenshots/` с этими именами — README подхватит их сам. Другие скрины из подборки в README не кладём (причина — ниже).
+
+## 🏗 Архитектура
+
+```mermaid
+graph LR
+  Navidrome[(Navidrome :4533<br/>Subsonic API)] --> Backend
+  subgraph KumaFlow Brain
+    Web[web :3000<br/>Next.js 14] --> Backend[backend :8000<br/>FastAPI + RQ]
+    Backend --> PG[(Postgres :5432)]
+    Backend --> RD[(Redis :6379)]
+    Backend --> W1[worker<br/>high/default/light]
+    Backend --> W2[worker-audio<br/>librosa]
+    Backend --> W3[worker-clap<br/>CLAP 350MB]
+    Backend --> SCH[scheduler<br/>cron 03:00]
+    Backend -.-> BR[bridge :8001<br/>MusicBrainz/Last.fm]
+  end
 ```
 
-После пуша открой вкладку **Actions** — должен позеленеть `docker-publish`.
-Готовые образы появятся во вкладке **Packages**:
+| Сервис | Образ | Назначение |
+|---|---|---|
+| `backend` | `ghcr.io/mrsat13/kumaflow-brain-backend:latest` | FastAPI + SQLAlchemy + RQ (Python 3.11) |
+| `web` | `ghcr.io/mrsat13/kumaflow-brain-web:latest` | Next.js 14 App Router + TS + Tailwind |
+| `bridge` | `ghcr.io/mrsat13/kumaflow-brain-bridge:latest` | Метаданные, профиль `bridge` (опционально) |
+| `worker` / `worker-audio` / `worker-clap` / `scheduler` / `backup` | backend / postgres | Очереди RQ, аудио-анализ, эмбеддинги, крон, бэкапы |
 
-- `ghcr.io/<owner>/<repo>-backend:latest`
-- `ghcr.io/<owner>/<repo>-web:latest`
-- `ghcr.io/<owner>/<repo>-bridge:latest`
+Порты по умолчанию: `3000` — веб · `8000` — API · `8001` — мост · `5432` — Postgres · `6379` — Redis · `4533` — Navidrome.
 
-> Если пакеты не видны — в настройках репозитория `Settings → Actions → General → Workflow permissions`
-> должно быть `Read and write permissions` (иначе CI не сможет опубликовать пакеты).
+## 🚀 Быстрый старт за 5 минут
 
-### 2. На сервере: установка (всё в одном `docker-compose.yml`, без `.env`)
+Образы собирает GitHub Actions — на сервере только `pull + up`, собирать ничего не надо.
 
 ```bash
 git clone https://github.com/mrSaT13/kumaflow-brain.git kumaflow && cd kumaflow
-nano docker-compose.yml   # вписать 3 вещи (см. ниже)
-docker compose pull
-docker compose up -d
-docker compose ps
+nano docker-compose.yml   # вписать 3x CHANGE_ME (см. таблицу ниже)
+docker compose pull && docker compose up -d
 curl -s http://localhost:8000/api/health   # {"status":"ok"}
 ```
 
-Что поменять в `docker-compose.yml` (всё помечено `CHANGE_ME`):
+Открой: веб — `http://<сервер>:3000` · API — `http://<сервер>:8000/api/health` · доки — `http://<сервер>:8000/api/docs`.
+
+### Что поменять в `docker-compose.yml`
 
 | Место | Значение |
 |---|---|
-| `POSTGRES_PASSWORD` (2 места: postgres + backend + worker) | длинный случайный пароль, один и тот же везде |
-| `NAVIDROME_URL` | адрес твоего внешнего Navidrome. Если он на том же сервере — оставить `http://host.docker.internal:4533`; если на другой машине — `http://<ip>:4533` |
-| `CORS_ORIGINS` | добавить origin, с которого открываешь фронт: `http://<ip-или-домен-сервера>:3000` |
+| `POSTGRES_PASSWORD` (postgres + backend + все worker'ы) | длинный случайный пароль, один везде |
+| `BRAIN_API_TOKEN` | `openssl rand -hex 32` — тот же токен в плеер / мобилу |
+| `NAVIDROME_URL` | свой Navidrome: на том же хосте — `http://host.docker.internal:4533`, на другой машине — `http://<ip>:4533` |
+| `CORS_ORIGINS` | origin фронта: `http://<ip-или-домен>:3000` |
 
-Логин/пароль Navidrome в файл можно не писать — они задаются в веб-UI
-(Настройки → Медиа-сервер) и хранятся в базе.
+> Логин/пароль Navidrome в файл можно не писать — задаются в веб-UI (Настройки → Медиа-сервер).
+> Репозиторий публичный: секреты живут только в копии на сервере, **никогда не делай `git push` с сервера**.
 
-### Sonic-анализ: как worker добирается до mp3
-
-По умолчанию ничего монтировать не нужно: worker тянет каждый трек стримом
-из твоего Navidrome через Subsonic API (`download`) во временный файл,
-считает признаки через librosa и удаляет временный файл. Медленнее, но
-работает из коробки.
-
-Быстрый вариант — примонтировать в `worker` ту же папку музыки, что у
-Navidrome (только чтение), в тот же путь (`/music`):
-
-```yaml
-# в секции worker файла docker-compose.yml:
-    environment:
-      MUSIC_DIR: /music
-    volumes:
-      - /путь/к/музыке/на/хосте:/music:ro
-```
-
-Анализ идёт по всем непроанализированным трекам за один прогон (`ANALYSIS_MAX_TRACKS_PER_RUN=0` — все; можно ограничить числом для теста). Прогресс и ошибки
-по каждому треку видны в логах задачи (Задачи и логи → логи).
-
-Открыть: веб — `http://<сервер>:3000`, API — `http://<сервер>:8000/api/health`,
-доки — `http://<сервер>:8000/api/docs`.
-
-### 3. Обновление после нового пуша в main
-
-CI пересоберёт образы сам. На сервере:
+Обновление после пуша в `main` (CI пересоберёт образы сам):
 
 ```bash
 git pull && docker compose pull && docker compose up -d
 ```
 
-> Репозиторий публичный: реальные пароли живут только в копии
-> `docker-compose.yml` на сервере. Никогда не делай `git push` с сервера.
+<details>
+<summary><b>🎧 Sonic-анализ: как worker добирается до mp3</b></summary>
 
-### 4. Опционально: мост метаданных (MusicBrainz / Last.fm)
+<br/>
+
+По умолчанию монтировать ничего не нужно: worker тянет каждый трек стримом из Navidrome через Subsonic `download` во временный файл, считает признаки через librosa и удаляет файл. Медленнее, но работает из коробки.
+
+Быстрый вариант — примонтировать в `worker` и `worker-audio` ту же папку музыки, что у Navidrome (только чтение), в тот же путь `/music`:
+
+```yaml
+environment:
+  MUSIC_DIR: /music
+volumes:
+  - /путь/к/музыке/на/хосте:/music:ro
+```
+
+Анализ идёт по всем непроанализированным трекам (`ANALYSIS_MAX_TRACKS_PER_RUN=0` — все; `200` у audio-worker — чанками с resume). Прогресс — в логах задачи (Задачи и логи → логи).
+
+</details>
+
+<details>
+<summary><b>🌉 Опционально: мост метаданных (MusicBrainz / Last.fm)</b></summary>
 
 ```bash
 docker compose --profile bridge up -d
 ```
 
-Дальше **без файлов** — всё через веб-UI:
+1. Открой `http://<сервер>:3000/settings`
+2. Раздел «Мост метаданных»: URL `http://bridge:8001` → «Проверить мост» → «Сохранить»
+3. `LASTFM_API_KEY` (https://www.last.fm/api/account/create) — в секции `bridge` в compose; без него мост работает только через MusicBrainz
 
-1. Открой `http://<сервер>:3000/settings`.
-2. Раздел «Мост метаданных»: URL `http://bridge:8001` → «Проверить мост» → «Сохранить».
-3. Ключ Last.fm (`LASTFM_API_KEY`) — единственное, что задаётся прямо в секции `bridge` в `docker-compose.yml` на сервере; без него мост работает только через MusicBrainz.
+Проверка: `curl -s http://localhost:8001/api/bridge/health`
 
-Проверка из консоли: `curl -s http://localhost:8001/api/bridge/health`.
+</details>
 
----
-
-## Вариант B — локальная разработка без Docker
-
-### Backend
+<details>
+<summary><b>🧠 Опционально: CLAP и ML-профиль</b></summary>
 
 ```bash
-cd server
-python -m venv .venv
-.venv\Scripts\activate        # Windows; Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env          # в dev-режиме по умолчанию sqlite (DB_URL_OVERRIDE), Postgres не нужен
-uvicorn app.main:app --reload --port 8000
+docker compose --profile ml up -d                    # worker-clap
+docker compose exec backend python -m ml.download_clap  # скачать модель ~350 МБ в ./deploy/models
 ```
 
-Воркер — вторым терминалом:
+Без модели бэкенд работает — «Открытия недели» строятся через cold-start (видно в Автоматизации).
+
+</details>
+
+## 📖 API
+
+Полная спецификация: `http://<сервер>:8000/api/docs`. Ключевое:
+
+| Группа | Endpoints |
+|---|---|
+| 🌊 Волна | `POST /api/wave/continue` · `GET /api/wave/seeds` · `POST /api/wave/publish` · `GET /api/wave/live?user_id=` |
+| 👤 Пользователи | `POST /api/users/` · `POST /api/users/by-credentials` · `POST /api/users/{id}/sync-from-mobile` · `POST /api/users/{id}/events` · `GET /api/users/{id}/profile` |
+| 📻 Плейлисты | `POST /api/playlists/generate-daily` · `POST /api/playlists/ai-generate` · `GET /api/analysis/cold-start?user_id=&n=30` |
+| 🔍 Анализ | `POST /api/analysis/search-by-text` (`embedding`/`keyword`) · `POST /api/scan/clap` |
+| 📚 Библиотека | `/api/library/*` · `/api/tracks/*` · `/api/covers/*` · `/api/lyrics/*` · `/api/collab/*` · `/api/cron` · `/api/settings/*` |
+
+Интеграция мобильного клиента — в [docs/mobile-integration.md](docs/mobile-integration.md).
+
+## 🛠 Локальная разработка
+
+**Backend** (по умолчанию sqlite, Postgres не нужен):
 
 ```bash
 cd server
-.\.venv\Scripts\Activate.ps1
+python -m venv .venv && .\.venv\Scripts\Activate.ps1  # Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload --port 8000
+# вторым терминалом:
 python -m app.workers.rq_worker
 ```
 
-### Frontend
+**Frontend:**
 
 ```bash
 cd web
@@ -157,50 +190,51 @@ npm install
 npm run dev    # http://localhost:3000
 ```
 
-### Локально через Docker (сборка из исходников)
+**Всё в Docker из исходников:**
 
 ```bash
 cp server/.env.example server/.env
-cd deploy
-docker compose up -d --build
+cd deploy && docker compose up -d --build
 ```
 
----
+### Структура
 
-## Что нового (копия с мобильного без вырезания)
+```
+.
+├── docker-compose.yml        # ДЕПЛОЙ: готовые образы из GHCR (без сборки)
+├── .env.example              # пример env для всего стека
+├── deploy/
+│   ├── docker-compose.yml    # локальная разработка: сборка из исходников
+│   ├── Dockerfile.server     # backend + workers
+│   └── Dockerfile.web        # frontend
+├── server/                   # FastAPI + SQLAlchemy + RQ (Python 3.11)
+├── web/                      # Next.js 14 + TypeScript + TailwindCSS
+├── bridge/                   # мост метаданных (MusicBrainz / Last.fm)
+├── docs/mobile-integration.md# ТЗ для мобильного клиента
+└── .github/workflows/docker-publish.yml  # CI: сборка и пуш образов в GHCR
+```
 
-* **CLAP** `server/ml/download_clap.py` `laion/larger_clap_general 512-dim ~350MB` build-cache, `POST /api/scan/clap` backfill `TrackEmbedding`, `POST /api/analysis/search-by-text` `mode:embedding` (`voyager HNSW`) иначе `keyword`.
-* **Per-user cold start** `GET /api/analysis/cold-start?user_id=&n=30` `PlayHistory/Favorite` как `ml_store.dart` + `0.6 floor`, `POST /api/playlists/generate-daily {user_id,query}` волна `orchestrator.py` + `POST /api/playlists/ai-generate {query}` (копия `ai_mix_service.dart`).
-* **Крон** `CronJob 0 3 * * * daily per-user` `APScheduler` в `rq_worker`, `GET/POST /api/cron`, `cover GC`, `clap`.
-* **Картинки как на мобиле** `covers.py` `size-aware` `ETag Cache-Control 7d max 2GB LRU magic bytes` `web prefetch batch 8` `ImageCacheService` style.
-* **Ollama Cloud parity** `server/app/services/ai.py` `api/chat Bearer` как `ai_service.dart:209` + `/api/tags` + `POST /api/settings/ai/pull`.
-
-## Переменные окружения
+### Переменные окружения
 
 | Файл | Назначение |
 |---|---|
-| `.env` (корень) | весь стек в `docker-compose.yml` на сервере |
-| `server/.env` | только локальный запуск без Docker и `deploy/docker-compose.yml` |
-| `web/.env.local` | только локальный `npm run dev` (по умолчанию не нужен — работает прокси `/api → backend`) |
+| `.env` (корень) | весь стек `docker-compose.yml` на сервере |
+| `server/.env` | локальный запуск без Docker |
+| `web/.env.local` | локальный `npm run dev` (обычно не нужен — работает прокси `/api → backend`) |
 
-Новые: `MUTAGEN_WRITEBACK` (писать mood в файлы), `YANDEX_MUSIC_TOKEN/THROTTLE`, `CLAP_ENABLED`, `ANALYSIS_MAX_TRACKS_PER_RUN=0` (пачками всю).
+Ключевые: `MUTAGEN_WRITEBACK` · `YANDEX_MUSIC_TOKEN/THROTTLE` · `CLAP_ENABLED` · `ANALYSIS_MAX_TRACKS_PER_RUN=0` · `TASTE_VAULT_KEY` · `BRAIN_API_TOKEN`. В контейнерах Postgres принудительно (`DB_URL_OVERRIDE=""`), sqlite в Docker не используется.
 
-В контейнерах Postgres используется принудительно (`DB_URL_OVERRIDE=""`),
-sqlite-файл в Docker не используется — данные живут в volume `pgdata`.
-
-## Полезные команды на сервере
+### Полезное
 
 ```bash
 docker compose logs -f backend worker web   # логи
 docker compose ps                           # статус
-docker compose down                         # остановить (данные в volumes сохранятся)
+docker compose down                         # остановить (данные в volumes живы)
 docker compose down -v                      # остановить И удалить данные (осторожно!)
 ```
 
-## Лицензия
+## 📄 Лицензия
 
 Copyright (C) 2026 mrSaT13.
 
-Этот проект распространяется под лицензией **GNU Affero General Public License v3.0
-(AGPL-3.0)** — см. файл [LICENSE](LICENSE). Если вы запускаете изменённую версию
-на сервере, вы обязаны предоставить пользователям исходный код (раздел 13 AGPL).
+Проект под **GNU Affero General Public License v3.0 (AGPL-3.0)** — см. [LICENSE](LICENSE). Запускаешь изменённую версию на сервере — обязан отдать пользователям исходники (раздел 13 AGPL).
