@@ -278,6 +278,51 @@ def test_session_assoc_from_history():
         db.close()
 
 
+def test_adaptive_count_units():
+    assert _wave.adaptive_count(10, {}) == (10, None)
+    assert _wave.adaptive_count(10, None) == (10, None)
+    assert _wave.adaptive_count(3, {"severity": "strong"}) == (3, None)
+    n, r = _wave.adaptive_count(10, {"severity": "mild"})
+    assert n == 6 and r
+    n, r = _wave.adaptive_count(20, {"severity": "moderate"})
+    assert n == 5 and r
+    n, r = _wave.adaptive_count(20, {"severity": "strong"})
+    assert n == 4 and r
+    n, r = _wave.adaptive_count(10, {}, morphing=True)
+    assert n == 6 and "переход" in (r or "")
+
+
+def test_wave_continue_adaptive_pack_on_skips():
+    db = _db()
+    try:
+        others = [str(r[0]) for r in db.query(Track.external_id).all()
+                  if not str(r[0]).startswith("sm-")]
+        evs = [{"track_id": f"sm-{i % 2}", "action": "skip",
+                "position_sec": 5} for i in range(7)]
+        res = _wave.wave_continue(db, UID, queue=[], count=10,
+                                  exclude_ids=others, recent_events=evs)
+        assert res["count_requested"] == 10
+        assert res["count_effective"] == 4
+        assert res["adaptive"]
+        assert len(res["tracks"]) <= 4
+    finally:
+        db.close()
+
+
+def test_wave_continue_full_pack_when_stable():
+    db = _db()
+    try:
+        others = [str(r[0]) for r in db.query(Track.external_id).all()
+                  if not str(r[0]).startswith("sm-")]
+        res = _wave.wave_continue(db, UID, queue=[], count=10,
+                                  exclude_ids=others)
+        assert res["adaptive"] is None
+        assert res["count_effective"] == 10
+        assert len(res["tracks"]) == 5
+    finally:
+        db.close()
+
+
 def test_energy_wave_arc_without_mood():
     db = _db()
     try:

@@ -67,6 +67,8 @@ export default function WavePage() {
   const [followPhone, setFollowPhone] = useState(true);
   const [phoneAge, setPhoneAge] = useState<number | null>(null);
   const [drift, setDrift] = useState<{ severity: string; consecutive_skips: number; temp_banned_genres: string[] } | null>(null);
+  const [adaptive, setAdaptive] = useState<string | null>(null);
+  const [lastBatch, setLastBatch] = useState<number | null>(null);
   const toast = useToast();
   const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const listRef = useRef<HTMLDivElement>(null);
@@ -155,6 +157,8 @@ export default function WavePage() {
       const tracks = (r.tracks ?? []) as WaveTrack[];
       setQueue((prev) => (reset ? tracks : appendFresh(prev, tracks)).slice(0, 100));
       setDrift(r.drift ?? null);
+      setAdaptive(r.adaptive ?? null);
+      setLastBatch(tracks.length || null);
       if (reset) {
         setPlayingIdx(0);
         lastSyncedExternal.current = "";
@@ -322,7 +326,7 @@ export default function WavePage() {
             </select>
             <Button onClick={() => more(queue.length === 0)} disabled={busy || !userId}>
               {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-              {queue.length === 0 ? "Запустить волну" : "Докрутить +10"}
+              {queue.length === 0 ? "Запустить волну" : `Докрутить +${lastBatch ?? 10}`}
             </Button>
           </div>
         }
@@ -410,6 +414,11 @@ export default function WavePage() {
                     остываем: {drift.consecutive_skips} скипа подряд — энергию вниз
                   </span>
                 )}
+                {adaptive && (
+                  <span className="text-[11px] rounded-full border border-sky-300 px-2 py-0.5 text-sky-700 dark:text-sky-300" title="Мозг урезал пачку, чтобы новый вайб был слышен быстрее — маленькая пачка при смене настроения, полная в стабильном">
+                    быстрая пачка{lastBatch ? ` · +${lastBatch}` : ""}: {adaptive}
+                  </span>
+                )}
               </div>
             </Card>
           </div>
@@ -417,7 +426,7 @@ export default function WavePage() {
             <div className="flex items-center gap-4 flex-wrap text-xs text-muted">
               <label className="flex items-center gap-1.5 cursor-pointer">
                 <input type="checkbox" checked={liveRefill} onChange={(e) => setLiveRefill(e.target.checked)} />
-                Авто-докрутка (осталось ≤{REFILL_THRESHOLD} — добрать +10)
+                Авто-докрутка (осталось ≤{REFILL_THRESHOLD} — добрать +{lastBatch ?? 10})
               </label>
               <label className="flex items-center gap-1.5 cursor-pointer" title="Мобила шлёт очередь в POST /api/wave/publish — страница показывает её как есть">
                 <input type="checkbox" checked={followPhone} onChange={(e) => setFollowPhone(e.target.checked)} />

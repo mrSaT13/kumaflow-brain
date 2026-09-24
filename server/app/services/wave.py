@@ -843,6 +843,38 @@ def session_assoc(db, user_id: str, seed_ids: list[str],
     return out
 
 
+def adaptive_count(requested: int, drift: dict | None,
+                   morphing: bool = False) -> tuple[int, str | None]:
+    """Адаптивная пачка: маленькая при смене настроения, большая в стабильном.
+
+    Большая пачка (=10) при смене вкуса — это 30-40 минут старого вайба,
+    пока хвост дослушается. Поэтому при скип-стрике и при морфинге в целевой
+    муд режем пачку (пол 4 — очередь не голодает, refill и так при остатке
+    <=3). В стабильном вайбе и на разогреве — полная пачка.
+    Возвращает (effective, reason|None). reason None = выдали сколько просили.
+    """
+    try:
+        n = max(1, min(100, int(requested or 20)))
+    except (TypeError, ValueError):
+        n = 20
+    if n <= 4:
+        return n, None
+    cap, bits = n, []
+    sev = (drift or {}).get("severity")
+    if sev == "strong":
+        cap, bits = min(cap, 4), bits + ["скипы ×7: разворот"]
+    elif sev == "moderate":
+        cap, bits = min(cap, 5), bits + ["скипы ×5: быстрая пачка"]
+    elif sev == "mild":
+        cap, bits = min(cap, 6), bits + ["скипы ×3: пачка меньше"]
+    if morphing:
+        cap, bits = min(cap, 6), bits + ["переход настроения"]
+    eff = max(min(cap, n), min(4, n))
+    if eff >= n:
+        return n, None
+    return eff, " + ".join(bits) or None
+
+
 def _smooth_keys_order(items: list[dict]) -> list[dict]:
     """Key-сглаживание соседей: пузырьковые свопы, улучшающие суммарную
     совместимость тональностей (квинтовый круг). Своп разрешён, только если
@@ -1264,7 +1296,10 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # Недавнее реже (новизна как у cold-start novelty=True): уже учтено
     # novelty-членом, дубли очереди на всякий случай режем ещё раз
     ranked = [r for r in ranked if r['track_id'] not in played]
-    top = ranked[:count]
+    # Адаптивная пачка: при смене настроения — меньше, чтобы новый вайб
+    # было слышно через 4-5 треков, а не через 10.
+    eff_count, adapt_reason = adaptive_count(count, drift, morphing)
+    top = ranked[:eff_count]
     # Финальная страховка на ответе: id + баны артистов + «та же песня».
     # Ловит всё, что просочилось через срез пула (cand[:800]/топ).
     if top and (dis or bans):
@@ -1413,6 +1448,9 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             'applied': applied,
             'current_mood': start_mood,
             'morph': morph,
+            'count_requested': count,
+            'count_effective': eff_count,
+            'adaptive': adapt_reason,
             'drift': {k: drift.get(k) for k in
                       ("severity", "consecutive_skips", "temp_banned_genres",
                        "warmth", "positive_streak")}
