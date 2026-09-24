@@ -8,6 +8,7 @@ import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/c
 import { useConfirm, PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { genreColor } from "@/lib/genreStyle";
 
 function TasteBadge({ id }: { id: string }) {
   const { data } = useSWR(`/api/users/${id}/tastes`, () => api.userTastes(id));
@@ -17,13 +18,6 @@ function TasteBadge({ id }: { id: string }) {
       ♥ {data.favorites} · ▤ {data.playlists}
     </span>
   );
-}
-
-const PALETTE = ["#FF3B30", "#007AFF", "#34C759", "#5856D6", "#AF52DE", "#FF9500", "#FF2D55", "#5AC8FA", "#00C7BE", "#FF9F0A"];
-function colorFor(s: string) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
 }
 
 function CompareSection({ ids, users, onClear }: { ids: string[]; users: { id: string; username: string }[]; onClear: () => void }) {
@@ -59,7 +53,7 @@ function CompareSection({ ids, users, onClear }: { ids: string[]; users: { id: s
                     <div className="flex flex-wrap items-center justify-center gap-2.5">
                       {data.shared_genres.slice(0, 24).map((g) => {
                         const t = Math.min(1, g.avg / Math.max(1, data.shared_genres[0].avg));
-                        const c = colorFor(g.name);
+                        const c = genreColor(g.name);
                         return (
                           <span key={g.name} title={ids.map((id) => `${nameOf(id)}: ${g.weights[id] ?? 0}`).join(" · ")}
                             className="rounded-full text-white font-semibold border border-white/20"
@@ -108,7 +102,7 @@ function CompareSection({ ids, users, onClear }: { ids: string[]; users: { id: s
                       {u.genres_top.slice(0, 14).map((g) => {
                         const shared = data.shared_genres.some((s) => s.name === g.name);
                         const t = Math.max(0, g.weight) / maxW;
-                        const c = colorFor(g.name);
+                        const c = genreColor(g.name);
                         return (
                           <span key={g.name} title={`${g.weight}`}
                             className={`rounded-full text-white font-semibold ${shared ? "border-2 border-white/70" : "border border-white/20"}`}

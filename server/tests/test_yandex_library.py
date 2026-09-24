@@ -1,7 +1,6 @@
 """Импорт из Яндекс Музыки (Marshal) — мэтчинг, тумблеры, токен. Без сети: фейк-клиент."""
 import os
 
-os.environ["DB_URL_OVERRIDE"] = "sqlite:///./test_yandex_lib.db"
 os.environ["REDIS_HOST"] = "localhost"
 
 import uuid as _uuid
@@ -240,3 +239,4 @@ def test_corrections_toggle_gate():
         assert lib.corrections_enabled(db) is True
     finally:
         db.close()
+

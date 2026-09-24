@@ -27,11 +27,146 @@ from datetime import datetime
 from typing import Any
 
 from app.core.logging import get_logger
-from app.db.models import ArtistBan, Favorite, PlayEvent, PlayHistory, Track, TrackDislike
+from app.db.models import ArtistBan, Favorite, PlayEvent, PlayHistory, TasteArm, Track, TrackDislike, TrackTimeStat
 
 logger = get_logger("taste")
 
 ACTIONS = ("play", "complete", "skip", "replay", "seek_back", "abandon")
+
+
+def daypart_of(hour: int | None) -> str:
+    """Часть суток (порт mobile day-part контекста бандита)."""
+    try:
+        h = int(hour)
+    except (TypeError, ValueError):
+        return "day"
+    if 5 <= h <= 10:
+        return "morning"
+    if 11 <= h <= 17:
+        return "day"
+    if 18 <= h <= 23:
+        return "evening"
+    return "night"
+
+
+def context_of(hour: int | None, dow: int | None) -> str:
+    """Контекст руки: daypart × будни/выходные (8 корзин как в мобиле)."""
+    try:
+        we = "we" if int(dow) in (0, 6) else "wd"
+    except (TypeError, ValueError):
+        we = "wd"
+    return f"{daypart_of(hour)}_{we}"
+
+
+# Награды руки (порт mobile multi_armed_bandit).
+def action_reward(action: str, pos: int | None) -> float:
+    if action == "replay":
+        return 15.0
+    if action == "seek_back":
+        return 8.0
+    if action == "complete":
+        return 5.0
+    if action == "play":
+        return 5.0 if (pos is not None and pos >= 180) else 0.0
+    if action == "skip":
+        return -5.0 if (pos is not None and pos < 30) else -2.0
+    if action == "abandon":
+        return -3.0
+    return 0.0
+
+
+def update_taste_signals(db, user_id: str, track, action: str,
+                         pos: int | None, hour: int | None,
+                         dow: int | None) -> None:
+    """Часовые паттерны + руки бандита по событию плеера. Никогда не падает."""
+    try:
+        tid = str(getattr(track, "id", "") or "")
+        if not tid:
+            return
+        now = datetime.utcnow()
+        # Паттерн «часто в этот час».
+        try:
+            row = db.get(TrackTimeStat, (str(user_id), tid, int(hour)))
+        except Exception:
+            row = None
+        if row is None:
+            _new_row = None
+            try:
+                _new_row = TrackTimeStat(user_id=str(user_id), track_id=tid,
+                                         hour=int(hour), plays=0, likes=0, skips=0)
+                db.add(_new_row)
+                # сессия autoflush=False: последующие события пакета должны
+                # видеть строку через db.get, иначе двойной INSERT (как скипы).
+                # flush — в savepoint, чтобы чужая гонка не валила весь пакет.
+                try:
+                    with db.begin_nested():
+                        db.flush()
+                except Exception:
+                    try:
+                        db.expunge(_new_row)
+                    except Exception:
+                        pass
+                    try:
+                        _new_row = db.get(TrackTimeStat,
+                                          (str(user_id), tid, int(hour)))
+                    except Exception:
+                        _new_row = None
+                row = _new_row
+            except Exception:
+                row = None
+        if row is not None:
+            try:
+                if action in ("play", "complete", "replay"):
+                    row.plays = int(row.plays or 0) + 1
+                    row.last_played = now
+                elif action == "skip":
+                    row.skips = int(row.skips or 0) + 1
+            except Exception:
+                pass
+        # Руки бандита: артист + жанр в текущем контексте.
+        reward = action_reward(action, pos)
+        ctx = context_of(hour, dow)
+        for kind, name, prior in (
+                ("artist", (getattr(track, "artist_name", None) or "").strip(), 2.0),
+                ("genre", (getattr(track, "genre", None) or "").strip().lower(), 1.0)):
+            if not name:
+                continue
+            try:
+                arm = db.get(TasteArm, (str(user_id), kind, name[:512], ctx))
+            except Exception:
+                arm = None
+            if arm is None:
+                _new_arm = None
+                try:
+                    _new_arm = TasteArm(user_id=str(user_id), kind=kind,
+                                        name=name[:512], context=ctx,
+                                        pulls=1, reward=float(prior))
+                    db.add(_new_arm)
+                    try:
+                        with db.begin_nested():
+                            db.flush()
+                    except Exception:
+                        try:
+                            db.expunge(_new_arm)
+                        except Exception:
+                            pass
+                        try:
+                            _new_arm = db.get(TasteArm, (str(user_id), kind,
+                                                         name[:512], ctx))
+                        except Exception:
+                            _new_arm = None
+                    arm = _new_arm
+                except Exception:
+                    arm = None
+                if arm is None:
+                    continue
+            try:
+                arm.pulls = int(arm.pulls or 0) + 1
+                arm.reward = float(arm.reward or 0.0) + float(reward)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # правим именами — артисты в нашей схеме идентифицируются именем
 def _artist_of(db, track_id: str) -> str | None:
@@ -152,6 +287,7 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
         db.add(PlayEvent(user_id=user_id, track_id=tid, action=action,
                          position_sec=pos, hour=_hour,
                          day_of_week=_dow))
+        update_taste_signals(db, user_id, _t, action, pos, _hour, _dow)
         stored += 1
         if action == "skip":
             n_skips = db.query(PlayEvent).filter_by(

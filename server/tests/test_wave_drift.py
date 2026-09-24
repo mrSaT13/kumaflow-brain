@@ -1,7 +1,6 @@
 """Сессионный дрейф волны (порт MoodDriftDetector). Без сети, sqlite."""
 import os
 
-os.environ["DB_URL_OVERRIDE"] = "sqlite:///./test_wave_drift.db"
 os.environ["REDIS_HOST"] = "localhost"
 
 import uuid as _uuid
@@ -116,3 +115,4 @@ def test_wave_continue_applies_drift():
         assert all(t.get("genre") != "rock" for t in r["tracks"])
     finally:
         db.close()
+

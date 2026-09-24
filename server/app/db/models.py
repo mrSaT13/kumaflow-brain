@@ -297,6 +297,55 @@ class PlayEvent(Base):
     __table_args__ = (Index("ix_play_event_user_track", "user_id", "track_id"),)
 
 
+class TrackTimeStat(Base):
+    """Паттерн «часто в этот час» (порт mobile time_aware_history).
+
+    play/complete/replay — plays, like — likes, skip — skips. Читается суммой
+    по часам h-1/h/h+1 с затуханием recency (см. wave.time_bonus_for).
+    """
+
+    __tablename__ = "track_time_stats"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    track_id: Mapped[str] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), primary_key=True
+    )
+    hour: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plays: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    likes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skips: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_played: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_time_stat_user_hour", "user_id", "hour"),)
+
+
+class TasteArm(Base):
+    """Рука MAB-бандита (порт mobile multi_armed_bandit, epsilon-greedy).
+
+    kind: artist/genre; context: daypart_weekday, daypart_weekend
+    (morning/day/evening/night × wd/we). reward/pulls — скользящее среднее
+    награды: like+10, replay+15, seek_back+8, complete+5, skip_early-5,
+    skip_late-2, abandon-3. Explore — джиттером скоринга, exploit — бустом.
+    """
+
+    __tablename__ = "taste_arms"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String(512), primary_key=True)
+    context: Mapped[str] = mapped_column(String(16), primary_key=True)
+    pulls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reward: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (Index("ix_taste_arm_user_ctx", "user_id", "context"),)
+
+
 class UserCredential(Base):
     """Шифрованный пароль Navidrome пользователя (opt-in автообновление вкусов).
 

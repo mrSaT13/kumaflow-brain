@@ -1,5 +1,4 @@
 import os
-os.environ["DB_URL_OVERRIDE"] = "sqlite:///./test_api.db"
 from fastapi.testclient import TestClient
 from app.db import init_db
 init_db()
@@ -24,3 +23,4 @@ def test_ai_generate_ok():
     r = client.post("/api/playlists/ai-generate", json={"query": "chill evening", "n": 3})
     # either created or fallback empty
     assert r.status_code in (200, 400)
+

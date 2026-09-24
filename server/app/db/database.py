@@ -5,6 +5,7 @@ from typing import Iterator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.core.config import get_settings
 
@@ -13,15 +14,45 @@ class Base(DeclarativeBase):
     pass
 
 
+def _make_engine(url: str, *, test: bool = False):
+    """sqlite — StaticPool (один коннект, общий для потоков тестов);
+    остальное — пул как раньше. Тестам — всегда тестовый режим."""
+    if url.startswith("sqlite:") or test:
+        return create_engine(
+            url,
+            pool_pre_ping=True,
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+            future=True,
+        )
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        future=True,
+    )
+
+
 _settings = get_settings()
-engine = create_engine(
-    _settings.database_url,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-    future=True,
-)
+engine = _make_engine(_settings.database_url)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+def reset_engine(url: str):
+    """Пересоздать engine (для тестов): dispose + rebind SessionLocal.
+
+    Прямых импортов сырого engine в коде нет — все идут через SessionLocal,
+    поэтому перепривязка безопасна. Возвращает новый engine.
+    """
+    global engine
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+    engine = _make_engine(url, test=True)
+    SessionLocal.configure(bind=engine)
+    return engine
 
 
 def get_db() -> Iterator[Session]:

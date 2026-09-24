@@ -1,6 +1,5 @@
 from fastapi.testclient import TestClient
 import os
-os.environ["DB_URL_OVERRIDE"] = "sqlite:///./test_api.db"
 os.environ["REDIS_HOST"] = "localhost"
 
 from app.main import app
@@ -31,3 +30,4 @@ def test_search_by_text_keyword():
     assert r.status_code == 200
     assert "mode" in r.json()
     assert r.json()["mode"] in ("keyword", "empty")
+

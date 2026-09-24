@@ -9,14 +9,7 @@ import { PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api, type ArtistEntry } from "@/lib/api";
 import { genreIcon } from "@/lib/genreIcon";
-
-// Палитра как в мобильном (fallback по хэшу жанра)
-const PALETTE = ["#FF3B30", "#007AFF", "#34C759", "#5856D6", "#AF52DE", "#FF9500", "#FF2D55", "#5AC8FA"];
-function genreColor(g: string) {
-  let h = 0;
-  for (let i = 0; i < g.length; i++) h = (h * 31 + g.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
-}
+import { genreColor } from "@/lib/genreStyle";
 
 function coverUrl(a: ArtistEntry): string | null {
   if (a.cover_track_id) return api.trackCoverUrl(a.cover_track_id, 300);

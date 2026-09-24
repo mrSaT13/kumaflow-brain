@@ -1,5 +1,4 @@
 import os
-os.environ["DB_URL_OVERRIDE"] = "sqlite:///./test_api.db"
 import pytest
 from app.services.audio_analysis import _clamp  # avoid importing ml DB early
 
@@ -41,3 +40,4 @@ def test_recommend_stub():
     # will try DB and fail gracefully in test env -> should return []
     # use sqlite memory via env override would be needed; just check callable
     assert callable(recommend_by_track)
+

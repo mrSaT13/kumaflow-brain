@@ -25,6 +25,27 @@ type WaveEvent = { track_id: string; action: string; position_sec?: number };
 
 const REFILL_THRESHOLD = 3;
 
+// Дедуп при добавлении: сервер уже режет очередь/дизлайки/баны, но при
+// параллельных докрутках или дублях одной песни под разными row id клиент
+// обязан не клеить повтор — ни по track_id, ни по «артист — название».
+function songKey(t: { artist_name?: string | null; title?: string | null }): string {
+  return `${(t.artist_name ?? "").toLowerCase().trim()} — ${(t.title ?? "").toLowerCase().trim()}`;
+}
+
+function appendFresh(prev: WaveTrack[], incoming: WaveTrack[]): WaveTrack[] {
+  const seenIds = new Set(prev.map((t) => t.track_id));
+  const seenSongs = new Set(prev.map(songKey));
+  const fresh = incoming.filter((t) => {
+    if (seenIds.has(t.track_id)) return false;
+    const k = songKey(t);
+    if (seenSongs.has(k)) return false;
+    seenIds.add(t.track_id);
+    seenSongs.add(k);
+    return true;
+  });
+  return [...prev, ...fresh];
+}
+
 const COMP_LABELS: { key: keyof WaveComp; label: string }[] = [
   { key: "audio", label: "аудио" },
   { key: "genre", label: "жанр" },
@@ -132,7 +153,7 @@ export default function WavePage() {
         recent_events: events,
       });
       const tracks = (r.tracks ?? []) as WaveTrack[];
-      setQueue((prev) => (reset ? tracks : [...prev, ...tracks]).slice(0, 100));
+      setQueue((prev) => (reset ? tracks : appendFresh(prev, tracks)).slice(0, 100));
       setDrift(r.drift ?? null);
       if (reset) {
         setPlayingIdx(0);
@@ -257,7 +278,7 @@ export default function WavePage() {
             recent_events: [...drainEvents(), { track_id: extId, action: "play" }],
           });
           if (stop) return;
-          setQueue((prev) => [...prev, ...((r.tracks ?? []) as WaveTrack[])].slice(0, 100));
+          setQueue((prev) => appendFresh(prev, (r.tracks ?? []) as WaveTrack[]).slice(0, 100));
         }
       } catch {
         /* внешний плеер молчит — очередь живёт сама */

@@ -12,13 +12,7 @@ import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 import { fmtDate } from "@/lib/format";
 import { moodLook } from "@/lib/moodStyle";
-
-const PALETTE = ["#FF3B30", "#007AFF", "#34C759", "#5856D6", "#AF52DE", "#FF9500", "#FF2D55", "#5AC8FA", "#00C7BE", "#FF9F0A"];
-function colorFor(s: string) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
-}
+import { genreColor, hashColor as colorFor } from "@/lib/genreStyle";
 
 const DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
@@ -212,7 +206,7 @@ export default function UserProfilePage() {
                   const t = Math.max(0, g.weight) / maxW;
                   const share = ((g.weight / sumW) * 100).toFixed(0);
                   const fs = 12 + Math.round(t * 18);
-                  const c = colorFor(g.name);
+                  const c = genreColor(g.name);
                   return (
                     <span
                       key={g.name}
