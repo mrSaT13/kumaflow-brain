@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 import uuid
 from typing import Any
 
@@ -13,11 +12,76 @@ from app.core.auth import check_body_user, require_scope
 router = APIRouter(dependencies=[Depends(require_scope("wave"))])
 
 # Живая очередь телефона: мобила публикует свою очередь, веб её показывает.
-# In-memory (один web-процесс): для дома достаточно, честно — не переживает
-# рестарт и не делится между репликами. TTL 10 минут.
+# Хранилище — Redis (общий для всех uvicorn-workers; in-memory _LIVE умирал
+# при --workers >1: publish попадал в один процесс, а /live читал другой).
+# Нет Redis — откатываемся на память процесса (dev). TTL 10 минут.
 _LIVE: dict[str, dict] = {}
 _LIVE_TTL_SEC = 600
 _LIVE_MAX_USERS = 200
+
+
+def _live_key(user_id: str) -> str:
+    return f"wave:live:{user_id}"
+
+
+def _live_get(user_id: str) -> dict | None:
+    try:
+        from app.services.queue import get_redis as _gr
+
+        raw = _gr().get(_live_key(user_id))
+        if raw:
+            import json as _json
+
+            d = _json.loads(raw)
+            if isinstance(d, dict):
+                return d
+            return None
+    except Exception:
+        pass
+    return _LIVE.get(user_id)
+
+
+def _live_age(user_id: str, entry: dict) -> float:
+    try:
+        from app.services.queue import get_redis as _gr
+
+        ttl = _gr().ttl(_live_key(user_id))
+        if ttl is not None and int(ttl) >= 0:
+            return max(0.0, float(_LIVE_TTL_SEC - int(ttl)))
+    except Exception:
+        pass
+    import time as _t
+
+    return _t.time() - float(entry.get('ts', 0) or 0)
+
+
+def _live_put(user_id: str, entry: dict) -> None:
+    import time as _t
+
+    entry = dict(entry)
+    entry['ts'] = _t.time()
+    _LIVE[user_id] = entry
+    if len(_LIVE) > _LIVE_MAX_USERS:
+        oldest = min(_LIVE, key=lambda k: _LIVE[k].get('ts', 0))
+        _LIVE.pop(oldest, None)
+    try:
+        from app.services.queue import get_redis as _gr
+
+        import json as _json
+
+        _gr().setex(_live_key(user_id), _LIVE_TTL_SEC, _json.dumps(entry))
+    except Exception:
+        pass
+
+
+def _live_pop(user_id: str) -> None:
+    _LIVE.pop(user_id, None)
+    try:
+        from app.services.queue import get_redis as _gr
+
+        _gr().delete(_live_key(user_id))
+    except Exception:
+        pass
 
 
 def _require_user(db: Session, user_id: str):
@@ -97,13 +161,8 @@ def wave_publish(payload: dict, request: Request, db: Session = Depends(get_db))
     u = _require_user(db, user_id)
     queue = [str(x) for x in (list((payload or {}).get('queue') or [])[:100]) if str(x)]
     cur = (payload or {}).get('current_track_id')
-    if len(_LIVE) >= _LIVE_MAX_USERS and str(u.id) not in _LIVE:
-        # вытесняем самую старую
-        oldest = min(_LIVE, key=lambda k: _LIVE[k].get('ts', 0))
-        _LIVE.pop(oldest, None)
-    _LIVE[str(u.id)] = {'queue': queue,
-                        'current_track_id': str(cur) if cur else None,
-                        'ts': time.time()}
+    _live_put(str(u.id), {'queue': queue,
+                          'current_track_id': str(cur) if cur else None})
     return {'ok': True, 'user_id': str(u.id), 'queued': len(queue)}
 
 
@@ -113,14 +172,13 @@ def wave_live(user_id: str, db: Session = Depends(get_db)):
     from app.services.track_resolve import get_track as _gt
 
     u = _require_user(db, user_id)
-    entry = _LIVE.get(str(u.id))
+    entry = _live_get(str(u.id))
     if not entry:
         return {'ok': True, 'user_id': str(u.id), 'queue': [], 'current': 0,
                 'age_sec': None}
-    now = time.time()
-    age = now - float(entry.get('ts', 0) or 0)
+    age = _live_age(str(u.id), entry)
     if age > _LIVE_TTL_SEC:
-        _LIVE.pop(str(u.id), None)
+        _live_pop(str(u.id))
         return {'ok': True, 'user_id': str(u.id), 'queue': [],
                 'current': 0, 'age_sec': int(age), 'stale': True}
     tracks: list[dict] = []

@@ -8,12 +8,14 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Системные зависимости для psycopg2, librosa/soundfile и healthcheck.
+# tzdata нужен для APP_TIMEZONE (IANA-имена вида Europe/Samara).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ffmpeg \
     libsndfile1 \
     libpq-dev \
     curl \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Сначала только зависимости — слой кэшируется, пока не меняется requirements.

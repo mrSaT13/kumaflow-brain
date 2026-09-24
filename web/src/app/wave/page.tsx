@@ -292,9 +292,9 @@ export default function WavePage() {
               className="kuma-input kuma-input-inline w-40"
               value={mood}
               onChange={(e) => setMood(e.target.value)}
-              title="Настроение волны"
+              title="Настроение волны: авто — мозг решает сам по треку, времени суток и твоим вкусам; выбери вручную чтобы подрулить"
             >
-              <option value="">Настроение: всё</option>
+              <option value="">Настроение: авто</option>
               {moodOptions.map((m) => (
                 <option key={m} value={m}>{m}</option>
               ))}

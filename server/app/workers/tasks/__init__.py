@@ -840,11 +840,13 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
         chunk_size = int(requested)
         do_all = False  # явный limit — только N штук
     else:
-        # 0/None: берём из настроек; 0 там значит «вся библиотека», пачками по 200
+        # 0/None: берём из настроек; 0 там значит «вся библиотека», пачками по 100.
+        # Пачка 100 (не 200): job надёжно укладывается в RQ job_timeout=7200
+        # даже с зависшими треками, а остаток добирает автопродолжение/сторож.
         if default_limit and int(default_limit) > 0:
             chunk_size = int(default_limit)
         else:
-            chunk_size = 200
+            chunk_size = 100
         do_all = True
 
     try:
@@ -897,7 +899,8 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                 q = q.order_by(Track.created_at.asc())
                 batch = q.limit(chunk_size).all()
                 todo_data = [
-                    (t.id, t.external_id, t.path, t.suffix, t.duration_sec, t.title, t.artist_name)
+                    (t.id, t.external_id, t.path, t.suffix, t.duration_sec, t.title, t.artist_name,
+                     t.size_bytes, t.bitrate)
                     for t in batch
                 ]
                 if not todo_data:
@@ -908,7 +911,7 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                     if run2 and run2.total_items < total_pending_initial:
                         run2.total_items = total_pending_initial
 
-            for tid, ext_id, tpath, suffix, dur, title, artist in todo_data:
+            for tid, ext_id, tpath, suffix, dur, title, artist, size_b, bitrate in todo_data:
                 if _is_cancelled(run_id):
                     _append_log(run_id, "warn", f"Остановлено пользователем на {total_processed}/{total_pending_initial}")
                     return {"status": "failure", "error": "Отменено пользователем", "ok": ok, "failed": fail}
@@ -920,6 +923,23 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
 
                     def _do_one():
                         _tmp: Path | None = None
+                        # Прескип по известному размеру — не качаем гигантов
+                        # (сборники/миксы), лимит тот же, что у стрима.
+                        try:
+                            _lim = int(aa.MAX_DOWNLOAD_MB) * 1024 * 1024
+                            if size_b and int(size_b) > _lim:
+                                raise RuntimeError(
+                                    f"Файл больше лимита {aa.MAX_DOWNLOAD_MB} МБ "
+                                    f"({int(size_b) // 1048576} МБ по базе — пропуск без скачивания)")
+                            if not size_b and bitrate and dur:
+                                _est = int(bitrate) * 1000 // 8 * int(dur)
+                                if _est > _lim * 2:
+                                    raise RuntimeError(
+                                        f"Оценка размера ~{_est // 1048576} МБ > лимита — пропуск без скачивания")
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            pass
                         _local = aa.resolve_local_file(tpath, music_dir)
                         if _local is not None:
                             return ("local", _local, None, aa.analyze_file(_local, sample_seconds=sample_seconds, track_duration_sec=dur))
@@ -1423,9 +1443,10 @@ def daily_playlist(playlist_id: str, *args, **kwargs) -> dict:
     Если на сегодня уже есть — удалить и сделать заново.
     Источник кандидатов: избранные + recently played + кластеры + genre match.
     """
+    from app.core.time import local_today as _local_today
     from app.db.models import Playlist, PlaylistTrack, Favorite, PlayHistory, MediaUser
 
-    today = date.today()
+    today = _local_today()
     log_prefix = f"[daily {today.isoformat()}]"
     logger.info("{} start playlist_id={}", log_prefix, playlist_id)
 
@@ -1821,10 +1842,12 @@ def daily_per_user(*args, **kwargs):
         if not users:
             with session_scope() as db:
                 server = resolve_active_server(db)
-                from datetime import date, datetime
+                from datetime import datetime
                 import uuid as _uuid
 
-                today = date.today()
+                from app.core.time import local_today as _local_today
+
+                today = _local_today()
                 p = Playlist(id=str(_uuid.uuid4()), server_id=server.id, name=f"KumaFlow Daily · {today.isoformat()}", is_auto_generated=True, generated_for_date=datetime.combine(today, datetime.min.time()))
                 db.add(p)
                 db.flush()
@@ -1870,7 +1893,9 @@ def smart_playlists(*args, **kwargs):
                 run.total_items = total * len(_smart.KINDS)
                 run.processed_items = 0
         done = 0
-        today = date.today()
+        from app.core.time import local_today as _local_today
+
+        today = _local_today()
         for idx, u in enumerate(users):
             if _is_cancelled(run_id):
                 break
@@ -2225,7 +2250,9 @@ def weekly_discovery_all(*args, **kwargs):
                         db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
                         db.delete(p)
                     db.flush()
-                    today = date.today()
+                    from app.core.time import local_today as _local_today
+
+                    today = _local_today()
                     import uuid as _uuid
 
                     p = Playlist(id=str(_uuid.uuid4()), server_id=u.server_id, owner_user_id=u.id,

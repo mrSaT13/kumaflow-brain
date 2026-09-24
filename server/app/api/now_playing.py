@@ -286,6 +286,14 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5,
                                comp=r.get("comp"),
                                score=float(r.get("score", 0) or 0)),
         })
+    # Растяжка скоров окна (как в wave_continue): сырые total упираются
+    # в кламп 1.0 и вся пятёрка выглядит как «1.00 × 5». Порядок не трогаем.
+    try:
+        from app.services.wave import spread_scores as _spread
+
+        _spread(out)
+    except Exception:
+        pass
     return out
 
 

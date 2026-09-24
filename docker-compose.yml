@@ -53,6 +53,11 @@ services:
     environment:
       ENV: prod
       LOG_LEVEL: INFO
+      # «Домашнее» время: границы суток daily-плейлистов, срабатывание крона,
+      # контекст утро/вечер в волне, подписи времени в API.
+      # IANA-имя или сдвиг (+4). UTC+4 = Europe/Samara (Самара/Саратов/Ижевск),
+      # Asia/Dubai, Asia/Yerevan — подставь свой город.
+      APP_TIMEZONE: UTC
       DB_URL_OVERRIDE: ""
       POSTGRES_HOST: postgres
       POSTGRES_USER: kumaflow

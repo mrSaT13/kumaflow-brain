@@ -6,6 +6,7 @@ import { Check, Download, Heart, History, ListMusic } from "lucide-react";
 import { Button, Card } from "@/components/ui";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { fmtDate } from "@/lib/format";
 
 /** Яндекс Музыка (Marshal): персонифицированный токен, импорт вкуса/истории/чартов. */
 export default function YandexImport() {
@@ -215,7 +216,7 @@ export default function YandexImport() {
         <div className="mt-4">
           <div className="text-xs uppercase tracking-wider text-muted mb-2">
             Чарт Яндекса · {charts.in_library} из {charts.total} уже в библиотеке
-            {charts.fetched_at && <span className="normal-case"> · {new Date(charts.fetched_at).toLocaleString("ru-RU")}</span>}
+            {charts.fetched_at && <span className="normal-case"> · {fmtDate(charts.fetched_at)}</span>}
           </div>
           <div className="space-y-1.5 max-h-64 overflow-auto">
             {charts.tracks.slice(0, 30).map((t, i) => (

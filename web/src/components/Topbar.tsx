@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import useSWR from "swr";
 import { api } from "@/lib/api";
+import { fmtDate } from "@/lib/format";
 import PwaInstall from "@/components/PwaInstall";
 
 const KIND_DOT: Record<string, string> = {
@@ -99,7 +100,7 @@ function BellBox() {
                   <div className="font-medium leading-tight">{n.title}</div>
                   {n.body && <div className="text-xs text-muted leading-snug mt-0.5">{n.body}</div>}
                   <div className="flex items-center gap-2 mt-1">
-                    {n.created_at && <span className="text-[10px] text-muted">{new Date(n.created_at).toLocaleString("ru-RU")}</span>}
+                    {n.created_at && <span className="text-[10px] text-muted">{fmtDate(n.created_at)}</span>}
                     {n.link && (
                       <Link href={n.link as never} className="kuma-link text-[11px]" onClick={() => setOpen(false)}>
                         Открыть →

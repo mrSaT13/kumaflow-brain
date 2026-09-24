@@ -252,7 +252,12 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     activity_raw = (settings.get('activity') or '').strip()
     activity = activity_raw.lower() or None
     mood = _norm_mood(settings.get('mood'))
-    hour = current_hour if current_hour is not None else datetime.now().hour
+    try:
+        from app.core.time import local_hour as _local_hour
+
+        hour = current_hour if current_hour is not None else _local_hour()
+    except Exception:
+        hour = current_hour if current_hour is not None else datetime.now().hour
     # Пресеты: русские пилюли клиента -> диапазоны фичей для ctx-бонусов.
     _mood_preset = MOOD_PRESETS.get((settings.get('mood') or '').strip().lower(), {})
     _act_preset = ACTIVITY_PRESETS.get(activity_raw.strip().lower(),
@@ -478,6 +483,27 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     return out
 
 
+def spread_scores(items: list[dict], key: str = "score") -> list[dict]:
+    """Растянуть скоры окна в 0..1 (min-max), чтобы топ не выглядел как
+    сплошные 1.00: сырые total часто упираются в кламп 1.0.
+    Монотонно — порядок не меняется, только видимая дифференциация."""
+    try:
+        vals = [float(it.get(key) or 0) for it in items]
+    except Exception:
+        return items
+    if len(vals) < 2:
+        return items
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 1e-9:
+        return items
+    for it, v in zip(items, vals):
+        try:
+            it[key] = round((v - lo) / (hi - lo), 3)
+        except Exception:
+            pass
+    return items
+
+
 def wave_continue(db, user_id: str, queue: list[str] | None = None,
                   current_track_id: str | None = None, count: int = 20,
                   settings: dict | None = None,
@@ -690,6 +716,9 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         mid = [r for r in top if str(r.get("track_id")) not in used][:mid_n]
         top = head + mid + tail
         morph = {"from": start_mood, "to": target_mood}
+    # Растяжка скоров окна: сырые total упираются в кламп 1.0 и весь топ
+    # выглядит как «1.00, 1.00, …». Монотонно — порядок не трогаем.
+    spread_scores(top)
     return {'tracks': top, 'seeds': seeds,
             'applied': applied,
             'current_mood': start_mood,

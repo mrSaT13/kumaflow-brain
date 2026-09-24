@@ -10,6 +10,7 @@ import LiveWave from "@/components/LiveWave";
 import { PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { fmtDate } from "@/lib/format";
 import { moodLook } from "@/lib/moodStyle";
 
 const PALETTE = ["#FF3B30", "#007AFF", "#34C759", "#5856D6", "#AF52DE", "#FF9500", "#FF2D55", "#5AC8FA", "#00C7BE", "#FF9F0A"];
@@ -465,7 +466,7 @@ export default function UserProfilePage() {
               {vault?.available && !vault?.stored && vault?.key_source === "env" && <Badge tone="ok">ключ: compose</Badge>}
             </span>
             {data.mobile?.synced_at && (
-              <Badge tone="ok">мобила: {new Date(data.mobile.synced_at).toLocaleString("ru-RU")}</Badge>
+              <Badge tone="ok">мобила: {fmtDate(data.mobile.synced_at)}</Badge>
             )}
             <span className="flex-1" />
             {!vault?.stored ? (

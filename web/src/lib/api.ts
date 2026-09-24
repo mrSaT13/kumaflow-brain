@@ -130,7 +130,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => http<{ status: string }>("/api/health"),
-  version: () => http<{ name: string; version: string }>("/api/version"),
+  version: () => http<{ name: string; version: string; env?: string; tz?: string; utc_offset_sec?: number; now?: string }>("/api/version"),
 
   overview: () =>
     http<{

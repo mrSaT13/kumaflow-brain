@@ -20,9 +20,13 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "KumaFlow Brain"
-    app_version: str = "0.2.1"
+    app_version: str = "0.2.2"
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
+    # Часовой пояс «домашнего» времени: границы суток для daily-плейлистов,
+    # срабатывание крона, контекст утро/вечер в волне, подписи времени в API.
+    # IANA-имя (Europe/Samara) или фиксированный сдвиг (+4). Дефолт UTC.
+    app_timezone: str = "UTC"
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000

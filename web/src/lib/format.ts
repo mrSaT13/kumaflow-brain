@@ -1,3 +1,5 @@
+import { serverInstant } from "@/lib/serverTime";
+
 export function fmtDuration(s?: number) {
   if (!s || s < 0) return "—";
   const m = Math.floor(s / 60);
@@ -8,7 +10,7 @@ export function fmtDuration(s?: number) {
 export function fmtDate(iso?: string | null) {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleString("ru-RU", {
+    return new Date(serverInstant(iso)).toLocaleString("ru-RU", {
       day: "2-digit",
       month: "2-digit",
       year: "numeric",
@@ -23,7 +25,7 @@ export function fmtDate(iso?: string | null) {
 export function fmtTime(iso?: string | null) {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleTimeString("ru-RU", {
+    return new Date(serverInstant(iso)).toLocaleTimeString("ru-RU", {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
