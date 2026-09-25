@@ -33,6 +33,54 @@ logger = get_logger("taste")
 
 ACTIONS = ("play", "complete", "skip", "replay", "seek_back", "abandon")
 
+# Источники полного синка вкусов (payload["source"]). Без поля = мобила
+# (старые сборки мобилы метку не шлют).
+SYNC_SOURCES = ("mobile", "desktop")
+
+_sync_cols_ok: bool | None = None
+
+
+def _ensure_sync_cols(db) -> bool:
+    """Самопочинка схемы: taste_profiles.mobile_sync_source / desktop_synced_at.
+
+    Миграций пока нет (папка пустая, схема через create_all — он колонки
+    в существующие таблицы НЕ добавляет). Поэтому перед первым обращением
+    проверяем наличие колонок через инспектор и добавляем ALTER TABLE.
+    Возвращает True если новые колонки точно есть. Ошибки гасит (False) —
+    тогда работают фолбеки на старое поле, а проблема видна в логе, а не 500.
+    """
+    global _sync_cols_ok
+    if _sync_cols_ok is not None:
+        return _sync_cols_ok
+    try:
+        from sqlalchemy import inspect as _insp
+        from sqlalchemy import text as _txt
+
+        cols = {c["name"] for c in _insp(db.get_bind()).get_columns("taste_profiles")}
+        ddl: dict[str, str] = {
+            "mobile_sync_source": "VARCHAR(16) DEFAULT ''",
+            "desktop_synced_at": "TIMESTAMP",
+        }
+        added = False
+        for name, col_ddl in ddl.items():
+            if name not in cols:
+                db.execute(_txt(f"ALTER TABLE taste_profiles ADD COLUMN {name} {col_ddl}"))
+                added = True
+        if added:
+            db.commit()
+            cols = {c["name"] for c in _insp(db.get_bind()).get_columns("taste_profiles")}
+        _sync_cols_ok = "mobile_sync_source" in cols and "desktop_synced_at" in cols
+        if not _sync_cols_ok:
+            logger.warning("taste sync cols still missing after ensure (fallback mode)")
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning("taste sync cols ensure failed (fallback mode)")
+        _sync_cols_ok = False
+    return bool(_sync_cols_ok)
+
 
 def daypart_of(hour: int | None) -> str:
     """Часть суток (порт mobile day-part контекста бандита)."""
@@ -506,6 +554,7 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
     try:
         from app.db.models import TasteProfile as _TP
 
+        _ensure_sync_cols(db)
         _tp = db.get(_TP, user_id)
         if _tp:
             for g, w in (dict(_tp.mobile_genres or {}).items()):
@@ -518,8 +567,20 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
                     artist_w[str(an)] += float(w) * 0.5
                 except (TypeError, ValueError):
                     pass
+            _mob_at = _tp.mobile_synced_at.isoformat() if _tp.mobile_synced_at else None
+            try:
+                _desk_at = _tp.desktop_synced_at.isoformat() if _tp.desktop_synced_at else None
+            except Exception:
+                _desk_at = None
+            try:
+                _last_src = str(getattr(_tp, "mobile_sync_source", "") or "")
+            except Exception:
+                _last_src = ""
             mobile_snap = {
-                "synced_at": _tp.mobile_synced_at.isoformat() if _tp.mobile_synced_at else None,
+                "synced_at": _mob_at,
+                "mobile_synced_at": _mob_at,
+                "desktop_synced_at": _desk_at,
+                "last_source": _last_src or ("mobile" if _mob_at else ""),
                 "counts": dict(_tp.mobile_counts or {}),
                 "genres_top": sorted((dict(_tp.mobile_genres or {})).items(),
                                      key=lambda kv: kv[1], reverse=True)[:10],
@@ -603,6 +664,11 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
     if not u:
         return {"ok": False, "error": "not found"}
     payload = payload or {}
+    # Источник синка: mobile | desktop. Без поля = mobile (старые сборки).
+    source = str(payload.get("source") or "mobile").strip().lower()[:16]
+    if source not in SYNC_SOURCES:
+        source = "mobile"
+    _ensure_sync_cols(db)
 
     # external_id -> track_id (один запрос)
     ext_map: dict[str, str] = {}
@@ -705,7 +771,20 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
         tp.mobile_disliked = list(prof.get("dislikedSongs") or [])[:10000]
         tp.mobile_banned = list(prof.get("bannedArtists") or [])[:1000]
         tp.mobile_counts = dict(prof.get("artistDislikeCounts") or {})
-        tp.mobile_synced_at = datetime.utcnow()
+        # Штамп времени — по источнику: mobile_synced_at только для мобилы,
+        # desktop_synced_at только для десктопа. mobile_sync_source = кто
+        # последним писал слепок (старые записи без метки = мобила).
+        now = datetime.utcnow()
+        if _ensure_sync_cols(db):
+            tp.mobile_sync_source = source
+            if source == "desktop":
+                tp.desktop_synced_at = now
+            else:
+                tp.mobile_synced_at = now
+        else:
+            # Колонок нет и добавить не смогли — пишем только в старое поле,
+            # чтобы синк не падал целиком (источник тогда не различаем).
+            tp.mobile_synced_at = now
     db.flush()
 
     # свежие события (большой лимит — это синк истории).
@@ -727,7 +806,7 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
         if _maybe_autoban(db, user_id, artist):
             auto_bans_extra.append(artist)
     db.commit()
-    return {"ok": True, "ratings_seen": r_seen, "ratings_stats": r_stats,
+    return {"ok": True, "source": source, "ratings_seen": r_seen, "ratings_stats": r_stats,
             "fav_added": r_fav, "dis_added": r_dis,
             "profile_liked": m_liked, "profile_disliked": m_disliked,
             "profile_banned": m_banned,

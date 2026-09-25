@@ -187,10 +187,34 @@ def wave_live(user_id: str, request: Request, db: Session = Depends(get_db)):
     cur_idx = 0
     cur_raw = str(entry.get('current_track_id') or '')
     found: list = []
+    # Дедуп зеркала: телефон может прислать одну песню дважды
+    # (разные row id / external_id после перескана). Режем и по track_id,
+    # и по нормализованному «артист — название» как в wave_continue.
+    seen_ids: set[str] = set()
+    seen_keys: set[tuple] = set()
+    try:
+        from app.services.dedup import norm_text as _norm_text
+    except Exception:
+        _norm_text = None  # type: ignore
     for raw in entry.get('queue') or []:
         t = _gt(db, str(raw))
         if t is None:
             continue
+        tid = str(t.id)
+        if tid in seen_ids:
+            continue
+        if _norm_text is not None:
+            try:
+                k = (_norm_text(t.artist_name), _norm_text(t.title))
+            except Exception:
+                k = None
+            if k and (not k[0] or not k[1]):
+                k = None
+            if k and k in seen_keys:
+                continue
+            if k:
+                seen_keys.add(k)
+        seen_ids.add(tid)
         found.append((str(raw), t))
         if len(found) >= 50:
             break

@@ -52,6 +52,34 @@ function mapLiveQueue(q: { track_id: string }[]): WaveTrack[] {
   return (q as WaveTrack[]).map((t) => ({ ...t, score: 1 }));
 }
 
+// Интра-дедуп зеркала телефона: сервер уже режет повторы, но телефон
+// может прислать одну песню дважды (разные row id). Режем и по track_id,
+// и по «артист — название», current пересчитываем по track_id.
+function dedupLive(tracks: WaveTrack[]): WaveTrack[] {
+  const seenIds = new Set<string>();
+  const seenSongs = new Set<string>();
+  const out: WaveTrack[] = [];
+  for (const t of tracks) {
+    if (seenIds.has(t.track_id)) continue;
+    const k = songKey(t);
+    if (k !== " — " && seenSongs.has(k)) continue;
+    seenIds.add(t.track_id);
+    if (k !== " — ") seenSongs.add(k);
+    out.push(t);
+  }
+  return out;
+}
+
+function liveCurrentIdx(live: { queue?: { track_id: string }[]; current?: number | null }, deduped: WaveTrack[]): number {
+  const q = live.queue ?? [];
+  const rawCur = typeof live.current === "number" ? q[live.current] : null;
+  if (rawCur && deduped.length > 0) {
+    const idx = deduped.findIndex((t) => t.track_id === rawCur.track_id);
+    if (idx >= 0) return idx;
+  }
+  return Math.max(0, Math.min(live.current ?? 0, deduped.length - 1));
+}
+
 const COMP_LABELS: { key: keyof WaveComp; label: string }[] = [
   { key: "audio", label: "аудио" },
   { key: "genre", label: "жанр" },
@@ -200,8 +228,9 @@ export default function WavePage() {
           try {
             const live = await api.waveLive(userId);
             if (live.queue?.length && (live.age_sec == null || live.age_sec <= 300)) {
-              setQueue(mapLiveQueue(live.queue).slice(0, 100));
-              setPlayingIdx(Math.max(0, Math.min(live.current ?? 0, live.queue.length - 1)));
+              const deduped = dedupLive(mapLiveQueue(live.queue).slice(0, 100));
+              setQueue(deduped);
+              setPlayingIdx(liveCurrentIdx(live, deduped));
               setPhoneAge(live.age_sec ?? null);
               setPhoneMirror(true);
               return;
@@ -282,11 +311,12 @@ export default function WavePage() {
         }
         const phoneTs = Date.now() - (live.age_sec ?? 0) * 1000;
         if (lastLocalEdit.current > phoneTs) return; // локальные правки свежее — не затираем
-        const ids = live.queue.map((t) => t.track_id).join("|");
+        const deduped = dedupLive(mapLiveQueue(live.queue));
+        const ids = deduped.map((t) => t.track_id).join("|");
         setQueue((prev) => {
           if (prev.map((t) => t.track_id).join("|") === ids) return prev;
-          setPlayingIdx(Math.max(0, Math.min(live.current ?? 0, live.queue.length - 1)));
-          return mapLiveQueue(live.queue);
+          setPlayingIdx(liveCurrentIdx(live, deduped));
+          return deduped;
         });
         setPhoneMirror(true);
       } catch {

@@ -459,9 +459,22 @@ export default function UserProfilePage() {
               {vault?.available && !vault?.stored && vault?.key_source === "db" && <Badge tone="ok">ключ: авто</Badge>}
               {vault?.available && !vault?.stored && vault?.key_source === "env" && <Badge tone="ok">ключ: compose</Badge>}
             </span>
-            {data.mobile?.synced_at && (
-              <Badge tone="ok">мобила: {fmtDate(data.mobile.synced_at)}</Badge>
-            )}
+            {(() => {
+              const m = (data.mobile ?? {}) as {
+                synced_at?: string | null; mobile_synced_at?: string | null;
+                desktop_synced_at?: string | null; last_source?: string | null;
+              };
+              // Back-compat: старый мозг отдаёт только synced_at (= мобила).
+              const mobAt = m.mobile_synced_at ?? m.synced_at;
+              return (<>
+                {mobAt && (
+                  <Badge tone="ok">мобила: {fmtDate(mobAt)}</Badge>
+                )}
+                {m.desktop_synced_at && (
+                  <Badge tone="ok">десктоп: {fmtDate(m.desktop_synced_at)}</Badge>
+                )}
+              </>);
+            })()}
             <span className="flex-1" />
             {!vault?.stored ? (
               <Button variant="ghost" onClick={rememberPwd} disabled={busy} title="Ключ создастся автоматически при первом сохранении">
