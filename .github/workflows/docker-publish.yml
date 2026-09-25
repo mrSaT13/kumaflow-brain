@@ -1,5 +1,11 @@
 name: docker-publish
 
+# Серия пушей подряд не должна гоняться за latest: новый запуск отменяет
+# старый (иначе старый коммит, финишировав позже, заткнул бы latest собой).
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
 # Собирает backend, web и bridge в GHCR при каждом пуше в main (и по тегам v*).
 # На сервере потом достаточно: docker compose pull && docker compose up -d
 # Никаких секретов не нужно: используется встроенный GITHUB_TOKEN.
