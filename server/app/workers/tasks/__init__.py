@@ -1620,6 +1620,24 @@ def cluster_build(*args, **kwargs):
         return {"status": "failure", "error": str(e)}
 
 
+def _as_pl_songs(p: dict) -> list[dict]:
+    """Песни плейлиста из ответа Subsonic getPlaylists.
+
+    Формат ответа различается между версиями: это либо список song, либо
+    плейлист с вложенным entry. Принимаем оба, иначе на части Navidrome
+    плейлисты импортируются пустыми — и коллаборативный сигнал не появляется.
+    """
+    from app.services.taste_import import _as_list
+
+    out = _as_list(p.get("song"))
+    if out:
+        return out
+    entry = p.get("entry")
+    if isinstance(entry, list):
+        return [x for x in entry if isinstance(x, dict)]
+    return []
+
+
 def sync_navidrome_users(server_id: str) -> dict:
     """Синхронизация пользователей из Navidrome (getUsers) в media_users."""
     import asyncio
@@ -1670,7 +1688,99 @@ def sync_navidrome_users(server_id: str) -> dict:
                 ex.username = str(name)[:128]
                 ex.is_admin = bool(u.get("adminRole"))
                 updated += 1
-        return {"status": "success", "added": added, "updated": updated, "total": len(users)}
+        db.flush()
+        # Плейлисты пользователей. Раньше синк создавал только строки MediaUser,
+        # поэтому коллаборативной фильтрации не на что было опираться: чужих
+        # лайков Subsonic не отдаёт (getStarred2 только свои), но getPlaylists
+        # принимает username и для админа возвращает чужие плейлисты.
+        # Плейлистный сигнал сильнее лайка («оба сохранили трек» против
+        # «оба нажали сердечко»), поэтому он и делает коллаборацию рабочей.
+        pl_users = pl_stored = pl_tracks = 0
+        try:
+            import asyncio as _aio
+
+            url2 = url
+            auth2 = SubsonicAuth(user=user, password=password)
+
+            async def _pl_all() -> list[dict]:
+                out: list[dict] = []
+                async with SubsonicClient(url2, auth2, timeout=60.0) as cl:
+                    for u in users:
+                        uname = str(u.get("username") or u.get("id") or "")
+                        if not uname:
+                            continue
+                        try:
+                            pls = await cl.get_playlists(uname)
+                        except Exception:
+                            continue
+                        for p in pls:
+                            out.append({"username": uname, "playlist": p})
+                return out
+
+            if users:
+                all_pl = _aio.run(_pl_all())
+            else:
+                all_pl = []
+            for rec in all_pl:
+                uname = rec["username"]
+                p = rec["playlist"]
+                owner = db.query(MediaUser).filter_by(
+                    server_id=server_id, external_id=uname).first()
+                if owner is None:
+                    continue
+                pl_users += 1
+                ext_pl_id = str(p.get("id") or "")
+                if not ext_pl_id:
+                    continue
+                # Не плодим дубли при повторном синке: ищем по external_id
+                # (так же, как в services/taste_import.py:94).
+                exists = db.query(Playlist).filter_by(
+                    server_id=server_id, external_id=ext_pl_id).first()
+                if exists is not None:
+                    db.query(PlaylistTrack).filter_by(playlist_id=str(exists.id)).delete()
+                    db.delete(exists)
+                    db.flush()
+                local = Playlist(
+                    id=str(uuid.uuid4()), server_id=server_id,
+                    owner_user_id=str(owner.id),
+                    external_id=ext_pl_id[:128],
+                    name=str(p.get("name") or "playlist")[:512],
+                    is_public=bool(p.get("public", False)),
+                    is_auto_generated=False,
+                )
+                db.add(local)
+                db.flush()
+                pl_stored += 1
+                song_ids: list[str] = []
+                for s in _as_pl_songs(p):
+                    sid = str(s.get("id") or "")
+                    if sid:
+                        song_ids.append(sid)
+                if not song_ids:
+                    continue
+                trs = db.query(Track).filter(
+                    Track.server_id == server_id,
+                    Track.external_id.in_(song_ids),
+                ).all()
+                by_ext = {str(t.external_id): t for t in trs}
+                pos = 0
+                for sid in song_ids:
+                    t = by_ext.get(sid)
+                    if t is None:
+                        continue
+                    db.add(PlaylistTrack(playlist_id=local.id, track_id=str(t.id), position=pos))
+                    pos += 1
+                pl_tracks += pos
+        except Exception as e:  # noqa: BLE001 — плейлисты дополняют, а не ломают синк
+            logger.warning("sync users: не удалось импортировать плейлисты: {}", e)
+        try:
+            from app.services import collab as _cb
+
+            _cb.invalidate_cache()
+        except Exception:
+            pass
+        return {"status": "success", "added": added, "updated": updated, "total": len(users),
+                "playlist_users": pl_users, "playlists": pl_stored, "playlist_tracks": pl_tracks}
 
 
 def yandex_enrich(*args, **kwargs):

@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.core.auth import require_admin, require_brain_auth
+from app.core.auth import enforce_user_binding, require_admin, require_brain_auth
 from app.services.demo import ensure_demo_server
 from app.services.queue import enqueue
 from app.workers.tasks import collab_build
 
-router = APIRouter(dependencies=[Depends(require_brain_auth)])
+router = APIRouter(dependencies=[Depends(require_brain_auth), Depends(enforce_user_binding)])
 
 
 @router.post("/rebuild", dependencies=[Depends(require_admin)])
@@ -53,7 +53,7 @@ def recommend(user_id: str, n: int = 30, db: Session = Depends(get_db)):
 
 
 @router.post("/compare")
-def compare_users(payload: dict, db: Session = Depends(get_db)):
+def compare_users(payload: dict, request: Request = None, db: Session = Depends(get_db)):
     """Сравнение вкусов N пользователей: общие жанры/артисты/треки + попарные связи.
 
     Body: {user_ids: [uuid...2-10], top_n=12}.
@@ -78,6 +78,16 @@ def compare_users(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, 'need 2+ user_ids')
     if len(uids) > 10:
         raise HTTPException(400, 'max 10 user_ids')
+    # Привязка к пользователю: id приходят в теле, а enforce_user_binding
+    # смотрит только path-параметр. Без этой проверки per-user токен обычного
+    # пользователя читал бы вкусы любого — ровно то, что закрыто в users.py.
+    from app.core.auth import _auth_state
+
+    _info = _auth_state(request, None) if request is not None else None
+    if _info is not None and not _info.get("is_admin"):
+        _owner = _info.get("owner_user_id")
+        if _owner and any(u != str(_owner) for u in uids):
+            raise HTTPException(403, "token bound to another user")
     users = [db.get(MediaUser, u) for u in uids]
     if any(u is None for u in users):
         raise HTTPException(404, 'user not found')

@@ -1066,6 +1066,25 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     bans = {str(r.artist_name) for r in
             db.query(ArtistBan).filter_by(user_id=user_id).all()}
 
+    # collab-подмес: кто у похожих в топе — тем выше collabScore.
+    # Считаем ДО формирования пула кандидатов: раньше это было ниже, и
+    # коллаборативные треки часто просто не попадали в первые 2000 строк
+    # выборки (limit без ORDER BY), то есть даже при идеально посчитанной
+    # коллаборации её вывод не доходил до скора.
+    collab_scores: dict[str, float] = {}
+    try:
+        from app.services import collab as _cb
+        rec = _cb.recommend_for_user(db, user_id, n=200)
+        for it in rec.get('items', []):
+            collab_scores[str(it['track_id'])] = float(it.get('score', 0) or 0)
+    except Exception as e:
+        try:
+            from app.core.logging import get_logger as _gl
+
+            _gl("wave").warning("collab recommend failed: {}", e)
+        except Exception:
+            pass
+
     # Пул кандидатов: всё кроме сыгранного/дизлайков/банов, капом 2000.
     # Без IN-чанков: берём с запасом и режем в питоне (старый цикл
     # исключал в SQL только первый чанк skip и всё равно дофильтровывал).
@@ -1073,6 +1092,20 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     skip_n = len(played | dis)
     cand: list[str] = [str(r[0]) for r in q.limit(2000 + skip_n).all()]
     cand = [c for c in cand if c not in played and c not in dis][:2000]
+    # Гарантируем, что коллаборативные треки в пуле есть: если библиотека
+    # больше 2000 и limit без ORDER BY отсёк нужные строки, добавляем их явно.
+    # Без этого collab-вес просто не участвовал бы в скоре части треков.
+    if collab_scores:
+        _cset = set(cand)
+        _missing = [t for t in collab_scores if t not in _cset and t not in played and t not in dis]
+        if _missing:
+            cand = cand + _missing[:200]
+            try:
+                from app.core.logging import get_logger as _gl
+
+                _gl("wave").info("collab: добавлено {} треков в пул сверх лимита", len(_missing[:200]))
+            except Exception:
+                pass
     # Мета кандидатов — один проход чанками (SQLite держит ~999 vars в IN).
     # Нужна и для банов, и для вырезания «той же песни» под другим row id.
     meta: dict[str, Any] = {}
@@ -1195,15 +1228,8 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             cand = [c for c in cand
                     if c not in _lm or (_lm.get(c) or '') == 'instrumental']
 
-    # collab-подмес: кто у похожих в топе — тем выше collabScore
-    collab_scores: dict[str, float] = {}
-    try:
-        from app.services import collab as _cb
-        rec = _cb.recommend_for_user(db, user_id, n=200)
-        for it in rec.get('items', []):
-            collab_scores[str(it['track_id'])] = float(it.get('score', 0) or 0)
-    except Exception:
-        pass
+    # collab-подмес считается выше по коду (до формирования пула кандидатов),
+    # чтобы его треки гарантированно попадали в скоренное окно.
 
     # recent_events для behaviorBonus — нормализуем id к нашим
     norm_events: list[dict] = []
@@ -1337,7 +1363,17 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     time_map = time_bonus_for(db, user_id, cand[:800], _cur_hour)
     arm_artist, arm_genre = arm_boost_for(db, user_id, _ctx)
     assoc = session_assoc(db, user_id, seeds)
-    ranked = score_candidates(db, user_id, cand[:800], seeds, settings,
+    # Скоренное окно: обычный пул режем 800, но коллаборативные треки,
+    # добавленные в cand сверх лимита, в это окно не попали бы — и их вклад
+    # в скор снова исчез бы. Поэтому берём обычные 800 и сверху добавляем
+    # сами коллаборативные (их не больше 200, всего ~1000 строк на скоринг).
+    _score_pool = cand[:800]
+    if collab_scores:
+        _in_pool = set(_score_pool)
+        _extra = [t for t in collab_scores if t in cand and t not in _in_pool]
+        if _extra:
+            _score_pool = _score_pool + _extra[:200]
+    ranked = score_candidates(db, user_id, _score_pool, seeds, settings,
                               norm_events, collab_scores,
                               current_hour=_cur_hour,
                               jitter_seed=f"{user_id}:{len(played)}:{_pq}",
