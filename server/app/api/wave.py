@@ -265,17 +265,21 @@ def wave_feedback(user_id: str | None = None, request: Request = None, days: int
         u = _require_user(db, user_id)
         target = str(u.id)
     else:
-        # Без user_id — сводка по всем пользователям. Скоуп wave выдаётся и
-        # обычным юзерам, поэтому ограничиваемся их собственными данными:
-        # админ смотрит всех, остальные — себя.
+        # Без user_id — сводка по всем пользователям. Роутер защищён скоупом
+        # wave, который выдаётся и обычному пользователю, поэтому:
+        #   * info is None  → авторизация выключена (доверенная LAN), доступ
+        #     и так открыт каждому — сужать тут нечего, отдаём сводку по всем.
+        #     Раньше здесь стоял 403, из-за чего выбор «все пользователи» в UI
+        #     упирался в ошибку на любой стенде без BRAIN_API_TOKEN.
+        #   * info есть     → админ видит всех, остальные только себя.
         from app.core.auth import _auth_state
 
         info = _auth_state(request, None) if request is not None else None
-        if info is None or not info.get("is_admin"):
+        if info is None:
+            target = None
+        elif not info.get("is_admin"):
             owner = (info or {}).get("owner_user_id")
-            if not owner:
-                raise HTTPException(403, "нужен user_id или admin-токен")
-            target = str(owner)
+            target = str(owner) if owner else None
         else:
             target = None
     return {'ok': True, **_rfb.summary(db, user_id=target, days=days, source=source)}

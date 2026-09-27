@@ -53,12 +53,15 @@ function Bar({ pct, tone }: { pct: number; tone: string }) {
 }
 
 export default function StatsPage() {
-  const { userId } = useCurrentUser();
+  const { users } = useCurrentUser();
+  // "" = все пользователи. По умолчанию показываем сводку по всем, а не по
+  // неявному выбору из шапки: иначе непонятно, чьи это метрики.
+  const [who, setWho] = useState<string>("");
   const [days, setDays] = useState(7);
   const [source, setSource] = useState<string>("");
   const { data, error, isLoading } = useSWR(
-    ["/api/wave/feedback", userId, days, source],
-    () => api.waveFeedback({ user_id: userId || undefined, days, source: source || undefined }),
+    ["/api/wave/feedback", who, days, source],
+    () => api.waveFeedback({ user_id: who || undefined, days, source: source || undefined }),
     { refreshInterval: 60000 },
   );
 
@@ -80,6 +83,21 @@ export default function StatsPage() {
                 {r.label}
               </button>
             ))}
+            {/* Метрики считаются per-user: у каждого своя волна, свои скипы и
+                свои лайки. Раньше фильтр был неявным — брался глобальный выбор
+                пользователя из шапки, и «посмотреть всех» было невозможно,
+                поэтому непонятно было, чьи это цифры. */}
+            <select
+              value={who}
+              onChange={(e) => setWho(e.target.value)}
+              className="kuma-input kuma-input-inline text-xs"
+              title="Чьи показы считать"
+            >
+              <option value="">все пользователи</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>{u.username || u.id.slice(0, 8)}</option>
+              ))}
+            </select>
             <select
               value={source}
               onChange={(e) => setSource(e.target.value)}
@@ -104,7 +122,8 @@ export default function StatsPage() {
           <Card>
             <div className="text-sm text-red-500">Не смог загрузить метрики: {String((error as Error)?.message ?? error)}</div>
             <div className="text-xs text-muted mt-1">
-              Метрики появились после перезапуска backend (новая таблица recommendation_feedback создаётся при старте).
+              Нужна пересборка образа: таблица recommendation_feedback и endpoint
+              <code className="kuma-pill">/api/wave/feedback</code> появились в 0.2.5.
             </div>
           </Card>
         </Section>
@@ -114,11 +133,19 @@ export default function StatsPage() {
         <Card>
           <div className="text-sm">Пока нет данных, по которым можно судить.</div>
           <div className="text-xs text-muted mt-1">
-            Метрика появляется, когда мозг что-то предлагает и клиент сообщает, что с этим треком
-            произошло. Покажется после первой выдачи волны и событий от плеера
-            (позиция приходит из <code className="kuma-pill">position_sec</code>).
-            Показано показов: {data?.served ?? 0}, из них с сигналом: {data?.decided ?? 0}.
+            Метрика появляется, когда мозг что-то предлагает <b>и</b> клиент сообщает, что с этим
+            треком произошло. Покажется после событий от плеера — позиция приходит из{" "}
+            <code className="kuma-pill">position_sec</code>.
+            {" "}Показано показов: {data?.served ?? 0}, из них с сигналом: {data?.decided ?? 0}.
           </div>
+          {(data?.served ?? 0) > 0 && (data?.decided ?? 0) === 0 && (
+            <div className="text-xs text-amber-500 mt-2">
+              Показы идут, а сигналов нет — значит клиент не присылает события прослушивания
+              (<code className="kuma-pill">POST /api/users/{"{id}"}/events</code> с{" "}
+              <code className="kuma-pill">position_sec</code>). Сама механика подсказок при этом
+              работает, но оценивать её точность пока не по чему.
+            </div>
+          )}
         </Card>
       ) : (
         <>
