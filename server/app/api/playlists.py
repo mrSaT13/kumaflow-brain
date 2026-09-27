@@ -279,7 +279,8 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
         is_auto_generated=True,
         generated_for_date=datetime.combine(today, datetime.min.time()),
     )
-    db.add(p)    db.flush()
+    db.add(p)
+    db.flush()
 
     # если query — AI генератор (копия mobile ai_mix_service)
     if payload and payload.query and payload.query.strip():
