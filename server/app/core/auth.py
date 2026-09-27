@@ -110,12 +110,38 @@ _BOOTSTRAP_EXACT: dict[str, set[str]] = {
     # иначе из закрытого режима не выйти. Дополнительного риска нет: выпустить
     # admin-токен (POST /api/settings/tokens) и так можно без авторизации.
     "/api/settings/security": {"GET", "PUT"},
+    # whoami обязателен: по нему LoginGate решает, показывать ли окно входа.
+    # Без него гейт получал 403, SWR долбил endpoint по своему retry и
+    # страница выглядела «постоянно перезагружающейся», а кнопка выхода
+    # ничего не делала — редиректить было не на что.
+    "/api/settings/whoami": {"GET"},
+    # Первоначальная настройка, иначе до выпуска токена нельзя задать
+    # медиа-сервер/мост/ИИ/часовой пояс — то есть не настроить систему.
+    "/api/settings/timezone": {"GET", "PUT"},
+    "/api/settings/ai": {"GET", "POST"},
+    "/api/settings/ai/test": {"POST"},
+    "/api/settings/ai/models": {"GET"},
+    "/api/settings/bridge": {"GET", "POST"},
+    "/api/settings/bridge/test": {"POST"},
+    # Управление уже выпущенными токенами (выключить/удалить свой).
+    "/api/settings/automation": {"GET"},
 }
+
+# Префиксы: (начало пути, разрешённые методы). Нужны для путей с id в конце.
+# Пока auth выключен, токенов в БД не существует по определению (иначе auth
+# был бы включён), поэтому управлять ими без токена безопасно.
+_BOOTSTRAP_PREFIXES: list[tuple[str, set[str]]] = [
+    ("/api/settings/tokens/", {"PATCH", "DELETE"}),
+]
 
 
 def _is_bootstrap_path(method: str, path: str) -> bool:
+    m = (method or "GET").upper()
     if path in _BOOTSTRAP_EXACT:
-        return (method or "GET").upper() in _BOOTSTRAP_EXACT[path]
+        return m in _BOOTSTRAP_EXACT[path]
+    for prefix, methods in _BOOTSTRAP_PREFIXES:
+        if path.startswith(prefix):
+            return m in methods
     return False
 
 

@@ -9,7 +9,14 @@ import { api, setBrowserToken } from "@/lib/api";
 
 /** Gate: если API закрыт токенами, а у браузера токена нет — окно логина. */
 export default function LoginGate({ children }: { children: React.ReactNode }) {
-  const { data, error, isLoading, mutate } = useSWR("/api/settings/whoami", () => api.whoami(), { refreshInterval: 60000 });
+  // shouldRetryOnError: false — критично. Без него SWR на любой ошибке
+  // (включая 403) повторяет запрос по экспоненциальной задержке, и при
+  // закрытом API страница выглядит «постоянно перезагружающейся».
+  const { data, error, isLoading, mutate } = useSWR("/api/settings/whoami", () => api.whoami(), {
+    refreshInterval: 60000,
+    shouldRetryOnError: false,
+    revalidateOnFocus: false,
+  });
   const [mode, setMode] = useState<"navidrome" | "token">("navidrome");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
