@@ -71,13 +71,25 @@ export default function Automation() {
   const { data: auto, mutate: mutateAuto } = useSWR("/api/settings/automation", () => api.getAutomation(), { refreshInterval: 10000 });
   const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
 
-  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood" | "playlists_push_navidrome") {
+  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood" | "playlists_push_navidrome" | "clap_enabled" | "clap_audio_enabled") {
     const cur = key === "analysis_fetch_lyrics"
       ? (auto?.flags?.analysis_fetch_lyrics ?? true)
       : key === "analysis_ai_mood"
         ? (auto?.flags?.analysis_ai_mood ?? true)
-        : (auto?.flags?.playlists_push_navidrome ?? false);
-    const label = key === "analysis_fetch_lyrics" ? "Тексты" : key === "analysis_ai_mood" ? "AI-настроение" : "Авто-пуш плейлистов";
+        : key === "clap_enabled"
+          ? (auto?.flags?.clap_enabled ?? true)
+          : key === "clap_audio_enabled"
+            ? (auto?.flags?.clap_audio_enabled ?? true)
+            : (auto?.flags?.playlists_push_navidrome ?? false);
+    const label = key === "analysis_fetch_lyrics"
+      ? "Тексты"
+      : key === "analysis_ai_mood"
+        ? "AI-настроение"
+        : key === "clap_enabled"
+          ? "CLAP-поиск по смыслу"
+          : key === "clap_audio_enabled"
+            ? "CLAP-аудио-гибрид"
+            : "Авто-пуш плейлистов";
     setBusy(true);
     try {
       await api.saveAutomation({ [key]: !cur });
@@ -121,10 +133,45 @@ export default function Automation() {
       )}
       <div className="text-xs text-muted mt-2">
         {clap && !clap.available && (clap.files?.length ?? 0) > 0
-          ? "Файлы запечены в образ, но CLAP выключен флагом: проверь CLAP_ENABLED=true в docker-compose и пересоздай контейнер (docker compose up -d). Текст-модель подхватится без пересборки."
+          ? "Файлы запечены в образ, но тумблер CLAP выключен. Включи его ниже — пересборка и перезапуск контейнеров не нужны."
           : clap && !clap.available
             ? "Текстовой модели нет — обновите образ (CLAP запечён в backend-образ, см. deploy/Dockerfile.server): docker compose pull && docker compose up -d. Модель подтягивается при сборке образа, не на сервере."
             : "Если модель есть, а эмбеддингов 0 — запустите задачу «CLAP-эмбеддинги» кнопкой «сейчас» ниже (текст), аудио-эмбеддинги считаются следом за sonic-анализом и задачей «clap-audio»."}
+      </div>
+      <div className="mt-3 pt-3 border-t border-border space-y-2">
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={auto?.flags?.clap_enabled ?? true}
+            disabled={busy}
+            onChange={() => toggleLyrics("clap_enabled")}
+            className="w-4 h-4 accent-black dark:accent-white shrink-0"
+          />
+          <span>
+            <span className="font-medium text-sm">CLAP — поиск по смыслу</span>
+            <span className="text-xs text-muted block">
+              Текстовые эмбеддинги: поиск по описанию, «Открытия недели», подбор похожего по смыслу.
+              Выключается здесь же, без правки docker-compose и перезапуска контейнеров.
+              Уже посчитанные эмбеддинги в базе сохраняются.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={auto?.flags?.clap_audio_enabled ?? true}
+            disabled={busy}
+            onChange={() => toggleLyrics("clap_audio_enabled")}
+            className="w-4 h-4 accent-black dark:accent-white shrink-0"
+          />
+          <span>
+            <span className="font-medium text-sm">CLAP — аудио-гибрид</span>
+            <span className="text-xs text-muted block">
+              Считает вектор по самому звуку при sonic-анализе и подмешивает его в подбор «похожего»
+              и в волну. Тяжелее всего по CPU — имеет смысл выключать на слабых машинах.
+            </span>
+          </span>
+        </label>
       </div>
     </Card>
     <div className="h-4" />
@@ -183,7 +230,9 @@ export default function Automation() {
         <div className="text-sm">
           <div className="text-red-500 font-medium">Не смог загрузить задачи: {fmtErr(error)}</div>
           <div className="text-xs text-muted mt-1">
-            Проверьте в браузере <code className="kuma-pill">/api/cron/</code> и логи backend:{" "}
+            Если backend работает (анализ идёт, «Моя волна» открывается) — скорее всего
+            не прошёл авторизацию. Проверьте в браузере <code className="kuma-pill">/api/cron/</code>,
+            <code className="kuma-pill">/api/cron/health</code> и логи backend:{" "}
             <code className="kuma-pill">docker compose logs backend --tail=50</code>
           </div>
           <div className="mt-2">
@@ -193,7 +242,11 @@ export default function Automation() {
       ) : !data ? (
         <div className="text-sm text-muted">Загрузка…</div>
       ) : jobs.length === 0 ? (
-        <div className="text-sm text-muted">Задач нет.</div>
+        <div className="text-sm text-muted">
+          Задач нет. Они создаются автоматически при старте backend и scheduler —
+          перезапусти контейнеры:{" "}
+          <code className="kuma-pill">docker compose restart backend scheduler</code>
+        </div>
       ) : (
         <div className="divide-y divide-border">
           {jobs.map((j) => {
@@ -212,10 +265,22 @@ export default function Automation() {
                     <span className="font-medium text-sm flex items-center gap-2 flex-wrap">
                       {ru.title}
                       <Badge tone={j.enabled ? "ok" : "default"}>{j.enabled ? "вкл" : "выкл"}</Badge>
+                      {j.last_status === "error" && <Badge tone="err">ошибка</Badge>}
+                      {j.enabled && !j.last_run_at && <Badge tone="warn">ещё не запускалась</Badge>}
                     </span>
                     <span className="text-xs text-muted block">{ru.desc}</span>
                     {j.last_run_at && (
-                      <span className="text-[11px] text-muted block">последний запуск: {fmtDate(j.last_run_at)}</span>
+                      <span className="text-[11px] text-muted block">
+                        последний запуск: {fmtDate(j.last_run_at)}
+                        {typeof j.run_count === "number" ? ` · всего ${j.run_count}` : ""}
+                        {j.fail_count ? ` · сорвано ${j.fail_count}` : ""}
+                      </span>
+                    )}
+                    {j.next_run_at && j.enabled && (
+                      <span className="text-[11px] text-muted block">следующий: {fmtDate(j.next_run_at)}</span>
+                    )}
+                    {j.last_status === "error" && j.last_error && (
+                      <span className="text-[11px] text-red-500 block">ошибка запуска: {j.last_error}</span>
                     )}
                   </span>
                 </label>

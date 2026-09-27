@@ -60,6 +60,21 @@ export default function PlaylistDetailPage() {
           </div>
         }
       />
+      {data.comment && (
+        <>
+          <div className="h-4" />
+          <Section title="Почему такой микс">
+            <Card>
+              <div className="text-sm text-muted leading-relaxed">{data.comment}</div>
+              {data.in_navidrome && (
+                <div className="text-[11px] text-muted mt-2">
+                  Это же пояснение выгружено в Navidrome, поэтому его видят и сторонние клиенты.
+                </div>
+              )}
+            </Card>
+          </Section>
+        </>
+      )}
       <Section title="Треки">
         {tracks.length === 0 ? (
           <EmptyState message="Плейлист пуст." />

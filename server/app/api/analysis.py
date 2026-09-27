@@ -35,6 +35,7 @@ def clap_status(db: Session = Depends(get_db)):
     audio_weight = 0.0
     files: list[dict] = []
     flag_enabled = False
+    flags_source = "env"
     models_dir = ""
     text_file: str | None = None
     audio_file: str | None = None
@@ -52,6 +53,18 @@ def clap_status(db: Session = Depends(get_db)):
             audio_weight = float(getattr(_s, "clap_audio_weight", 0.7) or 0.0)
         except Exception:
             pass
+        # Флаги из веба важнее env: показываем то, что реально применяется.
+        # Иначе UI писал «файлы есть, флаг выкл», хотя тумблер в настройках был
+        # включён (или наоборот) — и диагностика вводила в заблуждение.
+        try:
+            from app.services.automation import clap_audio_enabled as _flag_audio
+            from app.services.automation import clap_enabled as _flag_text
+
+            flag_enabled = bool(_flag_text())
+            audio_enabled = bool(_flag_audio())
+            flags_source = "settings"
+        except Exception:
+            flags_source = "env"
         for p in sorted(_clap.MODELS_DIR.rglob("*.onnx")):
             if p.is_file():
                 try:
@@ -84,7 +97,8 @@ def clap_status(db: Session = Depends(get_db)):
             "audio_available": audio_available, "audio_enabled": audio_enabled,
             "audio_weight": audio_weight,
             "audio_stub": not audio_available,
-            "flag_enabled": flag_enabled, "models_dir": models_dir,
+            "flag_enabled": flag_enabled, "flags_source": flags_source,
+            "models_dir": models_dir,
             "text_file": text_file, "audio_file": audio_file}
 
 
@@ -147,10 +161,13 @@ def search_by_text(payload: dict, db: Session = Depends(get_db)):
         if clap_ready():
             vec = get_text_embedding(q)
             if vec:
-                # есть ли эмбеддинги в БД? если нет — тихо fallback
+                # есть ли эмбеддинги в БД? если нет — тихо fallback.
+                # Считаем именно clap_text: поиск идёт по текстовому вектору,
+                # и раньше общее .count() создавало ложное впечатление, что
+                # кандидаты есть, даже если были только аудио-эмбеддинги.
                 from app.db.models import TrackEmbedding
 
-                cnt = db.query(TrackEmbedding).count()
+                cnt = db.query(TrackEmbedding).filter(TrackEmbedding.model == "clap_text").count()
                 if cnt > 0:
                     items = _search_emb(vec, top_k=top_k)
                     if items:

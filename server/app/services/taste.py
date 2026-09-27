@@ -286,6 +286,16 @@ def record_rate(db, user_id: str, track_id: str, like: bool | None) -> dict:
         db.query(Favorite).filter_by(user_id=user_id, track_id=track_id).delete()
         db.query(TrackDislike).filter_by(user_id=user_id, track_id=track_id).delete()
     db.commit()
+    # Метрики рекомендаций: лайк с волны — самый ценный сигнал, что предложение
+    # попало в точку. Без учёта «лайков с волны» в статистике не осталось бы
+    # ничего, кроме скипов.
+    if like is not None:
+        try:
+            from app.services import rec_feedback as _rfb
+
+            _rfb.mark_outcome(db, user_id, track_id, "like" if like else "dislike")
+        except Exception:
+            pass
     return {"ok": True, "like": like, "auto_banned_artist": auto_banned}
 
 
@@ -336,6 +346,15 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
                          position_sec=pos, hour=_hour,
                          day_of_week=_dow))
         update_taste_signals(db, user_id, _t, action, pos, _hour, _dow)
+        # Метрики рекомендаций: закрываем «показ» исходом. Без этого треки,
+        # предложенные волной, и треки, найденные юзером самому, в статистике
+        # выглядели бы одинаково.
+        try:
+            from app.services import rec_feedback as _rfb
+
+            _rfb.mark_outcome(db, user_id, tid, action, pos, _t.duration_sec if _t else None)
+        except Exception:
+            pass
         stored += 1
         if action == "skip":
             n_skips = db.query(PlayEvent).filter_by(

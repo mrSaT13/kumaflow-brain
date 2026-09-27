@@ -28,6 +28,7 @@ def _tick_once() -> None:
     from app.core.time import utcnow as _utcnow
     from app.db.database import session_scope
     from app.db.models import CronJob, ScanRun
+    from app.services.cron_jobs import is_valid_cron
     from app.services.queue import enqueue, enqueue_clap, enqueue_light
 
     import uuid as _uuid
@@ -41,17 +42,45 @@ def _tick_once() -> None:
     now_local = now.replace(tzinfo=timezone.utc).astimezone(_server_tz()).replace(tzinfo=None)
     with session_scope() as db:
         jobs = db.query(CronJob).filter(CronJob.enabled.is_(True)).all()
-        for j in jobs:
+        # Раньше тик молчал, а крон «не работал»: непонятно было, пустая таблица
+        # или просто не наступило время. Теперь видно и то, и другое.
+        logger.info("cron tick: {} задач(и) активно", len(jobs))
+        # Ограничитель «догоняющих» запусков. У задачи, которая ещё ни разу не
+        # выполнялась (last_run_at пуст — свежая база), условие расписания не
+        # проверяется вовсе, то есть запускается она сразу. Раньше так стартовали
+        # ВСЕ задачи одним тиком: на пустой базе это полный проход по библиотеке
+        # плюс эмбеддинги разом. Теперь не больше MAX_PER_TICK за тик, остальные
+        # подхватываются следующими тиками (минута) — и это видно в UI.
+        MAX_PER_TICK = 2
+        started = 0
+        # Сначала дешёвые catch-up-задачи, потом остальные по расписанию.
+        for j in sorted(jobs, key=lambda x: (x.last_run_at is not None, x.kind)):
+            never_run = j.last_run_at is None
+            if started >= MAX_PER_TICK:
+                if never_run:
+                    logger.info("cron {}: ждёт очереди (лимит {} запусков за тик)", j.kind, MAX_PER_TICK)
+                continue
             try:
-                trig = CronTrigger.from_crontab(j.cron_expr)
-                if j.last_run_at:
+                if not is_valid_cron(j.cron_expr):
+                    # Раньше битое выражение попадало в except ниже и задача
+                    # считалась «пора запускать» на КАЖДОМ тике — то есть раз в
+                    # минуту. Теперь такую задачу пропускаем и пишем в лог.
+                    logger.warning("cron {}: некорректное выражение {!r} — задача пропущена",
+                                   j.kind, j.cron_expr)
+                    continue
+                if not never_run:
+                    trig = CronTrigger.from_crontab(j.cron_expr)
                     last_local = j.last_run_at.replace(tzinfo=timezone.utc) \
                         .astimezone(_server_tz()).replace(tzinfo=None)
                     nxt = trig.get_next_fire_time(None, last_local)
                     if nxt and nxt.replace(tzinfo=None) > now_local:
                         continue
-            except Exception:
-                pass
+                else:
+                    logger.info("cron {}: ни разу не запускалась — догоняющий запуск", j.kind)
+            except Exception as e:
+                logger.warning("cron {}: не удалось вычислить время следующего запуска: {}",
+                               j.kind, e)
+                continue
             kind = j.kind
             try:
                 if kind == "daily":
@@ -95,6 +124,20 @@ def _tick_once() -> None:
                 elif kind == "clap":
                     from app.workers import tasks as _t
 
+                    # Тумблер CLAP в вебе: выключен — не дёргаем воркер заново.
+                    # Раньше крон всё равно ставил джобу, и та молча отписывалась
+                    # «skipped», хотя очередь clap продолжала расходовать ресурсы.
+                    try:
+                        from app.services.automation import clap_enabled as _clap_flag
+
+                        if not _clap_flag():
+                            logger.info("cron clap: выключен тумблером в настройках — пропускаю")
+                            j.last_run_at = now
+                            j.last_status = "ok"
+                            j.last_error = "выключен тумблером CLAP"
+                            continue
+                    except Exception:
+                        pass
                     enqueue_clap(_t.clap_embed, str(j.id), job_timeout=3600)
                 elif kind == "covers_gc":
                     try:
@@ -105,9 +148,28 @@ def _tick_once() -> None:
                         pass
                 else:
                     continue
+                # Статусы видны в UI: без них «крон не работает» и «крон упал» выглядели одинаково.
                 j.last_run_at = now
-                logger.info("cron {} enqueued", kind)
+                j.last_started_at = now
+                j.last_finished_at = now
+                j.last_status = "ok"
+                j.last_error = None
+                j.run_count = (j.run_count or 0) + 1
+                _next = None
+                try:
+                    _t2 = CronTrigger.from_crontab(j.cron_expr)
+                    _f = _t2.get_next_fire_time(None, now_local)
+                    if _f:
+                        _next = _f.replace(tzinfo=None)
+                except Exception:
+                    pass
+                j.next_run_at = _next
+                started += 1
+                logger.info("cron {} enqueued (следующий запуск: {})", kind, j.next_run_at)
             except Exception as e:
+                j.last_status = "error"
+                j.last_error = str(e)[:500]
+                j.fail_count = (j.fail_count or 0) + 1
                 logger.warning("cron {} failed: {}", kind, e)
         db.commit()
         # Сторож sonic-анализа: RQ убивает job по job_timeout жёстко (work horse),
@@ -123,6 +185,32 @@ def _tick_once() -> None:
                 db.rollback()
             except Exception:
                 pass
+        _write_heartbeat(None)
+
+
+def _write_heartbeat(error: str | None) -> None:
+    """Отметка «scheduler жив». Её читает GET /api/cron/health.
+
+    Пишется КАЖДЫЙ тик даже при ошибке — иначе по «молчанию» нельзя отличить
+    «упал» от «тик был, но все задачи пропущены».
+    """
+    from app.core.time import utcnow
+    from app.db.database import session_scope
+    from app.db.models import AppSetting
+    from app.services.cron_jobs import HEARTBEAT_KEY
+
+    try:
+        with session_scope() as db:
+            row = db.get(AppSetting, HEARTBEAT_KEY)
+            val = dict(row.value) if row and isinstance(row.value, dict) else {}
+            val["last_tick_at"] = utcnow().isoformat()
+            val["last_tick_error"] = error
+            if row is None:
+                db.add(AppSetting(key=HEARTBEAT_KEY, value=val))
+            else:
+                row.value = val
+    except Exception as e:
+        logger.warning("не удалось записать heartbeat крона: {}", e)
 
 
 STALE_ANALYSIS_MIN = 45
@@ -210,18 +298,41 @@ def main() -> int:
 
     init_redis()
     logger.info("scheduler started (tick 60s)")
-    # первый тик сразу
+    # Своим ходом создаём недостающие cron-задачи: так scheduler не зависит от
+    # того, открывал ли кто-нибудь веб. На чистой базе без этого тикать не по чему.
     try:
-        _tick_once()
+        from app.db.database import session_scope as _ss
+        from app.services.cron_jobs import ensure_defaults as _ensure_cron_defaults
+
+        with _ss() as _db:
+            _added = _ensure_cron_defaults(_db)
+        if _added:
+            logger.info("cron defaults seeded: {}", _added)
     except Exception as e:
-        logger.warning("initial tick failed: {}", e)
+        logger.warning("не удалось создать cron-задачи по умолчанию: {}", e)
+    # Первый тик сразу: он же догонит дешёвые задачи, которые ни разу не
+    # запускались (last_run_at пуст), чтобы на свежей базе UI не выглядел мёртвым.
+    _run_tick()
     while True:
         time.sleep(60)
-        try:
-            _tick_once()
-        except Exception as e:
-            logger.warning("cron tick failed: {}", e)
+        _run_tick()
     return 0
+
+
+def _run_tick() -> None:
+    """Один тик. Никогда не пробрасывает исключение наверх: иначе main() упал бы
+    и крон перестал бы тикать навсегда (а «падающий» крон выглядит как полная
+    тишина — самый непонятный симптом из возможных)."""
+    err: str | None = None
+    try:
+        _tick_once()
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+        logger.warning("cron tick failed: {}", e)
+    try:
+        _write_heartbeat(err)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

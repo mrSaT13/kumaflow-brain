@@ -63,6 +63,23 @@ async def lifespan(app: FastAPI):
                                message="Помечена проваленной: backend перезапускался"))
     except Exception:
         pass
+    # Крон-задачи: сидим при старте, а не только когда кто-то откроет вкладку
+    # «Автоматизация». Иначе на чистой базе таблица cron_jobs пуста, scheduler
+    # тикает по ней молча и ночные плейлисты просто не создаются.
+    try:
+        from app.db.database import session_scope
+        from app.services.cron_jobs import ensure_defaults as _ensure_cron_defaults
+
+        with session_scope() as db:
+            _added = _ensure_cron_defaults(db)
+        if _added:
+            import logging as _logging
+
+            _logging.getLogger("kumaflow").info("cron defaults seeded: {}", _added)
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger("kumaflow").warning("не удалось создать cron-задачи по умолчанию", exc_info=True)
     init_redis()
     try:
         yield

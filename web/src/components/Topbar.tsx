@@ -140,7 +140,7 @@ export function Topbar({ onMenu }: { onMenu?: () => void } = {}) {
 
   if (!mounted) {
     return (
-      <div className="h-14 border-b border-border bg-bg/80 backdrop-blur sticky top-0 z-10 flex items-center justify-between px-4 md:px-8 gap-2">
+      <div className="h-14 border-b border-border kuma-glass sticky top-0 z-10 flex items-center justify-between px-4 md:px-8 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <button onClick={onMenu} className="md:hidden kuma-pill p-2" aria-label="Меню">
             <Menu className="w-4 h-4" />
@@ -154,7 +154,7 @@ export function Topbar({ onMenu }: { onMenu?: () => void } = {}) {
     );
   }
   return (
-    <div className="h-14 border-b border-border bg-bg/80 backdrop-blur sticky top-0 z-10 flex items-center justify-between px-4 md:px-8 gap-2">
+    <div className="h-14 border-b border-border kuma-glass sticky top-0 z-10 flex items-center justify-between px-4 md:px-8 gap-2">
       <div className="flex items-center gap-2 min-w-0">
         <button onClick={onMenu} className="md:hidden kuma-pill p-2 shrink-0" aria-label="Меню">
           <Menu className="w-4 h-4" />

@@ -15,6 +15,7 @@ import {
   Settings as Cog,
   Activity,
   Radio,
+  BarChart3,
   ChevronsLeft,
   ChevronsRight,
   LogOut,
@@ -35,6 +36,9 @@ const sections: { title: string; items: NavItem[] }[] = [
   { title: "Задачи", items: [
     { href: "/scans", label: "Задачи и логи", icon: Activity },
     { href: "/history", label: "История", icon: History },
+  ]},
+  { title: "Замеры", items: [
+    { href: "/stats", label: "Статистика волны", icon: BarChart3 },
   ]},
   { title: "Управление", items: [
     { href: "/users", label: "Пользователи", icon: Users },

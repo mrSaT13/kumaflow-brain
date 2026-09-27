@@ -49,12 +49,20 @@ def _find_audio_onnx() -> Path | None:
 
 
 def is_available() -> bool:
+    # Флаг берётся из веба (AppSetting), а не только из env: модель уже запечена
+    # в образ, поэтому включать/выключать можно без пересборки и рестарта.
     try:
-        s = get_settings()
-        if not s.clap_enabled:
+        from app.services.automation import clap_enabled as _flag
+
+        if not _flag():
             return False
     except Exception:
-        pass
+        try:
+            s = get_settings()
+            if not s.clap_enabled:
+                return False
+        except Exception:
+            pass
     p = _find_text_onnx()
     return bool(p and p.exists() and p.stat().st_size > 1024)
 
@@ -156,13 +164,19 @@ def get_text_embedding(q: str, dim: int = 512) -> list[float] | None:
 
 
 def is_audio_available() -> bool:
-    """Аудио-ONNX доступен и фича включена (opt-in, динозавр-friendly)."""
+    """Аудио-ONNX доступен и фича включена (тумблер в вебе + фолбэк на env)."""
     try:
-        s = get_settings()
-        if not getattr(s, "clap_audio_enabled", False):
+        from app.services.automation import clap_audio_enabled as _flag
+
+        if not _flag():
             return False
     except Exception:
-        return False
+        try:
+            s = get_settings()
+            if not getattr(s, "clap_audio_enabled", False):
+                return False
+        except Exception:
+            return False
     p = _find_audio_onnx()
     return bool(p and p.exists() and p.stat().st_size > 1024)
 

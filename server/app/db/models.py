@@ -198,6 +198,10 @@ class Playlist(Base):
         ForeignKey("media_users.id", ondelete="SET NULL"), nullable=True
     )
     name: Mapped[str] = mapped_column(String(512), nullable=False)
+    # Пояснение к плейлисту («почему такой микс»). Раньше колонки не было
+    # вообще: ИИ генерировал comment, он возвращался в ответе API и молча
+    # терялся — ни показать, ни выгрузить в Navidrome было нечего.
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False)
     is_auto_generated: Mapped[bool] = mapped_column(Boolean, default=False)
     generated_for_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
@@ -465,6 +469,17 @@ class CronJob(Base):
     payload: Mapped[Optional[dict]] = mapped_column(JSONCol(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Наблюдаемость. Раньше у задачи было только last_run_at, поэтому по UI нельзя
+    # было отличить «запустилась и упала» от «вообще ни разу не запускалась», а по
+    # логам — найти причину. Теперь видно, что произошло с последним запуском.
+    last_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # ok|error|running
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    run_count: Mapped[int] = mapped_column(default=0)
+    fail_count: Mapped[int] = mapped_column(default=0)
+
 
 class AppSetting(Base):
     __tablename__ = "app_settings"
@@ -510,6 +525,47 @@ class TasteSnapshot(Base):
     artists: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
     counts: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class RecommendationFeedback(Base):
+    """Что реально вышло из рекомендации — чтобы можно было мерить волну.
+
+    Зачем: без этого улучшать скоринг приходится вслепую. События прослушивания
+    (PlayEvent) уже есть, но там нет двух вещей: что трек был предложен
+    СИСТЕМОЙ (а не найден юзером сам) и с какой уверенностью/по какой причине.
+    Поэтому ставка на 0.9 и на 0.3 неразличимы, и невозможно понять, какой из
+    признаков в wave.py реально работает.
+
+    Строка = один показ: served_* заполняется при выдаче, outcome_* — когда
+    пришло событие от клиента. outcome=None означает «показали, но сигнала нет».
+    """
+
+    __tablename__ = "recommendation_feedback"
+
+    id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), index=True
+    )
+    track_id: Mapped[str] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), index=True
+    )
+    # откуда: wave | daily | smart | weekly | ai | discovery | manual
+    source: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    reason: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    score: Mapped[Optional[float]] = mapped_column(nullable=True)
+    rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    served_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    # None = сигнала нет; played|early_skip|skipped|completed|abandoned|liked|disliked
+    outcome: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    position_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    duration_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_recfb_user_served", "user_id", "served_at"),
+        Index("ix_recfb_user_source_outcome", "user_id", "source", "outcome"),
+    )
 
 
 class ApiToken(Base):

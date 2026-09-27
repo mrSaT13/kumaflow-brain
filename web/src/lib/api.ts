@@ -44,9 +44,74 @@ export type LogLine = {
   created_at: string;
 };
 
+/** Результат авто-выгрузки плейлиста в Navidrome (тумблер в Настройки → Автоматизация).
+ *  `ok: false` с `error` = пуш не прошёл; `pushed: false` без push = тумблер выключен. */
+export type PushResult = {
+  ok: boolean;
+  navidrome_id?: string;
+  exported?: number;
+  skipped?: number;
+  error?: string;
+};
+
+/** Сводка метрик волны (server/app/services/rec_feedback.py). */
+export type WaveFeedback = {
+  ok: boolean;
+  days: number;
+  source: string | null;
+  served: number;
+  decided: number;
+  pending: number;
+  counts: Record<string, number>;
+  early_skip_rate: number;
+  skip_rate: number;
+  completion_rate: number;
+  like_rate: number;
+  avg_early_skip_sec: number | null;
+  by_source: { source: string; served: number; early_skip: number; completed: number; liked: number }[];
+  by_reason: { reason: string; served: number; early_skip: number; completed: number; liked: number }[];
+  by_score: { bucket: string; served: number; early_skip_rate: number; completion_rate: number; like_rate: number }[];
+};
+
+/** Точка продолжения прослушивания с другого устройства. */
+export type WaveResume = {
+  ok: boolean;
+  available: boolean;
+  stale: boolean;
+  age_sec: number | null;
+  device: string | null;
+  paused: boolean;
+  reason?: string;
+  track: {
+    track_id: string; title: string; artist_name: string; album_name: string;
+    cover_art_id: string | null; external_id: string | null; duration_sec: number | null;
+  } | null;
+  position_sec: number | null;
+  position_ratio: number | null;
+  queue: string[];
+};
+
+/** Крон-задача с полями наблюдаемости: что с последним запуском. */
+export type CronJob = {
+  id: string;
+  name: string;
+  kind: string;
+  cron_expr: string;
+  enabled: boolean;
+  last_run_at?: string | null;
+  last_status?: "ok" | "error" | "running" | null;
+  last_error?: string | null;
+  last_started_at?: string | null;
+  last_finished_at?: string | null;
+  next_run_at?: string | null;
+  run_count?: number;
+  fail_count?: number;
+};
+
 export type Playlist = {
   id: string;
   name: string;
+  comment?: string | null;
   external_id?: string | null;
   in_navidrome?: boolean;
   is_public: boolean;
@@ -107,12 +172,33 @@ function authHeaders(): Record<string, string> {
   return t ? { authorization: `Bearer ${t}` } : {};
 }
 
+// Сколько ждём ответа, прежде чем сказать «сервис не отвечает».
+// Раньше запрос висел до бесконечности и падал сырым
+// «NetworkError when attempting to fetch resource» — невозможно было понять,
+// backend это упал, перезапускается или просто не слушает.
+const HTTP_TIMEOUT_MS = 30000;
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { "content-type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
-    cache: "no-store",
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...init,
+      signal: ctrl.signal,
+      headers: { "content-type": "application/json", ...authHeaders(), ...(init?.headers ?? {}) },
+      cache: "no-store",
+    });
+  } catch (e: unknown) {
+    const aborted = e instanceof DOMException && e.name === "AbortError";
+    throw new Error(
+      aborted
+        ? `Сервер не ответил за ${HTTP_TIMEOUT_MS / 1000} c (${path}). Проверь, что backend запущен: docker compose ps backend`
+        : `Сервер недоступен (${path}). Проверь, что backend запущен и доступен: docker compose ps backend, docker compose logs backend --tail=50`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     // backend обычно отдаёт JSON {ok:false,error} или {detail} — показываем его, а не HTML
@@ -247,17 +333,17 @@ export const api = {
     http<{ ok: boolean; error?: string }>(`/api/scan/runs/${id}/cancel`, { method: "POST" }),
 
   generateDailyPlaylist: (n = 30, user_id?: string) =>
-    http<{ queued: boolean; playlist_id: string; tracks: number; steps: { step: number; name: string; items: number }[] }>(
+    http<{ queued: boolean; playlist_id: string; tracks: number; steps: { step: number; name: string; items: number }[]; pushed?: boolean; push?: PushResult }>(
       `/api/playlists/generate-daily`,
       { method: "POST", body: JSON.stringify(user_id ? { n, user_id } : { n }) },
     ),
   weeklyDiscovery: (user_id: string, n = 30) =>
-    http<{ playlist_id: string; tracks: number; mode: string; explanations: { track_id: string; score: number; because_of_title?: string | null; genre_match?: boolean; mood?: string | null; text: string }[]; steps: { step: number; name: string; items: number }[] }>(
+    http<{ playlist_id: string; tracks: number; mode: string; explanations: { track_id: string; score: number; because_of_title?: string | null; genre_match?: boolean; mood?: string | null; text: string }[]; steps: { step: number; name: string; items: number }[]; pushed?: boolean; push?: PushResult }>(
       `/api/playlists/weekly-discovery`,
       { method: "POST", body: JSON.stringify({ user_id, n }) },
     ),
   aiGenerate: (query: string, n = 30, user_id?: string) =>
-    http<{ playlist_id: string; name: string; comment?: string; tracks: number; from_fallback?: boolean }>(
+    http<{ playlist_id: string; name: string; comment?: string; tracks: number; from_fallback?: boolean; pushed?: boolean; push?: PushResult }>(
       `/api/playlists/ai-generate`,
       { method: "POST", body: JSON.stringify({ query, n, user_id }) },
     ),
@@ -386,7 +472,7 @@ export const api = {
       `/api/users/${id}/refresh-async`, { method: "POST" },
     ),
   myWave: (user_id: string, n = 30, seed_track_id?: string, mood?: string) =>
-    http<{ playlist_id: string; tracks: number; excluded_disliked: number; excluded_banned: number }>(
+    http<{ playlist_id: string; tracks: number; excluded_disliked: number; excluded_banned: number; pushed?: boolean; push?: PushResult }>(
       `/api/playlists/my-wave`,
       { method: "POST", body: JSON.stringify({ user_id, n, seed_track_id, mood }) },
     ),
@@ -407,17 +493,42 @@ export const api = {
     http<{ ok: boolean; user_id: string; seeds: string[] }>(
       `/api/wave/seeds?user_id=${encodeURIComponent(user_id)}&limit=${limit}`,
     ),
-  wavePublish: (body: { user_id: string; queue: string[]; current_track_id?: string }) =>
+  // position_sec/duration_sec/device — это handoff: по ним другое устройство
+  // продолжает прослушивание с того же места (GET /api/wave/resume).
+  wavePublish: (body: { user_id: string; queue: string[]; current_track_id?: string | null; position_sec?: number | null; duration_sec?: number | null; device?: string; paused?: boolean }) =>
     http<{ ok: boolean; queued: number }>(`/api/wave/publish`, { method: "POST", body: JSON.stringify(body) }),
   waveLive: (user_id: string) =>
     http<{
       ok: boolean; user_id: string; current: number; age_sec?: number | null; stale?: boolean;
       queue: { track_id: string; title: string; artist_name?: string; album_name?: string | null; genre?: string | null; cover_art_id?: string | null; reason: string; mood?: string | null; moods?: string[]; energy?: number | null; tempo?: number | null; like?: boolean | null }[];
     }>(`/api/wave/live?user_id=${encodeURIComponent(user_id)}`),
+  waveFeedback: (params: { user_id?: string; days?: number; source?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (params.user_id) q.set("user_id", params.user_id);
+    if (params.days) q.set("days", String(params.days));
+    if (params.source) q.set("source", params.source);
+    const qs = q.toString();
+    return http<WaveFeedback>(`/api/wave/feedback${qs ? `?${qs}` : ""}`);
+  },
+  waveResume: (user_id: string) =>
+    http<WaveResume>(`/api/wave/resume?user_id=${encodeURIComponent(user_id)}`),
   listCron: () =>
-    http<{ jobs: { id: string; name: string; kind: string; cron_expr: string; enabled: boolean; last_run_at?: string | null }[] }>(
-      `/api/cron/`,
-    ),
+    http<{ jobs: CronJob[] }>(`/api/cron/`),
+  /** «Жив ли планировщик» — зовём, когда список задач не пришёл. */
+  cronHealth: () =>
+    http<{
+      scheduler_alive: boolean;
+      last_tick_at?: string | null;
+      last_tick_age_sec?: number | null;
+      tick_error?: string | null;
+      jobs_total: number;
+      jobs_enabled: number;
+      jobs_never_run: string[];
+      jobs_failed: { kind: string; error: string }[];
+      broken_cron_exprs: { id: string; kind: string; cron_expr: string }[];
+      missing_kinds: string[];
+      hint: string;
+    }>(`/api/cron/health`),
   updateCron: (id: string, body: { enabled?: boolean; cron_expr?: string; name?: string }) =>
     http<{ ok: boolean }>(`/api/cron/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   runCron: (id: string) =>
@@ -428,13 +539,19 @@ export const api = {
     http<{ available: boolean; files: { name: string; bytes: number }[]; embeddings: Record<string, number>; audio_stub: boolean; audio_available?: boolean; audio_enabled?: boolean; audio_weight?: number; flag_enabled?: boolean; models_dir?: string; text_file?: string | null; audio_file?: string | null }>(
       `/api/analysis/clap-status`,
     ),
+  getSecurity: () =>
+    http<{ ok: boolean; lan_admin_enabled: boolean; env_token_configured: boolean; tokens_count: number; auth_active: boolean }>(
+      `/api/settings/security`,
+    ),
+  saveSecurity: (body: { lan_admin_enabled?: boolean }) =>
+    http<{ ok: boolean; lan_admin_enabled: boolean }>(`/api/settings/security`, { method: "PUT", body: JSON.stringify(body) }),
   getAutomation: () =>
-    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean } }>(`/api/settings/automation`),
+    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean } }>(`/api/settings/automation`),
   getTimezone: () =>
     http<{ ok: boolean; timezone: string; from_db: boolean; env_default: string; options: string[] }>(`/api/settings/timezone`),
   saveTimezone: (timezone: string) =>
     http<{ ok: boolean; timezone?: string; error?: string }>(`/api/settings/timezone`, { method: "PUT", body: JSON.stringify({ timezone }) }),
-  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean }) =>
+  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean }) =>
     http<{ ok: boolean; flags: Record<string, unknown> }>(
       `/api/settings/automation`, { method: "PUT", body: JSON.stringify(flags) },
     ),

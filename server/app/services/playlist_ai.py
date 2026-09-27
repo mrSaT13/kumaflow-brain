@@ -29,6 +29,58 @@ def _token_score(q: str, t: Track) -> float:
     return s
 
 
+def _clap_candidates(db: Session, query: str, limit: int = 150) -> list[Track] | None:
+    """Отбор кандидатов по смыслу запроса через CLAP-эмбеддинг.
+
+    Зачем это вместо отправки 2000 треков в LLM. Старый путь брал pool из
+    2000 строк, фильтровал по словам/настроению и отдавал модели ~280 треков —
+    это 20–25 тыс. символов промпта, на которых локальная модель обычно
+    упирается в контекст и уходит в keyword-фолбэк. Здесь фильтрует не LLM, а
+    векторное пространство: модель получает горстку уже осмысленных кандидатов
+    и только ранжирует их.
+
+    Возвращает None, если CLAP недоступен/выключен или эмбеддингов ещё нет —
+    тогда вызывающий берёт прежний эвристический путь.
+    """
+    try:
+        from app.db.models import TrackEmbedding as _TE
+        from app.services.clap import get_text_embedding, is_available
+        from app.services.ml import search_by_embedding
+
+        if not is_available():
+            return None
+        has = db.query(_TE).filter(_TE.model == "clap_text").count()
+        if not has:
+            return None
+        vec = get_text_embedding(query)
+        if not vec:
+            return None
+        hits = search_by_embedding(vec, top_k=min(limit * 2, 400), model="clap_text")
+        if not hits:
+            return None
+        # search_by_embedding отдаёт свой срез: внешний id, title, artist, score.
+        # score здесь — косинус к вектору запроса, то есть уже «смысловая близость».
+        out: list[Track] = []
+        seen: dict[str, int] = {}
+        for h in hits:
+            t = db.get(Track, str(h.get("track_id") or ""))
+            if t is None:
+                continue
+            artist = t.artist_name or "unknown"
+            # Тот же diversity-cap, что и в эвристическом пути: не больше
+            # двух треков одного артиста, иначе микс вырождается в одного исполнителя.
+            if seen.get(artist, 0) >= 2:
+                continue
+            seen[artist] = seen.get(artist, 0) + 1
+            out.append(t)
+            if len(out) >= limit:
+                break
+        return out or None
+    except Exception as e:
+        logger.warning("clap candidates failed, fallback to heuristics: {}", e)
+        return None
+
+
 def _build_candidates(db: Session, query: str, desired: int = 30, limit: int = 280) -> list[Track]:
     from app.services.vibe import analyze_track, detect_mood, vibe_similarity
 
@@ -180,7 +232,13 @@ def generate_from_prompt(db: Session, query: str, desired: int = 30, hint_mood: 
     """Копия mobile generateFromPrompt — кандидаты on-device + LLM на сервере (ai.py)."""
     if hint_mood:
         query = f"{query} {hint_mood}".strip()
-    candidates = _build_candidates(db, query, desired, limit=280)
+    # Сначала пробуем смысловой отбор через CLAP: он и есть «поиск по смыслу»,
+    # и на нём запрос уже отфильтрован. Эвристика — запасной путь.
+    candidates = _clap_candidates(db, query, limit=150)
+    if candidates:
+        logger.info("playlist_ai: {} кандидатов отобрано CLAP по смыслу запроса", len(candidates))
+    else:
+        candidates = _build_candidates(db, query, desired, limit=280)
     if not candidates:
         return {"name": "Пусто", "comment": "Библиотека пуста", "ids": [], "songs": [], "from_fallback": True, "raw": ""}
     prompt = _build_prompt(query, desired, candidates)
@@ -205,15 +263,28 @@ def generate_from_prompt(db: Session, query: str, desired: int = 30, hint_mood: 
         return {"name": fb["name"], "comment": fb["comment"], "ids": fb["ids"], "songs": songs, "from_fallback": True, "raw": raw}
     parsed = _parse_llm_json(raw, candidates, desired)
     if not parsed:
-        # попробуем вытащить ids регексом
-        ids = re.findall(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw)
+        # Попробуем вытащить ids регексом. ВАЖНО: только из списка кандидатов.
+        # Раньше брались ЛЮБЫЕ uuid из ответа модели, и если она «выдумала» трек,
+        # его id уезжал в PlaylistTrack и ронял транзакцию на Postgres
+        # (FK-ошибка → 500 на весь запрос). Теперь незнакомые id отбрасываются.
+        found = re.findall(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw)
+        allowed = {str(t.id) for t in candidates}
+        ids: list[str] = []
+        for sid in found:
+            if sid in allowed and sid not in ids:
+                ids.append(sid)
+            if len(ids) >= desired:
+                break
         if ids:
-            parsed = {"name": "KumaFlow Mix", "comment": "", "ids": ids[:desired]}
+            parsed = {"name": "KumaFlow Mix", "comment": "", "ids": ids}
         else:
             fb = _fallback_result(query, candidates, desired, reason="parse failed")
             songs = [db.get(Track, sid) for sid in fb["ids"]]
             songs = [s for s in songs if s]
             return {"name": fb["name"], "comment": fb["comment"], "ids": fb["ids"], "songs": songs, "from_fallback": True, "raw": raw}
+    # Последняя страховка: в ids не должно быть ничего, чего нет в кандидатах.
+    _allowed = {str(t.id) for t in candidates}
+    parsed["ids"] = [sid for sid in dict.fromkeys(parsed["ids"]) if sid in _allowed]
     songs = [db.get(Track, sid) for sid in parsed["ids"]]
     songs = [s for s in songs if s]
     return {"name": parsed["name"], "comment": parsed["comment"], "ids": parsed["ids"], "songs": songs, "from_fallback": False, "raw": raw}

@@ -79,7 +79,18 @@ AUDIO_EMB_MODEL = "clap_audio"
 
 
 def _audio_weight() -> float:
-    """Вес audio_emb в гибриде. 0 = фича выключена → поведение 1в1 как раньше."""
+    """Вес audio_emb в гибриде. 0 = фича выключена → поведение 1в1 как раньше.
+
+    Флаг читается из веба (тумблер «Аудио-гибрид»), иначе гибрид продолжал бы
+    работать после выключения фичи в настройках.
+    """
+    try:
+        from app.services.automation import clap_audio_enabled as _flag
+
+        if not _flag():
+            return 0.0
+    except Exception:
+        pass
     try:
         from app.core.config import get_settings as _gs
 
@@ -753,11 +764,21 @@ def build_clusters(server_id: str | None = None, k: int = 8) -> dict[str, Any]:
 
 # ---------- 4. ANN по эмбеддингам (если есть) ----------
 
-def search_by_embedding(query_vec: list[float], top_k: int = 20) -> list[dict[str, Any]]:
+def search_by_embedding(
+    query_vec: list[float],
+    top_k: int = 20,
+    model: str = "clap_text",
+) -> list[dict[str, Any]]:
     """Косинусный поиск по сохранённым эмбеддингам (CLAP/MuLan).
 
     Если установлен voyager — использует HNSW-индекс в памяти, иначе
     brute-force через numpy (для CPU/малых библиотек достаточно).
+
+    model обязателен по смыслу: clap_text и clap_audio оба 512-мерные, и раньше
+    выборка шла по всем моделям сразу (`query(TrackEmbedding).all()` без
+    фильтра). В итоге аудио-векторы подмешивались в текстовый поиск, а кроме
+    того один и тот же трек возвращался дважды. Особенно заметно стало после
+    того, как у аудио-фичи появился отдельный тумблер.
     """
     if not _HAS_NP:
         return []
@@ -767,7 +788,7 @@ def search_by_embedding(query_vec: list[float], top_k: int = 20) -> list[dict[st
         return []
     q = q / q_norm
     with session_scope() as db:
-        rows = db.query(TrackEmbedding).all()
+        rows = db.query(TrackEmbedding).filter(TrackEmbedding.model == model).all()
         if not rows:
             return []
         # попытка voyager (опционально)
@@ -814,12 +835,21 @@ def search_by_embedding(query_vec: list[float], top_k: int = 20) -> list[dict[st
                 continue
             scored.append((s, t))
         scored.sort(key=lambda kv: kv[0], reverse=True)
-        return [
-            {
-                "track_id": str(t.id),
+        # Один трек — одна строка выдачи, даже если в базе лежат векторы
+        # нескольких моделей одинаковой размерности.
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for s, t in scored:
+            tid = str(t.id)
+            if tid in seen:
+                continue
+            seen.add(tid)
+            out.append({
+                "track_id": tid,
                 "title": t.title,
                 "artist_name": t.artist_name,
                 "score": round(float(s), 4),
-            }
-            for s, t in scored[:top_k]
-        ]
+            })
+            if len(out) >= top_k:
+                break
+        return out

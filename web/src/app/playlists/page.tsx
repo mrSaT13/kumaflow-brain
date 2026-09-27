@@ -8,8 +8,18 @@ import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/c
 import { useConfirm } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import type { PushResult } from "@/lib/api";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import { fmtDate } from "@/lib/format";
+
+/** Хвост тоста про авто-выгрузку в Navidrome. Пусто, если тумблер выключен. */
+function pushNote(push?: PushResult): string {
+  if (!push) return "";
+  if (push.ok) {
+    return ` Отправлено в Navidrome: ${push.exported ?? 0} треков${push.skipped ? ` (пропущено с диска: ${push.skipped})` : ""}.`;
+  }
+  return ` В Navidrome НЕ отправлено: ${push.error ?? "неизвестная ошибка"}.`;
+}
 
 function usePersisted<T>(key: string, initial: T): [T, (v: T) => void] {
   const [val, setVal] = useState<T>(initial);
@@ -62,7 +72,7 @@ export default function PlaylistsPage() {
       const r = await api.generateDailyPlaylist(coldN || 30, coldUser || undefined);
       setLastSteps(r.steps ?? null);
       mutate();
-      toast("Daily готов — откройте плейлист ниже.", "ok");
+      toast(`Daily готов — откройте плейлист ниже.${pushNote(r.push)}`, r.push && !r.push.ok ? "err" : "ok");
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
@@ -89,7 +99,7 @@ export default function PlaylistsPage() {
     try {
       const r = await api.aiGenerate(aiQuery.trim(), coldN || 30, coldUser || undefined);
       mutate();
-      toast(`Готово: «${r.name}» — треков ${r.tracks}${r.from_fallback ? " (без AI, keyword-подбор)" : ""}.`, "ok");
+      toast(`Готово: «${r.name}» — треков ${r.tracks}${r.from_fallback ? " (без AI, keyword-подбор)" : ""}.${pushNote(r.push)}`, r.push && !r.push.ok ? "err" : "ok");
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
@@ -104,7 +114,7 @@ export default function PlaylistsPage() {
     try {
       const r = await api.myWave(uid, coldN || 30);
       mutate();
-      toast(`Моя волна готова: треков ${r.tracks} (убрано дизлайков ${r.excluded_disliked}, банов ${r.excluded_banned}).`, "ok");
+      toast(`Моя волна готова: треков ${r.tracks} (убрано дизлайков ${r.excluded_disliked}, банов ${r.excluded_banned}).${pushNote(r.push)}`, r.push && !r.push.ok ? "err" : "ok");
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
@@ -274,7 +284,7 @@ export default function PlaylistsPage() {
                   mutate();
                   setLastSteps(r.steps ?? null);
                   setWeekly(r.explanations ?? []);
-                  toast(`Открытия недели готовы: ${r.tracks} треков (${r.mode}).`, "ok");
+                  toast(`Открытия недели готовы: ${r.tracks} треков (${r.mode}).${pushNote(r.push)}`, r.push && !r.push.ok ? "err" : "ok");
                 } catch (e: unknown) {
                   toast(fmtErr(e), "err");
                 } finally {
@@ -340,6 +350,11 @@ export default function PlaylistsPage() {
                         <span> · для <span className="font-medium text-text">{p.owner_username}</span></span>
                       )}
                     </div>
+                    {p.comment && (
+                      <div className="text-xs text-muted mt-1.5 italic line-clamp-2" title={p.comment}>
+                        {p.comment}
+                      </div>
+                    )}
                   </div>
                   <div className="flex gap-1">
                     <Badge tone={p.is_auto_generated ? "info" : "default"}>

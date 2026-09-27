@@ -307,6 +307,46 @@ def save_automation(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True, "flags": flags}
 
 
+@router.get("/security")
+def get_security(db: Session = Depends(get_db)):
+    """Флаги безопасности. Ключевой — «доверять локальной сети»."""
+    from app.core.config import get_settings as _gs
+    from app.services import api_tokens as _tokens
+
+    row = db.get(AppSetting, "security")
+    val = row.value if row and isinstance(row.value, dict) else {}
+    env_token = (_gs().brain_api_token or "").strip()
+    total = _tokens.count_tokens(db)
+    return {
+        "ok": True,
+        "lan_admin_enabled": bool(val.get("lan_admin_enabled", False)),
+        "env_token_configured": bool(env_token),
+        "tokens_count": total,
+        # auth фактически выключен = нет ни env-токена, ни токенов в БД
+        "auth_active": bool(env_token) or total > 0,
+    }
+
+
+@router.put("/security")
+def put_security(payload: dict, db: Session = Depends(get_db)):
+    """«Доверять локальной сети»: вернуть режим, где без токена доступно всё.
+
+    Выключено по умолчанию намеренно: иначе любой, кто дотянулся до порта 8000,
+    считается админом и может сам себе выпустить admin-токен. Включать стоит
+    только если API физически недоступен извне.
+    """
+    row = db.get(AppSetting, "security")
+    val = dict(row.value) if row and isinstance(row.value, dict) else {}
+    if "lan_admin_enabled" in (payload or {}):
+        val["lan_admin_enabled"] = bool(payload.get("lan_admin_enabled"))
+    if row is None:
+        db.add(AppSetting(key="security", value=val))
+    else:
+        row.value = val
+    db.commit()
+    return {"ok": True, "lan_admin_enabled": bool(val.get("lan_admin_enabled", False))}
+
+
 @router.get("/tokens/meta")
 def tokens_meta(db: Session = Depends(get_db)):
     """Мета для UI: скоупы, пресеты, задан ли env-токен, сколько токенов."""
@@ -386,6 +426,39 @@ def _subsonic_auth_params(user: str, password: str) -> dict:
     }
 
 
+# Ограничитель попыток входа: POST /api/settings/login открыт по необходимости
+# (иначе некуда войти), но он обменивает пароль Navidrome на API-токен, а у
+# админа Navidrome этот токен — admin. Без ограничения перебор паролей через
+# мозг равносилен получению админа. Счётчик в памяти процесса: достаточно, чтобы
+# закрыть тупой перебор; при нескольких воркерах лишние попытки всё равно
+# упираются в Navidrome.
+_LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+_LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_WINDOW_SEC = 300.0
+
+
+def _enforce_login_rate_limit(request: Request) -> None:
+    import time as _time
+
+    from fastapi import HTTPException
+
+    try:
+        peer = request.client.host if request.client else "unknown"
+    except Exception:
+        peer = "unknown"
+    now = _time.time()
+    hits = [t for t in _LOGIN_ATTEMPTS.get(peer, []) if now - t < _LOGIN_WINDOW_SEC]
+    if len(hits) >= _LOGIN_MAX_ATTEMPTS:
+        wait = int(_LOGIN_WINDOW_SEC - (now - hits[0])) + 1
+        raise HTTPException(429, f"Слишком много попыток входа. Повторите через {wait} c")
+    hits.append(now)
+    _LOGIN_ATTEMPTS[peer] = hits
+    # Периодически чистим протухшие записи, чтобы словарь не рос бесконечно.
+    if len(_LOGIN_ATTEMPTS) > 256:
+        for k in [k for k, v in _LOGIN_ATTEMPTS.items() if not any(now - t < _LOGIN_WINDOW_SEC for t in v)]:
+            _LOGIN_ATTEMPTS.pop(k, None)
+
+
 async def _navidrome_check(url: str, username: str, password: str) -> dict:
     """Проверка логина/пароля в Navidrome + флаг админа.
 
@@ -424,13 +497,17 @@ async def _navidrome_check(url: str, username: str, password: str) -> dict:
 
 
 @router.post("/login")
-async def login(payload: dict, db: Session = Depends(get_db)):
+async def login(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Вход по логину/паролю Navidrome — в обмен выдаём API-токен.
 
     Пароль используется один раз для проверки и НЕ хранится.
     Админы Navidrome получают admin-токен, остальные — мобильный набор
     (волна + синк + обложки + плейлисты), привязанный к их юзеру.
+
+    Эндпоинт открыт (иначе не было бы входа), поэтому ограничен по частоте:
+    без этого перебор паролей Navidrome через мозг = получение admin-токена.
     """
+    _enforce_login_rate_limit(request)
     import uuid as _uuid
 
     from app.db.models import MediaUser

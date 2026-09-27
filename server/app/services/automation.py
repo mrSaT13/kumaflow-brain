@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.config import get_settings
+
 KEY = "automation"
 
 DEFAULTS: dict[str, Any] = {
@@ -17,7 +19,90 @@ DEFAULTS: dict[str, Any] = {
     # авто-отправка созданных автоплейлистов (daily/smart/weekly) в Navidrome
     # после генерации. Выкл по дефолту — только локально в мозге.
     "playlists_push_navidrome": False,
+    # CLAP включался только через env CLAP_ENABLED + пересоздание контейнеров.
+    # Теперь это тумблер в вебе: модель уже запечена в образ, перезапуск не нужен.
+    # Дефолт True — иначе у тех, кто никогда не открывал тумблер, CLAP молча
+    # выключился бы (env-дефолт в config.py = False).
+    "clap_enabled": True,
+    "clap_audio_enabled": True,
 }
+
+# Кэш чтения флагов. is_available()/is_audio_available() дёргаются на КАЖДЫЙ
+# трек в циклах clap_embed и sonic_analysis, а get_flags() открывает сессию к БД.
+# Поэтому кэшируем на TTL — образец из core/time.py.
+_TTL_SEC = 20.0
+_cache: dict[str, Any] = {"at": 0.0, "flags": None}
+
+
+def _flags_cached() -> dict[str, Any]:
+    import time as _time
+
+    now = _time.time()
+    flags = _cache.get("flags")
+    if flags is not None and (now - float(_cache.get("at") or 0.0)) < _TTL_SEC:
+        return flags  # type: ignore[return-value]
+    flags = get_flags()
+    _cache["flags"] = flags
+    _cache["at"] = now
+    return flags
+
+
+def invalidate_cache() -> None:
+    """Сбросить кэш после записи флагов — чтобы backend увидел тумблер сразу."""
+    _cache["flags"] = None
+    _cache["at"] = 0.0
+
+
+def clap_enabled(db=None) -> bool:
+    """CLAP-поиск по смыслу. Флаг из веба, с фолбэком на CLAP_ENABLED из env."""
+    try:
+        if db is not None:
+            return bool(get_flags(db).get("clap_enabled", True))
+        val = bool(_flags_cached().get("clap_enabled", True))
+    except Exception:
+        val = True
+    if val is False:
+        # Явное «выключено в вебе» уважаем. Но если флага в БД нет вовсе
+        # (настройку не открывали) — берём env, иначе у всех молча выключится.
+        stored = _flag_stored("clap_enabled")
+        if stored is not None:
+            return stored
+    try:
+        return bool(get_settings().clap_enabled)
+    except Exception:
+        return val
+
+
+def clap_audio_enabled(db=None) -> bool:
+    try:
+        if db is not None:
+            return bool(get_flags(db).get("clap_audio_enabled", True))
+        val = bool(_flags_cached().get("clap_audio_enabled", True))
+    except Exception:
+        val = True
+    if val is False:
+        stored = _flag_stored("clap_audio_enabled")
+        if stored is not None:
+            return stored
+    try:
+        return bool(getattr(get_settings(), "clap_audio_enabled", False))
+    except Exception:
+        return val
+
+
+def _flag_stored(key: str) -> bool | None:
+    """Значение флага в БД или None, если его там ещё не задавали."""
+    try:
+        from app.db.database import session_scope
+        from app.db.models import AppSetting
+
+        with session_scope() as db:
+            row = db.get(AppSetting, KEY)
+            if row is not None and isinstance(row.value, dict) and key in row.value:
+                return bool(row.value.get(key))
+    except Exception:
+        return None
+    return None
 
 
 def playlists_push_enabled(db=None) -> bool:
@@ -78,4 +163,7 @@ def set_flags(patch: dict[str, Any], db=None) -> dict[str, Any]:
     else:
         row.value = merged
     db.commit()
+    # Читатели (воркеры) держат TTL-кэш — сбрасываем, чтобы тумблер
+    # применился без ожидания и перезапуска контейнеров.
+    invalidate_cache()
     return merged

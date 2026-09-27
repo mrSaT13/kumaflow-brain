@@ -82,11 +82,40 @@ services:
       POSTGRES_HOST: postgres
       REDIS_HOST: redis
       NAVIDROME_URL: http://navidrome:4533
+      # Без этого rq_worker берёт дефолт "high,default" и очередь light
+      # не обслуживает — а именно в неё крон кладёт daily/smart/weekly/
+      # snapshots. Джобы накапливались бы в Redis вечно. audio/clap в dev
+      # слушает тот же воркер, отдельные worker-audio/worker-clap не нужны.
+      QUEUES: high,default,light,audio,clap
       # MUSIC_DIR берётся из server/.env; чтобы worker видел файлы —
       # примонтируй ту же папку, что у navidrome (только чтение):
       # volumes:
       #   - ./music:/music:ro
     command: ["python", "-m", "app.workers.rq_worker"]
+
+  # Планировщик крона. Раньше сервиса не было вовсе, из-за чего в dev-стенде
+  # ночные плейлисты не создавались вовсе: ставить их было некому.
+  scheduler:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    env_file: ../server/.env
+    environment:
+      DB_URL_OVERRIDE: ""
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    # У образа есть HEALTHCHECK на :8000/health, а scheduler порт не слушает.
+    healthcheck:
+      disable: true
+    command: ["python", "-m", "app.workers.scheduler"]
 
   web:
     build:

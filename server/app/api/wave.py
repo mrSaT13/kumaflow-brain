@@ -153,7 +153,11 @@ def wave_seeds(user_id: str, request: Request, characteristic: str | None = None
 def wave_publish(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Мобила публикует свою живую очередь — веб показывает её на /wave.
 
-    Body: {user_id, queue[] (external_id или uuid), current_track_id?}.
+    Body: {user_id, queue[] (external_id или uuid), current_track_id?,
+           position_sec?, duration_sec?, device?, paused?}.
+
+    position_sec — это и есть handoff: клиент сообщает, на какой секунде стоит
+    трек, и другое устройство может продолжить с того же места.
     """
     user_id = str((payload or {}).get('user_id') or '')
     if not user_id:
@@ -162,9 +166,119 @@ def wave_publish(payload: dict, request: Request, db: Session = Depends(get_db))
     u = _require_user(db, user_id)
     queue = [str(x) for x in (list((payload or {}).get('queue') or [])[:100]) if str(x)]
     cur = (payload or {}).get('current_track_id')
+    def _int(v):
+        try:
+            return max(0, int(v)) if v is not None else None
+        except (TypeError, ValueError):
+            return None
     _live_put(str(u.id), {'queue': queue,
-                          'current_track_id': str(cur) if cur else None})
+                          'current_track_id': str(cur) if cur else None,
+                          'position_sec': _int((payload or {}).get('position_sec')),
+                          'duration_sec': _int((payload or {}).get('duration_sec')),
+                          'device': str((payload or {}).get('device') or '')[:64] or None,
+                          'paused': bool((payload or {}).get('paused'))})
     return {'ok': True, 'user_id': str(u.id), 'queued': len(queue)}
+
+
+@router.get('/resume')
+def wave_resume(user_id: str, request: Request, db: Session = Depends(get_db)):
+    """Откуда продолжить прослушивание на другом устройстве.
+
+    Отдаёт: трек, позицию в секундах, очередь и «свежесть» (age_sec). Если
+    клиент давно не публиковал очередь, отдаём stale=True — продолжать
+    вслепую не стоит, позиция могла устареть.
+    """
+    from app.services.track_resolve import get_track as _gt
+
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
+    u = _require_user(db, user_id)
+    entry = _live_get(str(u.id))
+    if not entry:
+        return {'ok': True, 'user_id': str(u.id), 'available': False,
+                'reason': 'нет опубликованной очереди (клиент не публиковал или TTL истёк)',
+                'age_sec': None, 'stale': True}
+    age = _live_age(str(u.id), entry)
+    stale = age > _LIVE_TTL_SEC
+    cur_raw = str(entry.get('current_track_id') or '')
+    track = None
+    if cur_raw:
+        try:
+            track = _gt(db, cur_raw)
+        except Exception:
+            track = None
+    pos = entry.get('position_sec')
+    dur = entry.get('duration_sec')
+    try:
+        pos = int(pos) if pos is not None else None
+    except (TypeError, ValueError):
+        pos = None
+    try:
+        dur = int(dur) if dur is not None else (track.duration_sec if track is not None else None)
+    except (TypeError, ValueError):
+        dur = None
+    if track is not None and dur is None:
+        dur = track.duration_sec
+    if pos is not None and dur:
+        pos = min(max(0, pos), max(0, int(dur) - 3))
+    # Очередь после текущего трека — чтобы продолжить не одним треком, а потоком.
+    rest: list[str] = []
+    if cur_raw:
+        try:
+            idx = [str(x) for x in (entry.get('queue') or [])].index(cur_raw)
+        except ValueError:
+            idx = -1
+        rest = [str(x) for x in (list(entry.get('queue') or [])[idx + 1:] or []) if str(x)]
+    return {
+        'ok': True,
+        'user_id': str(u.id),
+        'available': bool(track is not None),
+        'stale': bool(stale),
+        'age_sec': int(age),
+        'device': entry.get('device'),
+        'paused': bool(entry.get('paused')),
+        'track': ({
+            'track_id': str(track.id),
+            'title': track.title,
+            'artist_name': track.artist_name,
+            'album_name': track.album_name,
+            'cover_art_id': track.cover_art_id,
+            'external_id': track.external_id,
+            'duration_sec': dur,
+        } if track is not None else None),
+        'position_sec': pos,
+        'position_ratio': (round(pos / dur, 3) if (pos is not None and dur) else None),
+        'queue': rest[:50],
+    }
+
+
+@router.get('/feedback')
+def wave_feedback(user_id: str | None = None, request: Request = None, days: int = 7,
+                  source: str | None = None, db: Session = Depends(get_db)):
+    """Метрики волны: скипы <30 c, дослушивания, лайки + разбивка по причинам.
+
+    Без этого улучшать скоринг нечем — правки приходилось проверять на глаз.
+    """
+    from app.services import rec_feedback as _rfb
+
+    if user_id:
+        check_body_user(getattr(getattr(request, "state", None), "brain_token", None), user_id)
+        u = _require_user(db, user_id)
+        target = str(u.id)
+    else:
+        # Без user_id — сводка по всем пользователям. Скоуп wave выдаётся и
+        # обычным юзерам, поэтому ограничиваемся их собственными данными:
+        # админ смотрит всех, остальные — себя.
+        from app.core.auth import _auth_state
+
+        info = _auth_state(request, None) if request is not None else None
+        if info is None or not info.get("is_admin"):
+            owner = (info or {}).get("owner_user_id")
+            if not owner:
+                raise HTTPException(403, "нужен user_id или admin-токен")
+            target = str(owner)
+        else:
+            target = None
+    return {'ok': True, **_rfb.summary(db, user_id=target, days=days, source=source)}
 
 
 @router.get('/live')

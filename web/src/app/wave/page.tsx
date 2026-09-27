@@ -26,6 +26,12 @@ type WaveEvent = { track_id: string; action: string; position_sec?: number };
 
 const REFILL_THRESHOLD = 3;
 
+function fmtSec(s: number | null | undefined): string {
+  if (s == null) return "—";
+  const m = Math.floor(s / 60);
+  return `${m}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+}
+
 // Дедуп при добавлении: сервер уже режет очередь/дизлайки/баны, но при
 // параллельных докрутках или дублях одной песни под разными row id клиент
 // обязан не клеить повтор — ни по track_id, ни по «артист — название».
@@ -127,6 +133,12 @@ export default function WavePage() {
   const ids = useMemo(() => users ?? [], [users]);
 
   const { data: profile } = useSWR(userId ? ["wave-moods", userId] : null, () => api.userProfile(userId));
+  // Handoff: где слушали на другом устройстве и с какой позиции продолжать.
+  const { data: resume } = useSWR(
+    userId ? ["wave-resume", userId] : null,
+    () => api.waveResume(userId),
+    { refreshInterval: 20000 },
+  );
   const moodOptions = useMemo(() => (profile?.moods ?? []).map((m) => m.name), [profile]);
 
   const cur = queue[Math.min(playingIdx, queue.length - 1)] ?? null;
@@ -523,6 +535,61 @@ export default function WavePage() {
                   зеркало телефона · мозг не докручивает
                 </span>
               )}
+            </div>
+          </Card>
+        </Section>
+      )}
+
+      {resume && resume.available && resume.track && (
+        <div className="h-4" />
+      )}
+      {resume && resume.available && resume.track && (
+        <Section title="Продолжить с другого устройства">
+          <Card>
+            <div className="flex items-center gap-3 flex-wrap">
+              <TrackCover trackId={resume.track.track_id} coverArtId={resume.track.cover_art_id} size={48} className="w-12 h-12 rounded-lg" />
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-sm truncate">
+                  {resume.track.title} — {resume.track.artist_name}
+                </div>
+                <div className="text-xs text-muted">
+                  {resume.position_sec != null ? `с ${fmtSec(resume.position_sec)}` : "позиция неизвестна"}
+                  {resume.device ? ` · устройство: ${resume.device}` : ""}
+                  {resume.paused ? " · на паузе" : ""}
+                  {resume.age_sec != null ? ` · ${Math.round(resume.age_sec / 60)} мин назад` : ""}
+                </div>
+                {resume.stale && (
+                  <div className="text-xs text-amber-500 mt-0.5">
+                    Данные устарели — очередь могла измениться. Продолжить можно, но сверься сначала.
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  title="Взять эту очередь и трек себе"
+                  onClick={() => {
+                    touchLocal();
+                    setPhoneMirror(false);
+                    setQueue(
+                      [{ ...resume!.track!, score: 1, reason: "продолжение с другого устройства" } as unknown as WaveTrack,
+                      ...resume!.queue.map((id) => ({
+                        track_id: id, title: id, score: 0, reason: "очередь с другого устройства",
+                      } as unknown as WaveTrack))],
+                    );
+                    setPlayingIdx(0);
+                    toast(`Взято: «${resume!.track!.title}»${resume!.position_sec != null ? ` с ${fmtSec(resume.position_sec)}` : ""}`, "ok");
+                  }}
+                >
+                  Взять управление
+                </Button>
+              </div>
+            </div>
+            <div className="text-[11px] text-muted mt-2">
+              Мозг хранит позицию, которую прислал клиент (POST /api/wave/publish → position_sec).
+              Звук при этом не проходит через мозг: чтобы продолжить с 1:23, открой трек в своём плеере
+              и перемотай на 1:23.
             </div>
           </Card>
         </Section>

@@ -96,6 +96,22 @@ export default function SettingsPage() {
   const { data, mutate } = useSWR("/api/settings", () => api.settings());
   const { data: media, mutate: mutateMedia } = useSWR("/api/settings/media-server", () => api.getMediaServer());
   const { data: bridge, mutate: mutateBridge } = useSWR("/api/settings/bridge", () => api.getBridge());
+  // Диагностика крона: «работает ли планировщик». Раньше ответ на этот вопрос
+  // приходилось искать в логах docker — здесь он сразу на странице.
+  const { data: cronHealth } = useSWR("/api/cron/health", () => api.cronHealth(), {
+    refreshInterval: 15000,
+    shouldRetryOnError: false,
+  });
+  // Проверка «а не открыт ли API наружу». Пока нет ни BRAIN_API_TOKEN, ни
+  // токенов в БД — require_admin пропускает любого, кто дотянулся до порта 8000.
+  const { data: whoami } = useSWR("/api/settings/whoami", () => api.whoami(), {
+    refreshInterval: 60000,
+    shouldRetryOnError: false,
+  });
+  const { data: security, mutate: mutateSecurity } = useSWR("/api/settings/security", () => api.getSecurity(), {
+    refreshInterval: 60000,
+    shouldRetryOnError: false,
+  });
 
   const [type, setType] = useState("navidrome");
   const [url, setUrl] = useState("");
@@ -484,6 +500,125 @@ export default function SettingsPage() {
                   {JSON.stringify(data.db ?? {}, null, 2)}
                 </pre>
               </div>
+            </div>
+          )}
+        </Card>
+        <Card>
+          <div className="text-sm flex items-center gap-2 flex-wrap mb-2">
+            <span className="text-xs uppercase tracking-wider text-muted">Доступ к API</span>
+            {security ? (
+              security.auth_active ? <Badge tone="ok">требуется токен</Badge> : <Badge tone="err">открыт — авторизация выключена</Badge>
+            ) : whoami && !whoami.locked ? (
+              <Badge tone="err">открыт — авторизация выключена</Badge>
+            ) : (
+              <Badge tone="ok">требуется токен</Badge>
+            )}
+          </div>
+          {security && !security.auth_active && !security.lan_admin_enabled && (
+            <div className="text-xs text-red-500 mb-2">
+              Не задано ни <code className="kuma-pill">BRAIN_API_TOKEN</code>, ни ни одного токена в базе.
+              Сейчас административные операции закрыты: никто из сети не может ни создать токен,
+              ни выдать себе права админа. Чтобы начать работу — выпусти себе admin-токен
+              (вкладка «Токены»), и этого достаточно.
+            </div>
+          )}
+          {security && !security.auth_active && security.lan_admin_enabled && (
+            <div className="text-xs text-amber-500 mb-2">
+              Включено доверие локальной сети: любой, кто дотянется до порта 8000, считается
+              админом и может выпустить себе admin-токен. Выключай, если API доступен не только
+              из доверенной сети.
+            </div>
+          )}
+          <label className="flex items-start gap-2 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!security?.lan_admin_enabled}
+              disabled={!security}
+              onChange={async (e) => {
+                const next = e.target.checked;
+                try {
+                  await api.saveSecurity({ lan_admin_enabled: next });
+                  mutateSecurity();
+                  toast(
+                    next
+                      ? "Доверие локальной сети включено — админские операции доступны без токена"
+                      : "Доверие выключено — админские операции только по admin-токену",
+                    next ? "err" : "ok",
+                  );
+                } catch (err: unknown) {
+                  toast(fmtErr(err), "err");
+                }
+              }}
+              className="w-4 h-4 accent-black dark:accent-white shrink-0 mt-0.5"
+            />
+            <span>
+              <span className="font-medium">Доверять локальной сети</span>
+              <span className="text-muted block">
+                Небезопасно: снимает проверку токена для админских операций. Включай, только если
+                порт 8000 недоступен извне (внутренняя Docker-сеть / localhost).
+              </span>
+            </span>
+          </label>
+        </Card>
+        <Card>
+          <div className="text-sm flex items-center gap-2 flex-wrap mb-2">
+            <span className="text-xs uppercase tracking-wider text-muted">Планировщик крона</span>
+            {!cronHealth ? (
+              <span className="text-xs text-muted">загрузка…</span>
+            ) : (
+              <Badge tone={cronHealth.scheduler_alive ? "ok" : "err"}>
+                {cronHealth.scheduler_alive ? "работает" : "не отвечает"}
+              </Badge>
+            )}
+          </div>
+          {cronHealth ? (
+            <>
+              <dl className="space-y-1 text-sm">
+                <DiagRow k="Задач включено" v={`${cronHealth.jobs_enabled} из ${cronHealth.jobs_total}`} />
+                <DiagRow
+                  k="Последний тик"
+                  v={cronHealth.last_tick_age_sec != null
+                    ? `${Math.round(cronHealth.last_tick_age_sec / 60)} мин назад${cronHealth.last_tick_at ? ` (${new Date(cronHealth.last_tick_at).toLocaleString("ru-RU")})` : ""}`
+                    : "ни разу"}
+                />
+              </dl>
+              {cronHealth.tick_error && (
+                <div className="text-xs text-red-500 mt-1">ошибка тика: {cronHealth.tick_error}</div>
+              )}
+              {!cronHealth.scheduler_alive && (
+                <div className="text-xs text-muted mt-1">
+                  {cronHealth.hint} Команда: <code className="kuma-pill">docker compose up -d scheduler</code>,
+                  логи: <code className="kuma-pill">docker compose logs scheduler --tail=50</code>
+                </div>
+              )}
+              {cronHealth.jobs_never_run.length > 0 && (
+                <div className="text-xs text-amber-500 mt-1">
+                  Ещё ни разу не запускались: {cronHealth.jobs_never_run.join(", ")} — scheduler догонит их сам
+                  (не больше двух задач за тик, чтобы не нагрузить систему разом).
+                </div>
+              )}
+              {cronHealth.jobs_failed.length > 0 && (
+                <div className="text-xs text-red-500 mt-1">
+                  Упали при запуске:{" "}
+                  {cronHealth.jobs_failed.map((f) => `${f.kind} — ${f.error}`).join("; ")}
+                </div>
+              )}
+              {cronHealth.broken_cron_exprs.length > 0 && (
+                <div className="text-xs text-red-500 mt-1">
+                  Некорректное расписание (задача пропускается):{" "}
+                  {cronHealth.broken_cron_exprs.map((b) => `${b.kind} «${b.cron_expr}»`).join(", ")}
+                </div>
+              )}
+              {cronHealth.missing_kinds.length > 0 && (
+                <div className="text-xs text-amber-500 mt-1">
+                  Не созданы задачи: {cronHealth.missing_kinds.join(", ")} — перезапусти backend и scheduler.
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-xs text-muted">
+              Диагностика крона доступна только админу. Проверить вручную:{" "}
+              <code className="kuma-pill">curl -H &quot;Authorization: Bearer $TOKEN&quot; http://&lt;host&gt;:8000/api/cron/health</code>
             </div>
           )}
         </Card>

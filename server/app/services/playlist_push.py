@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import asyncio
 
+from app.core.logging import get_logger
+
+logger = get_logger("playlist_push")
+
 
 def push_playlist_to_navidrome(db, playlist_id: str) -> dict:
     """Синхронная выгрузка плейлиста. Возвращает dict ok/navidrome_id/exported/skipped/error."""
@@ -63,6 +67,16 @@ def push_playlist_to_navidrome(db, playlist_id: str) -> dict:
             remote_id = str(created.get("id") or "")
             if not remote_id:
                 raise RuntimeError("Navidrome не вернул id созданного плейлиста")
+            # Комментарий не принимает createPlaylist — только updatePlaylist.
+            # Без этого описание («почему такой микс») терялось бы именно там,
+            # где клиент его как раз показывает.
+            _comment = str(p.comment or "").strip()[:1000]
+            if _comment:
+                try:
+                    await client.update_playlist(remote_id, comment=_comment)
+                except Exception as e:  # noqa: BLE001 — не роняем пуш из-за описания
+                    logger.warning("playlist {}: не удалось записать comment в Navidrome: {}",
+                                   playlist_id, e)
             return remote_id
 
     try:
@@ -84,7 +98,7 @@ def maybe_auto_push(db, playlist_id: str) -> dict | None:
     except Exception:
         return None
     try:
-        return push_playlist_to_navidrome(db, playlist_id)
+        res = push_playlist_to_navidrome(db, playlist_id)
     except Exception as e:  # noqa: BLE001
         try:
             from app.core.logging import get_logger
@@ -93,3 +107,16 @@ def maybe_auto_push(db, playlist_id: str) -> dict | None:
         except Exception:
             pass
         return {"ok": False, "error": str(e)[:200]}
+    # Отказ (нет медиа-сервера, только файлы с диска, ошибка Navidrome) раньше
+    # возвращался в вызывающий код и там терялся в `except: pass` — по логам
+    # выглядело как «тумблер включён, а плейлист не появился». Теперь это видно.
+    if not res.get("ok"):
+        try:
+            from app.core.logging import get_logger
+
+            get_logger("playlist_push").warning(
+                "auto-push {} rejected: {}", playlist_id, res.get("error") or "unknown"
+            )
+        except Exception:
+            pass
+    return res

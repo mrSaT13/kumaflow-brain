@@ -27,6 +27,15 @@ logger = get_logger("workers.tasks")
 
 
 def _append_log(run_id: str, level: str, message: str) -> None:
+    # scan_logs.run_id — NOT NULL, а кроновые джобы (daily/smart/weekly) ставятся
+    # в очередь БЕЗ ScanRun. Раньше такой вызов падал NotNullViolation прямо в
+    # теле джобы, и — что хуже — в её же except: цикл по пользователям рвался на
+    # первом же юзере, а в «Задачи и логах» не появлялось вообще ничего.
+    # Теперь лог без run идёт в логгер воркера, а не роняет работу.
+    if not run_id:
+        log = {"info": logger.info, "warn": logger.warning, "error": logger.error}.get(level, logger.info)
+        log("{} (без ScanRun)", message)
+        return
     with session_scope() as db:
         db.add(
             ScanLog(
@@ -39,6 +48,10 @@ def _append_log(run_id: str, level: str, message: str) -> None:
 
 
 def _finish_run(run_id: str, status: str = "success", error: str | None = None) -> None:
+    # Кроновые джобы приходят без ScanRun (run_id пуст) — идти в БД с таким
+    # ключом нельзя, поэтому просто выходим, как это уже сделано в _append_log.
+    if not run_id:
+        return
     with session_scope() as db:
         run = db.get(ScanRun, run_id)
         if not run:
@@ -1906,7 +1919,12 @@ def daily_per_user(*args, **kwargs):
                 from datetime import date, datetime
                 import uuid as _uuid
 
-                today = date.today()
+                from app.core.time import local_today
+
+                # local_today(), а не date.today(): в контейнере TZ по умолчанию
+                # UTC, из-за чего «сегодня» крона иногда не совпадало с датой,
+                # по которой API считает плейлист устаревшим.
+                today = local_today()
                 with session_scope() as db:
                     # удалить старый daily этого юзера
                     old = db.query(Playlist).filter(Playlist.is_auto_generated.is_(True), Playlist.server_id == u.server_id, Playlist.owner_user_id == u.id).all()
@@ -1967,6 +1985,17 @@ def daily_per_user(*args, **kwargs):
                 for pos, tid in enumerate(res.get("tracks") or []):
                     db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
                 ok = 1
+                _glob_pid = str(p.id)
+            # Пушили per-user ветку, а глобальный daily — нет: при пустом списке
+            # пользователей (свежая установка) авто-выгрузка в Navidrome
+            # не срабатывала вообще.
+            try:
+                with session_scope() as _pdb:
+                    from app.services.playlist_push import maybe_auto_push as _gpush
+
+                    _gpush(_pdb, _glob_pid)
+            except Exception:
+                pass
         _append_log(run_id, "info", f"Daily per-user готово: {ok}/{total}")
         _finish_run(run_id, "success")
         return {"status": "success", "users": total, "ok": ok}

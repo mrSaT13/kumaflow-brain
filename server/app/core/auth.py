@@ -15,6 +15,8 @@ username для маппинга user_id + external_id треков. Vault (opt-
 """
 from __future__ import annotations
 
+import hmac
+
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -55,8 +57,8 @@ def _auth_state(request: Request, creds: HTTPAuthorizationCredentials | None) ->
             return None
     env_token = (settings.brain_api_token or "").strip()
     got = _extract_token(request, creds)
-    # 1) legacy env — полный доступ
-    if env_token and got == env_token:
+    # 1) legacy env — полный доступ. Сравнение константно-временное.
+    if env_token and got and hmac.compare_digest(got, env_token):
         return {"is_admin": True, "scopes": ["admin"], "owner_user_id": None,
                 "source": "env"}
     # 2) есть ли вообще DB-токены? нет — auth выключен
@@ -73,11 +75,81 @@ def _auth_state(request: Request, creds: HTTPAuthorizationCredentials | None) ->
             info = _tokens.verify(db, got)
     except HTTPException:
         raise
-    except Exception:
-        return None  # БД недоступна — не валим запрос
+    except Exception as e:
+        # Раньше здесь был `return None` — то есть при ЛЮБОЙ ошибке БД запрос
+        # считался авторизованным. Кратковременный hiccup Postgres (рестарт,
+        # переподключение) на пару секунд снимал авторизацию со всего API,
+        # включая require_admin. Теперь, если env-токен настроен (значит auth
+        # должен работать), при недоступной БД пропускаем только env-токен,
+        # а остальным отвечаем 503: временная недоступность ≠ «всем можно».
+        _warn_auth_degraded(e)
+        if env_token:
+            raise HTTPException(503, "auth temporarily unavailable (database unreachable)")
+        # Без env-токена система живёт в режиме «доверенной LAN»: auth и так
+        # выключен, отказывать тут не в чем.
+        return None
     if info is None:
         raise HTTPException(401, "invalid brain token")
     return info
+
+
+# Чтобы не засорять лог на каждый запрос, пока БД лежит.
+_auth_degraded_at: float = 0.0
+
+
+# Что можно делать без токена, чтобы вообще настроить систему: подключить
+# медиа-сервер и выпустить ПЕРВЫЙ admin-токен. Всё остальное (сканы, крон,
+# пользователи, настройки) — закрыто, пока не появится токен.
+_BOOTSTRAP_EXACT: dict[str, set[str]] = {
+    "/api/settings": {"GET", "PUT"},
+    "/api/settings/media-server": {"GET", "POST"},
+    "/api/settings/media-server/test": {"POST"},
+    "/api/settings/tokens/meta": {"GET"},
+    "/api/settings/tokens": {"GET", "POST"},
+    # Переключатель «доверять сети» должен быть доступен и до первого токена,
+    # иначе из закрытого режима не выйти. Дополнительного риска нет: выпустить
+    # admin-токен (POST /api/settings/tokens) и так можно без авторизации.
+    "/api/settings/security": {"GET", "PUT"},
+}
+
+
+def _is_bootstrap_path(method: str, path: str) -> bool:
+    if path in _BOOTSTRAP_EXACT:
+        return (method or "GET").upper() in _BOOTSTRAP_EXACT[path]
+    return False
+
+
+def _lan_trust_enabled() -> bool:
+    """Явно разрешён ли открытый доступ из локальной сети (AppSetting)."""
+    try:
+        from app.db.database import session_scope
+        from app.db.models import AppSetting
+
+        with session_scope() as db:
+            row = db.get(AppSetting, "security")
+            val = row.value if row and isinstance(row.value, dict) else {}
+            return bool(val.get("lan_admin_enabled", False))
+    except Exception:
+        return False
+
+
+def _warn_auth_degraded(exc: Exception) -> None:
+    """Предупреждение не чаще раза в минуту."""
+    global _auth_degraded_at
+    import time as _time
+
+    now = _time.time()
+    if now - _auth_degraded_at < 60:
+        return
+    _auth_degraded_at = now
+    try:
+        from app.core.logging import get_logger
+
+        get_logger("kumaflow.auth").warning(
+            "БД недоступна при проверке токена, авторизация деградировала: {}", exc
+        )
+    except Exception:
+        pass
 
 
 def require_brain_auth(
@@ -118,18 +190,38 @@ def require_admin(
     request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
-    """Только админ: info None (открытая LAN без токенов) или admin-скоуп.
+    """Только админ.
 
-    Обычный per-user токен (wave/sync/...) сюда не проходит — так обычный
-    пользователь не может дёргать сканы, настройки, токены и чужие данные.
+    С ADMIN-ТОКЕНОМ всё как раньше: обычный per-user токен (wave/sync/...) сюда
+    не проходит — так обычный пользователь не может дёргать сканы, настройки,
+    токены и чужие данные. Ответ на «может ли обычный пользователь выдать себе
+    права админа» — нет: смена is_admin и создание admin-токена только здесь.
+
+    БЕЗ токенов (режим «доверенная LAN») раньше пропускал вообще всех, а значит
+    любой из сети мог выполнить POST /api/settings/tokens и выдать себе
+    admin-токен. Теперь по умолчанию открыт только стартовый набор путей
+    (настроить медиа-сервер, выпустить первый токен, войти), а всё остальное —
+    403. Старое поведение включается явно: Настройки → Диагностика →
+    «Доверять локальной сети».
     """
     info = _auth_state(request, creds)
-    if info is None:
+    if info is not None:
+        if info.get("is_admin"):
+            request.state.brain_token = info
+            return None
+        raise HTTPException(403, "admin token required")
+    # auth выключен — решаем по пути и по явному разрешению доверия сети
+    if _lan_trust_enabled():
         return None
-    if info.get("is_admin"):
-        request.state.brain_token = info
-        return None
-    raise HTTPException(403, "admin token required")
+    path = request.url.path or ""
+    if not _is_bootstrap_path(request.method, path):
+        raise HTTPException(
+            403,
+            "API работает без авторизации, поэтому административные операции закрыты. "
+            "Выпустите себе admin-токен (Настройки → Токены) — после этого доступ откроется. "
+            "Если доверяете сети целиком, включите «Доверять локальной сети» в Настройках → Диагностика.",
+        )
+    return None
 
 
 def enforce_user_binding(request: Request):

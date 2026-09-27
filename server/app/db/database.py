@@ -112,3 +112,14 @@ def init_db() -> None:
             "prod init_db: версий alembic нет, создаём схему через create_all"
         )
     Base.metadata.create_all(bind=engine)
+    # create_all создаёт только ОТСУТСТВУЮЩИЕ таблицы и никогда не добавляет
+    # колонки в уже существующие. Без этого шага обновление на живой базе
+    # даёт UndefinedColumn (playlists.comment, cron_jobs.last_status и др.).
+    try:
+        from app.db.schema_patch import ensure_columns as _ensure_cols
+
+        _ensure_cols(engine)
+    except Exception:
+        import logging as _lg
+
+        _lg.getLogger("db").warning("schema patch не отработал", exc_info=True)

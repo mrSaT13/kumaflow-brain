@@ -35,6 +35,29 @@ def _hidden_ids(db: Session) -> set[str]:
     return {str(x) for x in ids if x}
 
 
+def _auto_push(db: Session, playlist_id: str) -> dict:
+    """Авто-выгрузка свежесозданного плейлиста в Navidrome за тумблером.
+
+    Раньше maybe_auto_push вызывался только в /ai-generate, а кроновые джобы
+    дёргали его отдельно. Из-за этого три кнопки на странице «Плейлисты»
+    (холодный старт/daily, «Моя волна», «Открытия недели») флаг из настроек
+    вообще не читали — плейлист создавался, но в Navidrome не появлялся.
+    Теперь единая точка для всех веток создания.
+    """
+    try:
+        from app.services.playlist_push import maybe_auto_push as _push
+
+        return _push(db, str(playlist_id)) or {}
+    except Exception as e:  # noqa: BLE001 — пуш не должен ронять генерацию
+        try:
+            from app.core.logging import get_logger
+
+            get_logger("api.playlists").warning("auto-push {} failed: {}", playlist_id, e)
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)[:200]}
+
+
 def _to_dict(p: Playlist, db: Session, owners: dict[str, str] | None = None) -> dict:
     count = (
         db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).count()
@@ -42,6 +65,7 @@ def _to_dict(p: Playlist, db: Session, owners: dict[str, str] | None = None) -> 
     return {
         "id": str(p.id),
         "name": p.name,
+        "comment": p.comment,
         "external_id": p.external_id,
         "in_navidrome": bool(p.external_id),
         "is_public": p.is_public,
@@ -255,8 +279,7 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
         is_auto_generated=True,
         generated_for_date=datetime.combine(today, datetime.min.time()),
     )
-    db.add(p)
-    db.flush()
+    db.add(p)    db.flush()
 
     # если query — AI генератор (копия mobile ai_mix_service)
     if payload and payload.query and payload.query.strip():
@@ -277,7 +300,9 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
         for pos, tid in enumerate(ids):
             db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
         db.commit()
-        return {"queued": True, "playlist_id": str(p.id), "tracks": len(ids), "name": res.get("name"), "comment": res.get("comment"), "from_fallback": res.get("from_fallback"), "mode": "ai"}
+        push = _auto_push(db, str(p.id))
+        return {"queued": True, "playlist_id": str(p.id), "tracks": len(ids), "name": res.get("name"), "comment": res.get("comment"), "from_fallback": res.get("from_fallback"), "mode": "ai",
+                "pushed": bool(push.get("ok")), "push": push}
     # иначе cold-start per-user + оркестратор
     try:
         result = cold_start_playlist(str(server.id), n=n, user_id=resolved_user)
@@ -303,6 +328,7 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
     for pos, tid in enumerate(tids):
         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
     db.commit()
+    push = _auto_push(db, str(p.id))
     return {
         "queued": True,
         "playlist_id": str(p.id),
@@ -310,6 +336,8 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
         "steps": result["steps"],
         "mode": "cold_start",
         "user_id": resolved_user,
+        "pushed": bool(push.get("ok")),
+        "push": push,
     }
 
 
@@ -373,9 +401,11 @@ def my_wave(payload: dict, request: Request, db: Session = Depends(get_db)):
     for pos, tid in enumerate(tids):
         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
     db.commit()
+    push = _auto_push(db, str(p.id))
     return {"playlist_id": str(p.id), "tracks": len(tids), "steps": result["steps"],
             "excluded_disliked": result.get("excluded_disliked", 0),
-            "excluded_banned": result.get("excluded_banned", 0), "mode": "my_wave"}
+            "excluded_banned": result.get("excluded_banned", 0), "mode": "my_wave",
+            "pushed": bool(push.get("ok")), "push": push}
 
 
 @router.post("/weekly-discovery")
@@ -439,8 +469,10 @@ def weekly_discovery(payload: dict, request: Request, db: Session = Depends(get_
     except Exception:
         pass
     db.commit()
+    push = _auto_push(db, str(p.id))
     return {"playlist_id": str(p.id), "tracks": len(tids), "mode": res.get("mode"),
-            "explanations": res.get("explanations") or [], "steps": res.get("steps") or []}
+            "explanations": res.get("explanations") or [], "steps": res.get("steps") or [],
+            "pushed": bool(push.get("ok")), "push": push}
 
 
 @router.post("/ai-generate")
@@ -450,6 +482,10 @@ def ai_generate(payload: dict, request: Request, db: Session = Depends(get_db)):
                      str((payload or {}).get("user_id") or "") or None)
     q = (payload.get("query") or payload.get("q") or "").strip()
     n = int(payload.get("n") or payload.get("desiredCount") or 30)
+    # Кламп обязателен: n уходит в LLM-вызов и в число кандидатов, а без
+    # ограничения запрос вида {"n": 5000} держал бы провайдер десятки секунд
+    # впустую (в отличие от my-wave/weekly-discovery, где кламм уже был).
+    n = max(5, min(100, n))
     user_id = payload.get("user_id")
     if not q:
         raise HTTPException(400, "query required")
@@ -458,12 +494,41 @@ def ai_generate(payload: dict, request: Request, db: Session = Depends(get_db)):
     from app.services.playlist_ai import generate_from_prompt
 
     res = generate_from_prompt(db, query=q, desired=n)
+    # Шаблонные имя/пояснение по доминирующим признакам. Нужны как запасной
+    # путь, когда ИИ не настроен или провалился (тогда res пустой), и как
+    # страховка, если модель вернула пустое имя.
+    _name = str(res.get("name") or "").strip()
+    _comment = str(res.get("comment") or "").strip()
+    _hour = None
+    try:
+        from app.core.time import server_now as _sn
+
+        _hour = _sn().hour
+    except Exception:
+        _hour = None
+    try:
+        from app.services import playlist_names as _pn
+
+        _songs = res.get("songs") or []
+        _desc = _pn._describe(db, _songs)
+        if not _name:
+            _name = _pn.make_name(_desc, query=q, hour=_hour)
+        if not _comment:
+            _comment = _pn.make_comment(_desc, query=q)
+    except Exception as e:  # noqa: BLE001 — нейминг не должен ронять генерацию
+        from app.core.logging import get_logger as _gl
+
+        _gl("api.playlists").warning("playlist naming failed: {}", e)
     # создаём плейлист
     p = Playlist(
         id=str(uuid.uuid4()),
         server_id=server.id,
         owner_user_id=user_id,
-        name=res.get("name") or f"AI Mix · {q[:24]}",
+        name=_name or f"AI Mix · {q[:24]}",
+        # Пояснение («почему такой микс») теперь сохраняется, а не теряется:
+        # оно показывается в вебе и уезжает в Navidrome
+        # (updatePlaylist.comment), где его видят сторонние клиенты.
+        comment=(_comment[:1000] or None),
         is_auto_generated=False,
         generated_for_date=None,
     )
@@ -482,16 +547,10 @@ def ai_generate(payload: dict, request: Request, db: Session = Depends(get_db)):
     for pos, tid in enumerate(ids):
         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
     db.commit()
-    # ИИ-микс тоже уезжает в Navidrome за общим тумблером (как daily/smart/weekly)
-    push: dict | None = None
-    try:
-        from app.services.playlist_push import maybe_auto_push as _push
-
-        push = _push(db, str(p.id))
-    except Exception:
-        push = None
-    return {"playlist_id": str(p.id), "name": res.get("name"), "comment": res.get("comment"), "tracks": len(ids), "from_fallback": res.get("from_fallback"), "ids": ids,
-            "pushed": bool(push and push.get("ok")), "push": push}
+    # ИИ-микс тоже уезжает в Navidrome за общим тумблером (как daily/my-wave/weekly)
+    push = _auto_push(db, str(p.id))
+    return {"playlist_id": str(p.id), "name": p.name, "comment": p.comment, "tracks": len(ids), "from_fallback": res.get("from_fallback"), "ids": ids,
+            "pushed": bool(push.get("ok")), "push": push}
 
 
 @router.post("/{playlist_id}/export")

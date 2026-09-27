@@ -127,6 +127,10 @@ services:
       BRAIN_API_TOKEN: CHANGE_ME_brain_token
       # Сейф паролей для автообновления вкусов (тот же ключ, что у backend).
       TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
+      # Тот же «домашний» часовой пояс, что у backend и scheduler: воркер
+      # создаёт daily-плейлист с local_today(), и без этого дата могла
+      # отличаться от даты в API на сутки.
+      APP_TIMEZONE: UTC
       MEDIA_SERVER_TYPE: navidrome
       NAVIDROME_URL: http://host.docker.internal:4533
       QUEUES: high,default,light
@@ -227,6 +231,10 @@ services:
     environment:
       ENV: prod
       LOG_LEVEL: INFO
+      # Должно совпадать с APP_TIMEZONE у backend: крон считает «домашнее» время
+      # по своему окружению, и без этого daily 0 3 * * * стрелял не в те часы,
+      # а граница суток в API и в кроне разъезжалась.
+      APP_TIMEZONE: UTC
       DB_URL_OVERRIDE: ""
       POSTGRES_HOST: postgres
       POSTGRES_USER: kumaflow
@@ -235,6 +243,10 @@ services:
       REDIS_HOST: redis
       BRAIN_API_TOKEN: CHANGE_ME_brain_token
       TASTE_VAULT_KEY: CHANGE_ME_taste_vault_key
+    # У образа есть HEALTHCHECK на :8000/health — scheduler порт не слушает,
+    # поэтому контейнер вечно помечался unhealthy и пугал в docker compose ps.
+    healthcheck:
+      disable: true
     command: ["python", "-m", "app.workers.scheduler"]
 
   # Ночной бэкап pgdata (pg_dump в ./backups, ротация 14 дней).

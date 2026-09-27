@@ -875,6 +875,67 @@ def adaptive_count(requested: int, drift: dict | None,
     return eff, " + ".join(bits) or None
 
 
+def _smooth_energy_pass(items: list[dict], max_step: float = 0.18,
+                        start_energy: float | None = None) -> list[dict]:
+    """Плавная раскладка по энергии + отчёт в лог.
+
+    Раньше здесь стоял create_energy_wave в голом try/except pass — то есть
+    при любой ошибке оркестрация молча пропадала, и по логам нельзя было понять,
+    раскладывалась ли вообще волна. Теперь причина сбоя видна.
+
+    start_energy — энергия трека, который сейчас играет. Без неё раскладка
+    стартует от края шкалы и на стыке батчей получается скачок: только что
+    играл энергичный трек, а мозг выдал спокойный.
+    """
+    if not items or len(items) < 3:
+        return items
+    try:
+        from app.services.orchestrator import smooth_energy_order as _seo
+
+        def _en_list(seq: list[dict]) -> list[float]:
+            out = []
+            for r in seq:
+                try:
+                    v = r.get("energy")
+                    out.append(float(v) if v is not None else 0.5)
+                except (TypeError, ValueError):
+                    out.append(0.5)
+            return out
+
+        def _ragged(seq: list[float]) -> float:
+            s = 0.0
+            for a, b in zip(seq, seq[1:]):
+                d = abs(a - b)
+                s += d
+                if d > max_step:
+                    s += (d - max_step) * 3.0
+            return s
+
+        before_r = _ragged(_en_list(items))
+        by_id = {str(r.get("track_id") or ""): r for r in items}
+        wrapped = [dict(r, id=str(r.get("track_id") or "")) for r in items]
+        ordered = _seo(wrapped, None, max_step=max_step, start_energy=start_energy)
+        new = [by_id.get(str(w.get("id"))) for w in ordered]
+        new = [r for r in new if r is not None]
+        if len(new) != len(items):
+            from app.core.logging import get_logger as _gl
+
+            _gl("wave").warning("energy pass: lost tracks ({} -> {}), order untouched",
+                                 len(items), len(new))
+            return items
+        after_r = _ragged(_en_list(new))
+        from app.core.logging import get_logger as _gl
+
+        _gl("wave").info("energy pass: raggedness {:.3f} -> {:.3} over {} tracks (start_energy={})",
+                         before_r, after_r, len(new), start_energy)
+        return new
+    except Exception as e:
+        from app.core.logging import get_logger as _gl
+
+        _gl("wave").warning("energy pass failed, order untouched: {}", e)
+        return items
+
+
 def _smooth_keys_order(items: list[dict]) -> list[dict]:
     """Key-сглаживание соседей: пузырьковые свопы, улучшающие суммарную
     совместимость тональностей (квинтовый круг). Своп разрешён, только если
@@ -1370,6 +1431,14 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     except Exception:
         pass
     morph = None
+    # Энергия текущего трека — якорь для плавной раскладки (см. _smooth_energy_pass).
+    _cur_en: float | None = None
+    if _cf is not None:
+        try:
+            if _cf.energy is not None:
+                _cur_en = float(_cf.energy)
+        except (TypeError, ValueError):
+            _cur_en = None
     if morphing and top:
         # Градиент: голова — стартовое настроение, хвост — целевое,
         # середина — лучшее остальное. Плавный уход в выбранный муд.
@@ -1383,25 +1452,14 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             [r for r in top if str(r.get("track_id")) not in used][:mid_n])
         top = head + mid + tail
         morph = {"from": start_mood, "to": target_mood}
+        # Раньше здесь энергетическая дуга не применялась вовсе: ветка morph
+        # шла вместо неё, то есть при ВЫБРАННОМ настроении (главный сценарий)
+        # переходов по энергии не было. Теперь дуга есть в обеих ветках.
+        top = _smooth_energy_pass(top, start_energy=_cur_en)
     elif len(top) > 3:
-        # Без целевого настроения — раскладываем оркестратором: энергетическая
-        # волна calm -> energetic -> calm по реальной energy, затем key-сглаживание.
-        try:
-            from types import SimpleNamespace as _SN
-
-            from app.services.orchestrator import create_energy_wave as _ew
-
-            _fmap = {str(r.get("track_id") or ""):
-                     _SN(energy=r.get("energy")) for r in top}
-            _wrapped = [dict(r, id=str(r.get("track_id") or "")) for r in top]
-            _waved = _ew(_wrapped, _fmap, segments=3)
-            _by_id = {str(r.get("track_id") or ""): r for r in top}
-            _new = [_by_id.get(str(w.get("id"))) for w in _waved]
-            _new = [r for r in _new if r is not None]
-            if len(_new) == len(top):
-                top = _new
-        except Exception:
-            pass
+        # Без целевого настроения — раскладываем оркестратором: плавные
+        # переходы по энергии, затем key-сглаживание.
+        top = _smooth_energy_pass(top, start_energy=_cur_en)
         top = _smooth_keys_order(top)
     # Мостик: первый трек выдачи — плавное продолжение текущего.
     # Если переход резкий — подтягиваем лучший мостик из топ-10 окна.
@@ -1444,6 +1502,20 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # Растяжка скоров окна: сырые total упираются в кламп 1.0 и весь топ
     # выглядит как «1.00, 1.00, …». Монотонно — порядок не трогаем.
     spread_scores(top)
+    # Метрики волны: фиксируем, что эти треки реально показаны, с их score и
+    # причиной. Без этого в истории не отличить «мозг предложил» от «юзер сам
+    # поставил», и улучшать скоринг приходится вслепую.
+    try:
+        from app.services import rec_feedback as _rfb
+
+        _rfb.mark_served(db, user_id, top, source="wave")
+    except Exception as e:
+        try:
+            from app.core.logging import get_logger as _gl
+
+            _gl("wave").warning("rec_feedback mark_served failed: {}", e)
+        except Exception:
+            pass
     return {'tracks': top, 'seeds': seeds,
             'applied': applied,
             'current_mood': start_mood,

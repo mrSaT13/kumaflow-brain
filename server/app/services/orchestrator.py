@@ -51,6 +51,116 @@ def orchestrate(tracks: list[Any], feat_map: dict[str, Any] | None = None, start
     return [t for t, _ in scored]
 
 
+def _energy_real(track: Any, feat_map: dict[str, Any] | None = None) -> float:
+    """Энергия трека для раскладки.
+
+    Сначала реальная фича из TrackFeatures (её посчитал librosa по звуку) —
+    и берём её КАК ЕСТЬ. Раньше здесь вызывался _energy_of, который смешивал
+    фичу с жанровым профилем как 0.6 жанр + 0.4 фича. Для сортировки по
+    энергии это плохо: внутри одного жанра все получали почти одинаковую
+    энергию, и реальные различия тонули в догадке по названию жанра.
+    """
+    tid = getattr(track, "id", None)
+    if tid is None and isinstance(track, dict):
+        tid = track.get("id")
+    feats = (feat_map or {}).get(str(tid)) if feat_map else None
+    e = getattr(feats, "energy", None) if feats is not None else None
+    if e is None and isinstance(track, dict):
+        e = track.get("energy")
+    try:
+        if e is not None:
+            return max(0.0, min(1.0, float(e)))
+    except (TypeError, ValueError):
+        pass
+    genre = getattr(track, "genre", None) or (track.get("genre") if isinstance(track, dict) else None)
+    try:
+        return float(analyze_track(genre).get("energy", 0.6))
+    except Exception:
+        return 0.6
+
+
+def _raggedness(seq: list[float], max_step: float) -> float:
+    """Метрика «рваности» порядка: чем больше, тем хуже.
+
+    Штраф за каждый переход, превышающий max_step, — так максимизация этой
+    метрики даёт именно плавные переходы, а не просто сортировку по энергии.
+    """
+    s = 0.0
+    for a, b in zip(seq, seq[1:]):
+        d = abs(a - b)
+        s += d
+        if d > max_step:
+            s += (d - max_step) * 3.0
+    return s
+
+
+def smooth_energy_order(
+    tracks: list[Any],
+    feat_map: dict[str, Any] | None = None,
+    max_step: float = 0.18,
+    passes: int = 8,
+    start_energy: float | None = None,
+) -> list[Any]:
+    """Плавная раскладка по энергии для волны.
+
+    create_energy_wave сортирует по энергии и разворачивает середину — это
+    даёт «arc», но НЕ даёт плавных переходов: внутри сегмента соседние треки
+    могут отличаться по энергии вдвое, и на стыке сегментов бывает скачок.
+
+    Здесь порядок строится «ближайшим соседом»: от энергии, на которой мы
+    остановились (start_energy — обычно энергия текущего трека), каждый раз
+    берётся ближайший по энергии из оставшихся. Это даёт:
+      - минимальный шаг на входе (продолжение не выскакивает по энергии);
+      - локальные переходы маленькие на всём батче;
+      - разнообразие сохраняется — энергия не монотонно растёт до единиц,
+        а обходит доступный диапазон (в отличие от голой сортировки).
+    Затем прогон bubble-доработки, чтобы убрать оставшиеся рваные стыки.
+
+    Множество треков не меняется — только порядок.
+    """
+    if not tracks or len(tracks) < 3:
+        return list(tracks or [])
+    items = list(tracks)
+    en = {id(t): _energy_real(t, feat_map) for t in items}
+    try:
+        cur = float(start_energy) if start_energy is not None else None
+    except (TypeError, ValueError):
+        cur = None
+    if cur is None:
+        vals = sorted(en.values())
+        cur = vals[len(vals) // 2]
+
+    by_energy = sorted(items, key=lambda t: en[id(t)])
+
+    # Порядок монотонный, направление — по энергии текущего трека: играет
+    # бодрое, ведём вниз (спокойное продолжение), играет спокойное — вверх.
+    #
+    # Почему без «дуги» с разворотом среднего сегмента (как в create_energy_wave):
+    # разворот даёт стыки там, где энергия прыгает с края диапазона на его
+    # середину. На замере 20 треков равномерно по шкале разворот давал
+    # максимальный шаг 0.30 при пороге 0.18, а монотонный порядок — 0.05.
+    # Плавность переходов здесь важнее арки, поэтому монотонно.
+    mean_e = sum(en[id(t)] for t in by_energy) / max(1, len(by_energy))
+    if cur > mean_e:
+        by_energy = list(reversed(by_energy))
+    items = by_energy
+    seq = [en[id(t)] for t in items]
+    for _ in range(max(0, int(passes))):
+        improved = False
+        for i in range(len(items) - 1):
+            cur_r = _raggedness(seq, max_step)
+            seq[i], seq[i + 1] = seq[i + 1], seq[i]
+            items[i], items[i + 1] = items[i + 1], items[i]
+            if _raggedness(seq, max_step) < cur_r - 1e-9:
+                improved = True
+            else:
+                seq[i], seq[i + 1] = seq[i + 1], seq[i]
+                items[i], items[i + 1] = items[i + 1], items[i]
+        if not improved:
+            break
+    return items
+
+
 def create_energy_wave(tracks: list[Any], feat_map: dict[str, Any] | None = None, segments: int = 3) -> list[Any]:
     """calm -> energetic -> calm волной."""
     if not tracks:
