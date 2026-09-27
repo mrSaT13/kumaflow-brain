@@ -246,10 +246,35 @@ async def test_bridge(payload: dict | None = None, db: Session = Depends(get_db)
 
 @router.get("/automation")
 def get_automation(db: Session = Depends(get_db)):
-    """Флаги автоматизации (БД, без перезапуска)."""
+    """Флаги автоматизации (БД, без перезапуска).
+
+    Для CLAP отдаём ЭФФЕКТИВНОЕ значение, а не дефолт из таблицы. Иначе
+    получается расхождение: в БД флага ещё нет, DEFAULTS даёт True, а
+    реально действует env CLAP_ENABLED (в compose часто false) — и в UI
+    тумблер показывал бы «вкл» при выключенной фиче. Стейл-стейт в настройках
+    хуже, чем отсутствие настройки.
+    """
     from app.services import automation as _auto
 
-    return {"ok": True, "flags": _auto.get_flags(db)}
+    flags = _auto.get_flags(db)
+    try:
+        from app.db.models import AppSetting as _AS
+
+        row = db.get(_AS, _auto.KEY)
+        stored = row.value if row and isinstance(row.value, dict) else {}
+        for key in ("clap_enabled", "clap_audio_enabled"):
+            if key in stored:
+                continue
+            # Флага в БД нет — показываем то, что реально применится.
+            if key == "clap_enabled":
+                from app.core.config import get_settings as _gs
+
+                flags[key] = bool(getattr(_gs(), "clap_enabled", False))
+            else:
+                flags[key] = bool(_auto.clap_audio_enabled(db))
+    except Exception:
+        pass
+    return {"ok": True, "flags": flags}
 
 
 TIMEZONE_OPTIONS = [

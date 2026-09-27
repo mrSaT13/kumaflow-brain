@@ -163,6 +163,7 @@ def run_now(job_id: str, db: Session = Depends(get_db)):
     if kind == "refresh_tastes":
         from app.db.models import ScanRun
         from app.services.media_server import resolve_active_server
+        from app.services.queue import enqueue_light
         from app.workers.tasks import refresh_tastes
 
         server = resolve_active_server(db)
@@ -174,35 +175,43 @@ def run_now(job_id: str, db: Session = Depends(get_db)):
         )
         db.add(run)
         db.flush()
-        job = enqueue(refresh_tastes, str(run.id), job_timeout=3600)
+        job = enqueue_light(refresh_tastes, str(run.id), job_timeout=3600)
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job, "run_id": str(run.id)}
     if kind == "smart":
+        from app.services.queue import enqueue_light
         from app.workers.tasks import smart_playlists
 
-        job = enqueue(smart_playlists, job_timeout=3600)
+        # Очередь light — как у крона. Раньше «сейчас» уходило в default,
+        # и при раздельных воркерах джоба уезжала не туда, куда кладёт крон.
+        job = enqueue_light(smart_playlists, job_timeout=3600)
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job}
     if kind == "snapshots":
+        from app.services.queue import enqueue_light
         from app.workers.tasks import taste_snapshots
 
-        job = enqueue(taste_snapshots, job_timeout=1800)
+        job = enqueue_light(taste_snapshots, job_timeout=1800)
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job}
     if kind == "weekly":
+        from app.services.queue import enqueue_light
         from app.workers.tasks import weekly_discovery_all
 
-        job = enqueue(weekly_discovery_all, job_timeout=3600)
+        job = enqueue_light(weekly_discovery_all, job_timeout=3600)
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job}
     if kind == "clap":
+        from app.services.queue import enqueue_clap
         from app.workers.tasks import clap_embed
 
-        job = enqueue(clap_embed, str(j.id), job_timeout=3600)
+        # Очередь clap — как у крона. Так «сейчас» и ночной прогон идут
+        # одним путём (и не требуют отдельного worker, если обслуживается).
+        job = enqueue_clap(clap_embed, str(j.id), job_timeout=3600)
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "job_id": job}
