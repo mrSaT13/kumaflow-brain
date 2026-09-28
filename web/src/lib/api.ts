@@ -201,6 +201,17 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   } finally {
     clearTimeout(timer);
   }
+  if (res.status === 401) {
+    // Токен мёртв (удалён/выключен в Токенах, база снесена, либо он от
+    // другого backend) — хранить труп нельзя: чистим и просим LoginGate
+    // перепроверить whoami, чтобы показать окно входа вместо вечных 401.
+    // 403 НЕ трогаем: токен жив, просто не хватает скоупа (например,
+    // не-админ дёрнул admin-эндпоинт) — разлогинивать тут нельзя.
+    setBrowserToken("");
+    try {
+      window.dispatchEvent(new Event("kumaflow:unauthorized"));
+    } catch { /* SSR */ }
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     // backend обычно отдаёт JSON {ok:false,error} или {detail} — показываем его, а не HTML

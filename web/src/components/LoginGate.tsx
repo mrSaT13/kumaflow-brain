@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { KeyRound, LogIn, UserRound } from "lucide-react";
 import { Button, Card, Input } from "@/components/ui";
@@ -24,6 +24,20 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const toast = useToast();
+
+  // Любой API-запрос получил 401 (токен умер уже после входа: удалён,
+  // выключен, база пересоздана) — whoami мог остаться закэшированным
+  // «logged_in», и юзер сидит на битой странице с вечными 401 вместо входа.
+  // Перепроверяем whoami сразу, без ожидания 60-секундного интервала.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      try {
+        void mutate();
+      } catch { /* ignore */ }
+    };
+    window.addEventListener("kumaflow:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("kumaflow:unauthorized", onUnauthorized);
+  }, [mutate]);
 
   async function doLogin() {
     setBusy(true);
