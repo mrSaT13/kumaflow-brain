@@ -56,7 +56,12 @@ def has_navidrome(db) -> bool:
     user = str(cfg.get("user") or "").strip()
     if not url or not user:
         return False
-    if url in _DEMO_URLS or "demo" in url:
+    # Демо — ровно заглушка http(s)://localhost (так сидит и в
+    # media_server.is_real_server, и в tasks при выборе демо-сида).
+    # Подстроку "demo" в хосте НЕ проверяем: реальный сервер вроде
+    # https://demo-music.example.com иначе ошибочно сошёл бы за демо
+    # и фильтр выключился бы.
+    if url in _DEMO_URLS:
         return False
     return True
 

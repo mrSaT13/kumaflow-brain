@@ -64,13 +64,31 @@ def discoveries(db, user_id: str, n: int = 30) -> list[str]:
     fav = {str(r.track_id) for r in db.query(Favorite).filter_by(user_id=user_id).all()}
     skip = played | dis | fav
     q = db.query(Track.id, Track.artist_name)
+    try:
+        # Только то, что сыграет плеер: disk:/demo- при выгрузке в Navidrome
+        # отбрасываются и плейлист выходит короче заказанного. В демо фильтр
+        # выключается сам (playable.has_navidrome).
+        from app.services import playable as _pl
+
+        q = _pl.apply(q, db)
+    except Exception:  # noqa: BLE001 — не блокируем подбор из-за фильтра
+        pass
     if skip:
         # чанкуем NOT IN, чтобы не упереться в лимиты переменных
         skip = list(skip)
         cand: list[str] = []
         seen: set[str] = set()
+        try:
+            from app.services import playable as _pl2
+
+            _pl_filter = _pl2.playable_filter(db)
+        except Exception:  # noqa: BLE001
+            _pl_filter = None
         for i in range(0, len(skip), 500):
-            for (tid,) in db.query(Track.id).filter(
+            _cq = db.query(Track.id)
+            if _pl_filter is not None:
+                _cq = _cq.filter(_pl_filter)
+            for (tid,) in _cq.filter(
                     ~Track.id.in_(skip[i:i + 500])).limit(3000).all():
                 tid = str(tid)
                 if tid not in seen:
@@ -114,6 +132,14 @@ def forgotten(db, user_id: str, n: int = 30,
     cutoff = datetime.utcnow() - timedelta(days=days)
     fav_ids = [str(r.track_id) for r in
                db.query(Favorite).filter_by(user_id=user_id).all()]
+    if fav_ids:
+        # Лайк мог стоять на локальном файле — в плеер он не уедет.
+        try:
+            from app.services import playable as _pl3
+
+            fav_ids, _ = _pl3.playable_ids(db, fav_ids)
+        except Exception:  # noqa: BLE001
+            pass
     agg = _taste._user_track_aggregates(db, user_id)
     scored = []
     for tid in fav_ids:
@@ -188,6 +214,17 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
     if predicate == "night":
         pool.sort(key=lambda kv: kv[1])  # спокойнее — выше
     top = [t for t, _ in pool[:max(n * 5, 100)]]
+    if not top:
+        return []
+    if top:
+        # Фичи есть и у локальных файлов (ради них диск и сканируется),
+        # но в плеер они не уедут — отсекаем до скоринга вкуса.
+        try:
+            from app.services import playable as _pl4
+
+            top, _ = _pl4.playable_ids(db, top)
+        except Exception:  # noqa: BLE001
+            pass
     if not top:
         return []
     meta = {str(t.id): t for t in

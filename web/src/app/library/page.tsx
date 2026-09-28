@@ -447,7 +447,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
         </div>
       }
     >
-      {src && (src.local_with_navidrome_twin > 0 || src.needs_recannonicalize > 0) && (
+      {src && (src.local_with_navidrome_twin > 0 || src.needs_recannonicalize > 0 || src.local_orphans_no_twin > 0) && (
         <div className="mb-3 rounded-lg border border-warn/30 bg-warn/5 p-4 text-sm">
           <div className="font-medium text-text mb-1">
             Две библиотеки в одной: {src.navidrome} треков Navidrome и {src.local} локальных файлов
@@ -459,6 +459,16 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
             Без двойника в Navidrome остаётся {src.local_orphans_no_twin} треков — их не трогаем,
             это единственные носители файла.
           </div>
+          {src.local_orphans_no_twin > 0 && (
+            <div className="text-muted mb-3">
+              Эти файлы в плеер не попадут (у плеера нет их id). Если это та же коллекция, что в
+              Navidrome, — проверьте, что Navidrome просканировал эти файлы, и что метаданные
+              совпадают (артист + название + длительность ±2с; live/remix-версии не считаются дублями).
+              {(src.orphan_samples ?? []).length > 0 && (
+                <> Примеры: {(src.orphan_samples ?? []).slice(0, 10).map((o) => `${o.artist_name ?? "—"} — ${o.title}`).join("; ")}.</>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-2 flex-wrap">
             <button className="kuma-pill hover:text-text" onClick={previewFix} disabled={busy}>
               Показать план

@@ -21,12 +21,15 @@ from app.db.models import (
     PlayEvent,
     PlayHistory,
     PlaylistTrack,
+    RecommendationFeedback,
     Track,
     TrackCluster,
     TrackDislike,
     TrackEmbedding,
     TrackFeatures,
     TrackMetadataEnrich,
+    TrackStat,
+    TrackTimeStat,
 )
 
 logger = get_logger("dedup")
@@ -40,12 +43,9 @@ _VERSION_RE = re.compile(
 _DURATION_TOLERANCE = 2  # секунды
 
 # Префиксы external_id, которые НЕ играют в плеере.
-_LOCAL_PREFIXES = ("disk:", "demo-")
-
-
-def is_local_source(external_id: str | None) -> bool:
-    """True, если трек — локальная копия файла, а не трек Navidrome."""
-    return str(external_id or "").startswith(_LOCAL_PREFIXES)
+# Единый источник — services/playable.py (там же SQL-фильтр и has_navidrome).
+from app.services.playable import LOCAL_PREFIXES as _LOCAL_PREFIXES
+from app.services.playable import is_local_source
 
 
 def _source_rank(external_id: str | None) -> int:
@@ -156,7 +156,8 @@ def merge_tracks(db, keep_id: str, drop_ids: list[str]) -> dict:
     """Сшить дубли в канонический: статистика суммируется, ссылки переносятся.
 
     Защита от дублей PK (Favorite/Dislike/Lyrics/...): если у keep уже есть
-    такая же строка — строка дубля удаляется.
+    такая же строка — строка дубля удаляется. Счётчики TrackStat/TrackTimeStat
+    суммируются (user[,hour]), показы RecommendationFeedback переносятся.
     """
     drop_ids = [d for d in drop_ids if d != keep_id]
     if not drop_ids:
@@ -235,6 +236,36 @@ def merge_tracks(db, keep_id: str, drop_ids: list[str]) -> dict:
                 row.track_id = keep_id
                 n += 1
         moved[model.__tablename__] = n
+    # TrackStat / TrackTimeStat (PK user[,hour],track): счётчики СУММИРУЕМ,
+    # иначе статистика волны («часто в этот час», скоры вкуса) теряется вместе
+    # с удалённым дублем. last_played — максимум из двух.
+    for model, _sum_cols in (
+        (TrackStat, ("plays", "skips", "early_skips", "replays",
+                     "seek_backs", "abandons", "completes", "mobile_score")),
+        (TrackTimeStat, ("plays", "likes", "skips")),
+    ):
+        n = 0
+        for row in db.query(model).filter(model.track_id.in_(drop_ids)).all():
+            filt = [model.user_id == row.user_id, model.track_id == keep_id]
+            if hasattr(model, "hour"):
+                filt.append(model.hour == row.hour)
+            keep_row = db.query(model).filter(*filt).first()
+            if keep_row is None:
+                row.track_id = keep_id
+            else:
+                for c in _sum_cols:
+                    setattr(keep_row, c, (getattr(keep_row, c) or 0) + (getattr(row, c) or 0))
+                if getattr(row, "last_played", None) and (
+                        not getattr(keep_row, "last_played", None)
+                        or row.last_played > keep_row.last_played):
+                    keep_row.last_played = row.last_played
+                db.delete(row)
+            n += 1
+        moved[model.__tablename__] = n
+    # RecommendationFeedback (PK id): просто переносим показы на keep —
+    # иначе метрики волны повиснут на удалённом track_id.
+    moved[RecommendationFeedback.__tablename__] = _move_fk(
+        db, RecommendationFeedback, "track_id", drop_ids, keep_id)
 
     for d in drops:
         db.delete(d)

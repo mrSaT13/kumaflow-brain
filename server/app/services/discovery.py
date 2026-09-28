@@ -138,7 +138,17 @@ def weekly_discovery(db, user_id: str, n: int = 30) -> dict:
     scored.sort(reverse=True)
     top = scored[:max(n * 4, 60)]
 
-    # MMR-диверсификация по артисту (как в cold_start, но лёгкая)
+    # MMR-диверсификация по артисту (как в cold_start, но лёгкая).
+    # Собираем с запасом: локальные файлы (disk:/demo-) в плеер не уедут
+    # (у них нет Navidrome-id), поэтому после playable-фильтра добиваем до n
+    # следующими по скору — иначе очередь короче заказанного.
+    try:
+        from app.services import playable as _pl
+
+        _want = n * 2 + 10
+    except Exception:  # noqa: BLE001
+        _pl = None  # type: ignore[assignment]
+        _want = n
     picks: list[str] = []
     seen_artists: dict[str, int] = {}
     for s, tid in top:
@@ -148,14 +158,36 @@ def weekly_discovery(db, user_id: str, n: int = 30) -> dict:
             continue
         picks.append(tid)
         seen_artists[a] = seen_artists.get(a, 0) + 1
-        if len(picks) >= n:
+        if len(picks) >= _want:
             break
-    if len(picks) < n:  # добить без MMR
+    if len(picks) < _want:  # добить без MMR
         for s, tid in top:
             if tid not in picks:
                 picks.append(tid)
-            if len(picks) >= n:
+            if len(picks) >= _want:
                 break
+    if _pl is not None:
+        try:
+            picks, _dropped = _pl.playable_ids(db, picks)
+        except Exception:  # noqa: BLE001 — лучше лишний трек, чем пустой микс
+            pass
+        if len(picks) < n:
+            # Добираем следующими по скору из уже загруженной меты
+            # (без новых запросов): пропущенные — только локальные файлы.
+            _have = set(picks)
+            for s, tid in top:
+                if tid in _have:
+                    continue
+                t = meta.get(tid)
+                if t is None:
+                    continue
+                if not _pl.is_playable(t.external_id):
+                    continue
+                picks.append(tid)
+                _have.add(tid)
+                if len(picks) >= n:
+                    break
+    picks = picks[:n]
 
     # explanations
     liked_list = list(liked_vecs.items())
