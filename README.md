@@ -30,11 +30,12 @@
 | | Возможность |
 |---|---|
 | 🎧 | **Sonic-анализ** — tempo, key, energy, danceability, mood. Файлы берутся с диска worker'а (`/music`) или стримом из Navidrome через Subsonic `download` |
-| 🔍 | **CLAP-поиск по смыслу** — `laion/larger_clap_general` 512-dim (~350 МБ), `mode: embedding` (Voyager HNSW) или fallback `keyword` |
-| 🌊 | **Моя волна** — динамическая очередь `POST /api/wave/continue` + live-очередь телефона на странице `/wave`, сиды, автобан артиста после 3 дизлайков |
+| 🔍 | **CLAP-поиск по смыслу** — `Xenova/clap-htsat-unfused` quantized 512-dim (~165 МБ, запечена в образ), `mode: embedding` (Voyager HNSW) или fallback `keyword` |
+| 🌊 | **Моя волна** — динамическая очередь `POST /api/wave/continue` + live-очередь на странице `/wave`, сиды, автобан артиста после 3 дизлайков, per-device слоты, общие настройки волны, handoff `position_sec` |
+| 🧠 | **Умная волна** — CLAP-аудио в скоринге (фолбек на librosa без анализа), авто-настроение из сессии (ручная пилюля всегда побеждает), скип-риск `<30с`, бандит UCB-lite (artist/genre/mood) |
 | 📻 | **Daily-плейлисты per-user** — холодный старт (`0.6 floor`), AI-генератор, оркестратор волной, крон `0 3 * * *` через APScheduler |
 | 👤 | **Taste engine** — профиль вкусов, история, коллаборативные рекомендации, sync с мобильным клиентом, Vault (Fernet-шифр паролей) |
-| 📝 | **Тексты песен** — открытые провайдеры (lyrics.ovh, musixmatch) + кэш |
+| 📝 | **Тексты песен** — LRCLIB (synced + plain, без токена) + кэш, детект языка для фильтра волны |
 | 🖼 | **Обложки как на мобиле** — size-aware, `ETag` + `Cache-Control 7d`, LRU до 2 ГБ, prefetch батчами по 8 |
 | 🤖 | **Ollama Cloud parity** — `api/chat` + Bearer, `/api/tags`, pull модели из UI |
 | 🌉 | **Мост метаданных** — MusicBrainz + Last.fm (опциональный сервис `:8001`) |
@@ -61,7 +62,7 @@ graph LR
     Backend --> RD[(Redis :6379)]
     Backend --> W1[worker<br/>high/default/light]
     Backend --> W2[worker-audio<br/>librosa]
-    Backend --> W3[worker-clap<br/>CLAP 350MB]
+    Backend --> W3[worker-clap<br/>CLAP ~165MB]
     Backend --> SCH[scheduler<br/>cron 03:00]
     Backend -.-> BR[bridge :8001<br/>MusicBrainz/Last.fm]
   end
@@ -137,7 +138,7 @@ docker compose --profile bridge up -d
 
 | Группа | Endpoints |
 |---|---|
-| 🌊 Волна | `POST /api/wave/continue` · `GET /api/wave/seeds` · `POST /api/wave/publish` · `GET /api/wave/live?user_id=` |
+| 🌊 Волна | `POST /api/wave/continue` (CLAP + авто-муд + скип-риск + UCB) · `GET /api/wave/seeds` · `POST /api/wave/publish` · `GET /api/wave/live?user_id=` · `GET /api/wave/resume` · `GET/PUT /api/wave/settings` · `GET /api/wave/feedback` |
 | 👤 Пользователи | `POST /api/users/` · `POST /api/users/by-credentials` · `POST /api/users/{id}/sync-from-mobile` · `POST /api/users/{id}/events` · `GET /api/users/{id}/profile` |
 | 📻 Плейлисты | `POST /api/playlists/generate-daily` · `POST /api/playlists/ai-generate` · `GET /api/analysis/cold-start?user_id=&n=30` |
 | 🔍 Анализ | `POST /api/analysis/search-by-text` (`embedding`/`keyword`) · `POST /api/scan/clap` |
@@ -196,7 +197,7 @@ cd deploy && docker compose up -d --build
 | `server/.env` | локальный запуск без Docker |
 | `web/.env.local` | локальный `npm run dev` (обычно не нужен — работает прокси `/api → backend`) |
 
-Ключевые: `MUTAGEN_WRITEBACK` · `YANDEX_MUSIC_TOKEN/THROTTLE` · `CLAP_ENABLED` · `ANALYSIS_MAX_TRACKS_PER_RUN=0` · `TASTE_VAULT_KEY` · `BRAIN_API_TOKEN`. В контейнерах Postgres принудительно (`DB_URL_OVERRIDE=""`), sqlite в Docker не используется.
+Ключевые: `MUTAGEN_WRITEBACK` · `YANDEX_MUSIC_TOKEN/THROTTLE` · `CLAP_ENABLED` · `CLAP_AUDIO_ENABLED` (CLAP в волне, вес `0.08`) · `ANALYSIS_MAX_TRACKS_PER_RUN=0` · `TASTE_VAULT_KEY` · `BRAIN_API_TOKEN`. В контейнерах Postgres принудительно (`DB_URL_OVERRIDE=""`), sqlite в Docker не используется.
 
 ### Полезное
 
