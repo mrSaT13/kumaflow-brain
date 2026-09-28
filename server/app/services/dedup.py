@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from collections import defaultdict
@@ -18,6 +19,7 @@ from app.core.logging import get_logger
 from app.db.models import (
     Favorite,
     Lyrics,
+    LocalFileLink,
     PlayEvent,
     PlayHistory,
     PlaylistTrack,
@@ -89,6 +91,95 @@ def exact_key(artist: str | None, title: str | None, duration: int | None) -> tu
     if duration is None:
         return ("notime", a, t)
     return ("dur", a, t, int(duration // 5))  # бакет 5с, точная проверка — по ±2с
+
+
+def _path_exists(path: str | None) -> bool:
+    """Файл реально лежит по этому пути на машине, где работает воркер.
+
+    Нужна, чтобы при слиянии перенести ПРАВИЛЬНЫЙ путь. У строки Navidrome
+    путь от имени чужой машины (Subsonic отдаёт путь сервера, а не воркера),
+    и воркер такого пути не видел. Критерий «какой путь непустой» был бы
+    неверным: импорт Navidrome заполняет path всегда, и выигрывал бы именно
+    чужой путь.
+
+    Одна проверка на трек и только в момент слияния — не горячий путь.
+    """
+    if not path or not str(path).strip():
+        return False
+    try:
+        return os.path.isfile(str(path))
+    except (OSError, ValueError):
+        return False
+
+
+def _dur_ok(a, b, tol: float = 2.0) -> bool:
+    """Длительности сходятся с точностью до tol секунд."""
+    try:
+        if a is None or b is None:
+            return False
+        return abs(float(a) - float(b)) <= tol
+    except (TypeError, ValueError):
+        return False
+
+
+def match_tier(a: dict, b: dict) -> str | None:
+    """Насколько уверенно две строки — одна и та же песня. None = не уверены.
+
+    Идея взята из AudioMuse-AI (`tasks/mediaserver/registry.py`,
+    `match_tier_rank_sql`): уверенность записывается в данные, а не
+    подразумевается. Там же у них слой «название + артист» есть, но
+    ВЫКЛЮЧЕН по умолчанию — и это правильно: два разных трека с одинаковым
+    названием склеиваются в один навсегда, и это необратимо.
+
+    Здесь та же логика, но под нашу пару «файл с диска ↔ трек Navidrome»:
+
+      exact_meta     — название + артист + альбом совпали И длительность ±2с.
+                       Это наш основной случай: теги одного файла против
+                       метаданных того же файла из Navidrome.
+      norm_meta      — название + артист совпали, длительность ±2с, альбом
+                       не учитываем (Navidrome мог назвать сборку иначе).
+      title_duration — совпало только название и длительность. НЕ
+                       склеиваем автоматически: артиста нет, а значит
+                       «Yellow» двух разных групп склеился бы в один.
+      None           — не уверены, в отчёт как «требует решения».
+
+    Чего тут нет и появится позже: уровня `fingerprint` (совпадение по
+    звуковому отпечатку). Он сильнее всех, но требует, чтобы ОБА трека были
+    проанализированы. Пока покрытие анализа неполное, его рано применять
+    автоматически — сначала он должен просто показывать кандидатов.
+    """
+    # Ключи в данных find_duplicate_groups — artist_name/album_name, но
+    # match_tier берётся и из других вызывающих мест, где может быть
+    # artist/album. Раньше читался только короткий вариант, и артист всегда
+    # выходил пустым: ЛЮБАЯ пара падала в title_duration, то есть в review,
+    # и автоматическое слияние не работало бы вообще. Тест это показал.
+    def _f(row: dict, *keys) -> str:
+        for k in keys:
+            v = row.get(k)
+            if v is not None and str(v).strip():
+                return str(v)
+        return ""
+
+    t1, a1 = norm_text(a.get("title")), norm_text(_f(a, "artist_name", "artist"))
+    al1 = norm_text(_f(a, "album_name", "album"))
+    t2, a2 = norm_text(b.get("title")), norm_text(_f(b, "artist_name", "artist"))
+    al2 = norm_text(_f(b, "album_name", "album"))
+    if not t1 or not t2 or t1 != t2:
+        return None
+    d_ok = _dur_ok(a.get("duration_sec"), b.get("duration_sec"))
+    if a1 and a1 == a2:
+        if al1 and al1 == al2 and d_ok:
+            return "exact_meta"
+        if d_ok:
+            return "norm_meta"
+        return None
+    if d_ok:
+        return "title_duration"
+    return None
+
+
+# Уровни, которые сливаются автоматически. title_duration и None — никогда.
+AUTO_MERGE_TIERS = ("exact_meta", "norm_meta")
 
 
 def find_duplicate_groups(db, limit_groups: int = 500) -> list[dict]:
@@ -168,7 +259,62 @@ def merge_tracks(db, keep_id: str, drop_ids: list[str]) -> dict:
     if not keep or not drops:
         return {"ok": False, "error": "track not found"}
 
+    # --- Защита от необратимой потери -------------------------------------
+    # external_id — это то, чем Navidrome-строка связана с плеером, и
+    # merge_tracks его НЕ переносит: строка просто удаляется. Значит если
+    # канонической окажется локальная копия, номер Navidrome исчезнет из базы
+    # навсегда, трек станет неиграбельным, и восстановить его можно будет
+    # только повторным импортом библиотеки. Раньше выбор канонического
+    # решался сортировкой (см. _source_rank), но на живых базах с уже
+    # слитыми неправильно строками и при автослиянии по чекбоксу повтор —
+    # это тихая и необратимая потеря. Поэтому проверяем здесь, независимо от
+    # того, кто вызвал слияние.
+    if is_local_source(keep.external_id):
+        _adopt = next((d for d in drops if not is_local_source(d.external_id)), None)
+        if _adopt is not None:
+            # Кто-то отдал слияние «не тем». Не спорим: меняем канонического
+            # местами. Все ссылки переедут на нового keep, а локальная строка
+            # станет дублем — ровно то, что нужно.
+            drops.append(keep)
+            keep = _adopt
+            logger.info("merge: каноническим сделан трек Navidrome {} вместо "
+                        "локальной копии", str(keep.id)[:8])
+        else:
+            # Локальных и играбельных в группе нет — сливать нечего опасного.
+            pass
+
+    # Страховка второго уровня: если канонической всё же осталась строка без
+    # номера Navidrome, а среди дублей номер есть —adoptим его. Тогда трек
+    # останется играбельным независимо от того, в каком порядке пришли id.
+    if is_local_source(keep.external_id) or not str(keep.external_id or "").strip():
+        _ext = next((str(d.external_id or "") for d in drops
+                     if not is_local_source(d.external_id)), None)
+        if _ext:
+            logger.info("merge {}: подставляем external_id Navidrome из дубля",
+                        str(keep.id)[:8])
+            keep.external_id = _ext[:128]
+
     total_plays = keep.play_count or 0
+    # Помечаем файлы с диска, чьи строки сейчас исчезнут, как «уже учтённые».
+    # Без этого стройка не держится: external_id локального трека — хэш пути, и
+    # сканер создаёт строку заново, если её нет в tracks (tasks/__init__.py,
+    # _scan_disk_music). Слил дубли — крон ночью вернул их, и через неделю всё
+    # выглядело бы так, будто чинить бесполезно. Здесь факт живёт на строке
+    # Navidrome и переживает удаление локальной копии.
+    _linked = 0
+    try:
+        for d in drops:
+            _ph = str(d.external_id or "")
+            if not is_local_source(_ph):
+                continue
+            try:
+                db.merge(LocalFileLink(path_hash=_ph, track_id=keep_id))
+                _linked += 1
+            except Exception:
+                continue
+    except Exception as e:  # noqa: BLE001 — слияние важнее пометки
+        logger.warning("merge {}: не удалось пометить файлы учтёнными: {}",
+                       keep_id[:8], e)
     for d in drops:
         total_plays += d.play_count or 0
         if d.starred:
@@ -180,6 +326,22 @@ def merge_tracks(db, keep_id: str, drop_ids: list[str]) -> dict:
         # обложка: добираем если у keep нет
         if not keep.cover_art_id and d.cover_art_id:
             keep.cover_art_id = d.cover_art_id
+        # Путь к файлу. У Navidrome-строки он ЧУЖОЙ: Subsonic отдаёт путь от
+        # имени своей машины, воркер такого пути не видел. Локальная строка —
+        # единственная, кто знает реальный путь на смонтированной папке, и без
+        # переноса мозг его терял. Нужно для пересчёта анализа (force) и для
+        # CLAP-эмбеддинга по аудио; при отсутствии файла их спасёт скачивание
+        # из Navidrome, но это медленно.
+        #
+        # Критерий — «какой путь существует», а не «какой непустой»: правило
+        # «если у keep пусто» почти не срабатывало, потому что импорт
+        # Navidrome заполняет path всегда, и выигрывал бы как раз чужой путь.
+        # Проверка одноразовая на трек при слиянии, не в горячем пути.
+        if d.path and not _path_exists(keep.path):
+            if _path_exists(d.path):
+                keep.path = d.path
+            elif not str(keep.path or "").strip():
+                keep.path = d.path
         if not keep.genre and d.genre:
             keep.genre = d.genre
         if not keep.year and d.year:
@@ -270,8 +432,10 @@ def merge_tracks(db, keep_id: str, drop_ids: list[str]) -> dict:
     for d in drops:
         db.delete(d)
     db.commit()
-    logger.info("merged {} dupes into {}: {}", len(drops), keep_id[:8], moved)
-    return {"ok": True, "keep_id": keep_id, "merged": len(drops), "moved": moved}
+    logger.info("merged {} dupes into {}: {}, files_marked={}", len(drops),
+                keep_id[:8], moved, _linked)
+    return {"ok": True, "keep_id": keep_id, "merged": len(drops), "moved": moved,
+            "files_marked": _linked}
 
 
 def auto_merge_exact(db, limit_groups: int = 2000) -> dict:
@@ -400,7 +564,19 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
     dry_run=True (по умолчанию) — только план, ничего не меняет.
     """
     groups = find_duplicate_groups(db, limit_groups=limit_groups)
+    # Кто из локальных копий уже посчитан: именно их фичи поедут на
+    # Navidrome-строку. Считаем заранее, чтобы в отчёте было видно, сколько
+    # работы переедет, а не сколько строк вообще исчезнет.
+    feat_ids: set[str] = set()
+    try:
+        from app.db.models import TrackFeatures
+
+        feat_ids = {str(r[0]) for r in db.query(TrackFeatures.track_id).all()}
+    except Exception:  # noqa: BLE001 — отчёт не должен падать из-за этого
+        pass
+
     plan: list[dict] = []
+    review: list[dict] = []
     for g in groups:
         members = g["tracks"]
         nav_members = [t for t in members if t["source"] == "navidrome"]
@@ -409,27 +585,63 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
         local_members = [t for t in members if t["source"] in ("disk", "demo")]
         if not local_members:
             continue
+        # Уверенность: сверяем КАЖДУЮ локальную копию с КАЖДЫМ треком
+        # Navidrome в группе и берём лучший уровень. Если ни одна пара не
+        # убедила — группа уходит в «требует решения» и НЕ сливается.
+        best_tier: str | None = None
+        best_pair: tuple[dict, dict] | None = None
+        for lv in sorted((t for t in local_members), key=lambda t: len(t["title"] or ""), reverse=True):
+            for nv in nav_members:
+                got = match_tier(lv, nv)
+                if got is None:
+                    continue
+                if best_tier is None or AUTO_MERGE_TIERS.index(got) < AUTO_MERGE_TIERS.index(best_tier):
+                    best_tier, best_pair = got, (lv, nv)
+            if best_tier == "exact_meta":
+                break
+        local_row, nav_row = best_pair if best_pair else (local_members[0], nav_members[0])
+        entry = {
+            "key": g["key"],
+            "title": nav_row.get("title") or local_row.get("title"),
+            "artist_name": nav_row.get("artist_name") or local_row.get("artist_name"),
+            "local_title": local_row.get("title"),
+            "local_artist": local_row.get("artist_name"),
+            "local_album": local_row.get("album_name"),
+            "nav_title": nav_row.get("title"),
+            "nav_album": nav_row.get("album_name"),
+            "local_dur": local_row.get("duration_sec"),
+            "nav_dur": nav_row.get("duration_sec"),
+            "tier": best_tier,
+        }
+        if best_tier not in AUTO_MERGE_TIERS:
+            # Сомнительно. Показываем, но НЕ трогаем: склейка необратима.
+            entry["reason"] = ("только название сошлось, артиста нет — такие "
+                               "не склеиваем автоматически")
+            review.append(entry)
+            continue
         keep = next((t for t in members if t["id"] == g["keep_id"]), None)
         if keep is not None and keep["source"] == "navidrome":
             # Уже правильно: Navidrome канонический, локальные — лишние.
-            plan.append({
-                "key": g["key"],
+            entry.update({
                 "keep_id": keep["id"],
                 "drop_ids": [t["id"] for t in local_members],
                 "drop_count": len(local_members),
+                "features_moving": sum(1 for t in local_members if t["id"] in feat_ids),
                 "action": "drop_local",
             })
         else:
             # Канонический — локальный. Чиним: Navidrome-член становится keep,
             # локальный уходит в drop вместе с остальными дублями.
-            plan.append({
-                "key": g["key"],
-                "keep_id": nav_members[0]["id"],
+            drops = [t for t in members if t["id"] != nav_row["id"]]
+            entry.update({
+                "keep_id": nav_row["id"],
                 "old_keep_id": g["keep_id"],
-                "drop_ids": [t["id"] for t in members if t["id"] != nav_members[0]["id"]],
-                "drop_count": len(members) - 1,
+                "drop_ids": [t["id"] for t in drops],
+                "drop_count": len(drops),
+                "features_moving": sum(1 for t in drops if t["id"] in feat_ids),
                 "action": "recannonicalize",
             })
+        plan.append(entry)
 
     if dry_run:
         return {
@@ -438,15 +650,26 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
             "recannonicalize": sum(1 for p in plan if p["action"] == "recannonicalize"),
             "drop_local": sum(1 for p in plan if p["action"] == "drop_local"),
             "tracks_to_merge": sum(p["drop_count"] for p in plan),
+            "features_to_move": sum(p["features_moving"] for p in plan),
+            "by_tier": {t: sum(1 for p in plan if p["tier"] == t)
+                        for t in ("exact_meta", "norm_meta")},
+            "needs_review": len(review),
+            "review_sample": review[:50],
             "plan": plan[:200],
+            "note": ("Сливаются только exact_meta и norm_meta — там совпали "
+                     "название, артист и длительность. Совпадения только по "
+                     "названию — в needs_review и не трогаются. Крупные слияния "
+                     "идут по одной песне с отдельным commit: можно "
+                     "остановить, состояние останется целым."),
         }
 
-    fixed = merged = 0
+    fixed = merged = feats = 0
     for p in plan:
         try:
             res = merge_tracks(db, p["keep_id"], p["drop_ids"])
             if res.get("ok"):
                 merged += res["merged"]
+                feats += p["features_moving"]
                 if p["action"] == "recannonicalize":
                     fixed += 1
         except Exception as e:  # noqa: BLE001 — одна битая группа не валит всё
@@ -458,4 +681,6 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
         "recannonicalize": fixed,
         "drop_local": sum(1 for p in plan if p["action"] == "drop_local"),
         "tracks_merged": merged,
+        "features_moved": feats,
+        "needs_review": len(review),
     }

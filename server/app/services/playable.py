@@ -26,9 +26,6 @@ from __future__ import annotations
 # Префиксы external_id, означающие «это не трек Navidrome».
 LOCAL_PREFIXES = ("disk:", "demo-")
 
-# Локальный адрес в поле url = демо, а не настоящий медиасервер.
-_DEMO_URLS = ("http://localhost", "https://localhost")
-
 
 def is_local_source(external_id: str | None) -> bool:
     """True, если id принадлежит локальному файлу, а не Navidrome."""
@@ -40,30 +37,83 @@ def is_playable(external_id: str | None) -> bool:
     return not is_local_source(external_id)
 
 
+# TTL проверки «есть ли играбельные треки», секунды. Проверка — это запрос
+# с LIKE по неиндексированному external_id, на 150k треков она не бесплатна,
+# а ответ меняется только при сканировании библиотеки.
+_EXIST_TTL_SEC = 60.0
+_exist_cache: dict = {"at": 0.0, "value": None}
+
+
+def has_playable_tracks(db) -> bool:
+    """Есть ли в базе хоть один трек, который Navidrome сможет отдать плееру.
+
+    Страховка для has_navidrome, а не самостоятельное условие. Смысл такой: если
+    играбельных треков нет, фильтр включать незачем — отбирать всё равно не из
+    чего, и плейлист вышел бы пустым. Благодаря этой проверке любое расхождение
+    между настройками и содержимым базы деградирует в «фильтр выключен», а не в
+    «пустая очередь».
+    """
+    import time as _t
+
+    now = _t.time()
+    if _exist_cache["value"] is not None and (now - _exist_cache["at"]) < _EXIST_TTL_SEC:
+        return bool(_exist_cache["value"])
+    try:
+        from sqlalchemy import and_, or_
+
+        from app.db.models import Track
+
+        playable_row = (
+            db.query(Track.id)
+            .filter(or_(
+                Track.external_id.is_(None),
+                and_(
+                    ~Track.external_id.like("disk:%"),
+                    ~Track.external_id.like("demo-%"),
+                ),
+            ))
+            .limit(1)
+            .first()
+        )
+        value = playable_row is not None
+    except Exception:  # noqa: BLE001 — не смогли проверить, не кэшируем
+        # Возвращаем True: решение принимает has_navidrome, а если БД лежит,
+        # запрос всё равно упадёт целиком. Кэшировать нельзя — иначе одна
+        # transient-ошибка зафиксировала бы неверное значение на минуту.
+        return True
+    _exist_cache["value"] = value
+    _exist_cache["at"] = now
+    return value
+
+
 def has_navidrome(db) -> bool:
-    """Настроен ли реальный Navidrome (не демо).
+    """Настроен ли реальный Navidrome (не демо) И есть что отдавать.
 
     От этого зависит, нужен ли фильтр вообще: без медиасервера локальный диск —
     единственная библиотека, и отсекать его нельзя.
+
+    Решение о «демо или реальный сервер» НЕ дублируется, а берётся из
+    media_server.is_real_config — того же, что использует resolve_active_server.
+    Своя проверка означала второе определение одного и того же понятия, и они
+    расходились: здесь дополнительно требовался непустой логин, а там нет.
+    Следствие было тихим — при реальном Navidrome с пустым логином фильтр
+    выключался, локальные файлы снова попадали в плейлист, и счёт 30 -> 23
+    возвращался без единой ошибки в логах.
+
+    Логин (`user`) здесь НЕ проверяется намеренно. Он нужен тем, кто ходит в
+    Navidrome по API (см. api/now_playing.py), потому что им нужны креды. Этот
+    модуль в Navidrome не ходит ни разу: он только решает, у трека есть номер
+    Navidrome или нет, и для такого решения логин не требуется.
     """
     try:
-        from app.services.media_server import get_media_server_config
+        from app.services.media_server import get_media_server_config, is_real_config
 
         cfg = get_media_server_config(db) or {}
     except Exception:  # noqa: BLE001 — нет настроек, считаем что Navidrome нет
         return False
-    url = str(cfg.get("url") or "").strip().lower()
-    user = str(cfg.get("user") or "").strip()
-    if not url or not user:
+    if not is_real_config(cfg):
         return False
-    # Демо — ровно заглушка http(s)://localhost (так сидит и в
-    # media_server.is_real_server, и в tasks при выборе демо-сида).
-    # Подстроку "demo" в хосте НЕ проверяем: реальный сервер вроде
-    # https://demo-music.example.com иначе ошибочно сошёл бы за демо
-    # и фильтр выключился бы.
-    if url in _DEMO_URLS:
-        return False
-    return True
+    return has_playable_tracks(db)
 
 
 def playable_filter(db):

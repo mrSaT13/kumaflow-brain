@@ -267,6 +267,7 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
     from app.db.models import Artist, Album
 
     artists_new = albums_new = tracks_cnt = skipped = 0
+    files_linked = 0
     # Сессия с autoflush=False: проверки .first() НЕ видят pending-объекты,
     # поэтому дубли внутри батча ловили UniqueViolation и откатывали всё.
     # Держим in-memory множества (заодно убираем 3 SELECT на файл).
@@ -274,6 +275,20 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
         seen_artists = {r[0] for r in db.query(Artist.external_id).filter_by(server_id=server_id).all()}
         seen_albums = {r[0] for r in db.query(Album.external_id).filter_by(server_id=server_id).all()}
         seen_tracks = {r[0] for r in db.query(Track.external_id).filter_by(server_id=server_id).all()}
+        # Файлы, уже приклеенные к треку Navidrome (services/dedup.py пишет их
+        # при слиянии). Без этой проверки слитая локальная копия воскресала бы
+        # при каждом сканировании: её external_id — хэш пути, и в tracks её
+        # больше нет, так что `t_ext in seen_tracks` был бы False. Читаем всю
+        # таблицу раз за запуск — она размером с библиотеку, а не с файлы.
+        linked_files: set[str] = set()
+        try:
+            from app.db.models import LocalFileLink as _LFL
+
+            linked_files = {r[0] for r in db.query(_LFL.path_hash).all()}
+        except Exception as e:
+            _append_log(run_id, "warn",
+                        f"учёт уже слитых файлов недоступен ({e}) — дубль может "
+                        f"вернуться при следующем сканировании")
         batch_seen: list[tuple[set, str]] = []  # что добавлено в текущем батче (для отката)
         for idx, path in enumerate(files):
             try:
@@ -303,6 +318,12 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
                 albums_new += 1
             if t_ext in seen_tracks:
                 skipped += 1
+            elif t_ext in linked_files:
+                # Файл уже учтён: его строка слита с треком Navidrome, а
+                # аудио-фичи переехали туда же. Создавать копию снова — значит
+                # снова получить «плейлист на 30, в плеере 23» и заново считать
+                # этот же файл. Считаем его обработанным, но не новым треком.
+                files_linked += 1
             else:
                 try:
                     size = path.stat().st_size
@@ -342,8 +363,15 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
                 except Exception:
                     pass
     _append_log(run_id, "info", f"С диска загружено: новых треков {tracks_cnt}, уже было {skipped}, новых альбомов {albums_new}, новых артистов {artists_new}")
+    if files_linked:
+        # Иначе по логу нельзя отличить «файлы уже слиты с Navidrome» от
+        # «файлы потерялись»: и то и другое выглядит как «новых треков 0».
+        _append_log(run_id, "info",
+                    f"Пропущено как уже слитые с Navidrome: {files_linked} "
+                    f"(фичи уехали на треки Navidrome, копии не создавались)")
     return {"files": len(files), "tracks": tracks_cnt, "artists": artists_new,
-            "albums": albums_new, "music_dir": music_dir}
+            "albums": albums_new, "music_dir": music_dir,
+            "already_linked": files_linked}
 
 
 def _to_int(v, default=None):

@@ -431,7 +431,38 @@ def library_source_report(db: Session = Depends(get_db)):
     """
     from app.services import dedup as _dd
 
-    return _dd.source_report(db)
+    rep = _dd.source_report(db)
+    # Сколько файлов сканер теперь не будет создавать повторно: строки слиты,
+    # а аудио-фичи живут на треках Navidrome. Ноль после слияния означал бы,
+    # что учёт не записался и дубли вернутся при следующем сканировании.
+    try:
+        from app.db.models import LocalFileLink
+
+        rep["linked_files"] = db.query(LocalFileLink).count()
+    except Exception:
+        rep["linked_files"] = None
+    return rep
+
+
+@router.post("/linked-files/reset", dependencies=[Depends(require_admin)])
+def reset_linked_files(payload: dict | None = None, db: Session = Depends(get_db)):
+    """Сбросить учёт слитых файлов: {dry_run=true} по умолчанию.
+
+    Аварийный клапан. Сканер не создаёт `disk:`-строку для файла, который уже
+    приклеен к треку Navidrome (иначе дубль воскресал бы при каждом
+    сканировании). Если слияние было ошибочным, этот сброс возвращает право
+    создать локальные копии заново — и следующее сканирование их создаст.
+    """
+    from app.db.models import LocalFileLink
+
+    dry = bool((payload or {}).get("dry_run", True))
+    total = db.query(LocalFileLink).count()
+    if dry:
+        return {"ok": True, "dry_run": True, "would_delete": total}
+    db.query(LocalFileLink).delete()
+    db.commit()
+    return {"ok": True, "dry_run": False, "deleted": total,
+            "hint": "запустите сканирование библиотеки — файлы вернутся как disk: треки"}
 
 
 @router.post("/recannonicalize", dependencies=[Depends(require_admin)])

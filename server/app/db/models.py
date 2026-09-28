@@ -430,6 +430,35 @@ class TasteProfile(Base):
     )
 
 
+class LocalFileLink(Base):
+    """Файл с диска, уже приклеенный к треку Navidrome.
+
+    Зачем. `external_id` локального трека — это хэш пути к файлу, и при
+    сканировании код спрашивает базу «есть ли такой файл?». Стройку дублей
+    удаляет — а следующее сканирование создаёт её заново, и через неделю всё
+    выглядит так, будто чинить бесполезно.
+
+    Здесь лежит сам факт «этот файл уже учтён», и лежит он на строке Navidrome,
+    поэтому переживает удаление локальной копии. Сканер спрашивает эту таблицу
+    перед созданием `disk:`-строки и не плодит дубликат.
+
+    CASCADE намеренный: если трек Navidrome удалён, ссылка исчезает и при
+    следующем сканировании файл вернётся в базу — так пропавший трек
+    восстанавливается сам, без ручного вмешательства.
+    """
+
+    __tablename__ = "local_file_links"
+
+    # external_id локального трека: "disk:" + sha1[:40].
+    path_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    track_id: Mapped[str] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class WaveSettings(Base):
     """Общие настройки «Моей волны» (user_id PK): одна волна на всех устройствах.
 
