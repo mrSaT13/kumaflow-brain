@@ -67,6 +67,11 @@ export default function Automation() {
   }
 
   const jobs = data?.jobs ?? [];
+  // 401/403 — это НЕ упавший backend, а токен: его нет в этом браузере,
+  // он удалён/выключен или выпущен для другого backend. Прямая проверка
+  // /api/cron/ в адресной строке всегда даст 401 — браузер не шлёт Bearer.
+  const cronErrMsg = error ? fmtErr(error) : "";
+  const cronAuthErr = /^40[13]:/.test(cronErrMsg);
   const { data: clap } = useSWR("/api/analysis/clap-status", () => api.clapStatus(), { refreshInterval: 30000 });
   const { data: auto, mutate: mutateAuto } = useSWR("/api/settings/automation", () => api.getAutomation(), { refreshInterval: 10000 });
   const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
@@ -228,12 +233,17 @@ export default function Automation() {
     <Card>
       {error && !data ? (
         <div className="text-sm">
-          <div className="text-red-500 font-medium">Не смог загрузить задачи: {fmtErr(error)}</div>
+          <div className="text-red-500 font-medium">Не смог загрузить задачи: {cronErrMsg}</div>
           <div className="text-xs text-muted mt-1">
-            Если backend работает (анализ идёт, «Моя волна» открывается) — скорее всего
-            не прошёл авторизацию. Проверьте в браузере <code className="kuma-pill">/api/cron/</code>,
-            <code className="kuma-pill">/api/cron/health</code> и логи backend:{" "}
-            <code className="kuma-pill">docker compose logs backend --tail=50</code>
+            {cronAuthErr ? (
+              <>Браузер не передал валидный brain-токен (адресная строка его тоже не шлёт —
+                проверка <code className="kuma-pill">/api/cron/health</code> в браузере всегда даст 401).
+                Выйдите и войдите заново, или вставьте токен в Настройки → Токены. Проверка токена:{" "}
+                <code className="kuma-pill">curl -H &quot;Authorization: Bearer $TOKEN&quot; http://&lt;host&gt;:8000/api/settings/whoami</code></>
+            ) : (
+              <>Если backend работает (анализ идёт, «Моя волна» открывается) — смотри логи backend:{" "}
+                <code className="kuma-pill">docker compose logs backend --tail=50</code></>
+            )}
           </div>
           <div className="mt-2">
             <Button variant="ghost" onClick={() => mutate()} disabled={busy}>Повторить</Button>
