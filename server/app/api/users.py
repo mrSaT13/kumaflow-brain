@@ -324,12 +324,24 @@ def seed_taste(user_id: str, payload: SeedTasteIn, db: Session = Depends(get_db)
     track_ids = [t for t in (payload.track_ids or []) if t][:200]
 
     fav_added = hist_added = 0
+    # Уже виденные в ЭТОМ запросе tid: без этого один и тот же трек
+    # (пересечение топов артиста+жанра) добавлялся в Favorite дважды
+    # до flush/commit и падал с IntegrityError (composite PK) → 500
+    # на кнопке «Обучить» при 10+ артистах.
+    seen_fav: set[str] = {
+        str(r[0]) for r in db.query(Favorite.track_id).filter_by(user_id=u.id).all()
+    }
 
     def _fav(tid: str) -> None:
         nonlocal fav_added
-        if db.query(Favorite).filter_by(user_id=u.id, track_id=tid).first() is None:
-            db.add(Favorite(user_id=u.id, track_id=tid))
-            fav_added += 1
+        tid = str(tid)
+        if tid in seen_fav:
+            return
+        seen_fav.add(tid)
+        # merge, а не add: идемпотентно и по identity-map сессии
+        # (двойной клик / повторный сид не роняет commit).
+        db.merge(Favorite(user_id=u.id, track_id=tid))
+        fav_added += 1
 
     def _hist(tid: str, n: int = 1) -> None:
         nonlocal hist_added
@@ -371,7 +383,13 @@ def seed_taste(user_id: str, payload: SeedTasteIn, db: Session = Depends(get_db)
                 _fav(str(tid))
             _hist(str(tid), 1)
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        # Гонка двух параллельных «Обучить»: второй commit может упереться
+        # в PK-конфликт. Откатываем и считаем то, что успело записаться, —
+        # вместо глухого 500 пользователь получает нормальный результат.
+        db.rollback()
     fav_total = db.query(Favorite).filter_by(user_id=u.id).count()
     return {
         "ok": True,

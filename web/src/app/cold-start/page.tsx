@@ -24,6 +24,32 @@ function coverUrlSmall(a: ArtistEntry): string | null {
   return null;
 }
 
+// Кружок артиста с честным фолбэком: если обложка не загрузилась
+// (битый cover id, нет файла) — показываем букву, а не пустой жёлтый круг.
+// Раньше onError просто прятал <img> и оставался пустой жёлтый кружок.
+function ArtistCircle({ name, img, size = "w-20 h-20" }: { name: string; img: string | null; size?: string }) {
+  const [broken, setBroken] = useState(false);
+  const showImg = img && !broken;
+  return (
+    <span
+      className={`${size} rounded-full overflow-hidden flex items-center justify-center transition-all`}
+      style={{
+        background: showImg ? "var(--surface)" : "color-mix(in srgb, var(--accent) 12%, var(--surface))",
+      }}
+    >
+      {showImg ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={img} alt={name} loading="lazy" className="w-full h-full object-cover"
+          onError={() => setBroken(true)}
+        />
+      ) : (
+        <span className="text-xl font-bold">{name.slice(0, 1).toUpperCase()}</span>
+      )}
+    </span>
+  );
+}
+
 function StepDots({ page }: { page: number }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -283,20 +309,14 @@ export default function ColdStartPage() {
                       >
                         <span className="relative">
                           <span
-                            className="w-16 h-16 rounded-full overflow-hidden flex items-center justify-center font-bold transition-all"
+                            className="block rounded-full transition-all"
                             style={{
-                              background: sImg ? "var(--surface)" : "color-mix(in srgb, var(--accent) 12%, var(--surface))",
                               outline: sSel ? "3px solid var(--accent)" : "2px solid var(--border)",
                               outlineOffset: 2,
+                              borderRadius: 9999,
                             }}
                           >
-                            {sImg ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img src={sImg} alt={s.name} loading="lazy" className="w-full h-full object-cover"
-                                onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
-                            ) : (
-                              <span className="text-xl">{s.name.slice(0, 1).toUpperCase()}</span>
-                            )}
+                            <ArtistCircle name={s.name} img={sImg} size="w-16 h-16" />
                           </span>
                           <span
                             className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold border-2"
@@ -327,7 +347,7 @@ export default function ColdStartPage() {
           ) : (artistsData?.items ?? []).length === 0 ? (
             <Card><div className="text-sm text-muted text-center py-8">Артисты не найдены. Попробуйте другой запрос или уберите фильтр жанров.</div></Card>
           ) : (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-x-4 gap-y-6">
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-x-4 gap-y-6 pb-20">
               {(artistsData?.items ?? []).map((a) => {
                 const sel = selectedArtists.includes(a.name);
                 const img = coverUrl(a);
@@ -335,20 +355,15 @@ export default function ColdStartPage() {
                   <div key={a.name} className="flex flex-col items-center gap-1.5">
                     <button onClick={() => toggleArtist(a)} className="relative transition-transform hover:scale-105 active:scale-95">
                       <span
-                        className="w-20 h-20 rounded-full overflow-hidden flex items-center justify-center transition-all bg-[#FFE066]"
+                        className="block rounded-full transition-all"
                         style={{
                           outline: sel ? "3px solid var(--accent)" : "3px solid transparent",
                           outlineOffset: 2,
                           boxShadow: sel ? "0 0 18px color-mix(in srgb, var(--accent) 45%, transparent)" : "0 4px 10px #0002",
+                          borderRadius: 9999,
                         }}
                       >
-                        {img ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={img} alt={a.name} loading="lazy" className="w-full h-full object-cover"
-                            onError={(e) => ((e.target as HTMLImageElement).style.display = "none")} />
-                        ) : (
-                          <Heart className="w-7 h-7 text-[#FF3B30]" fill="currentColor" />
-                        )}
+                        <ArtistCircle name={a.name} img={img} />
                       </span>
                       {sel && (
                         <span className="absolute -top-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center text-white"

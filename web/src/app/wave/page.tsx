@@ -129,26 +129,27 @@ export default function WavePage() {
   }
   const busyRef = useRef(false);
   busyRef.current = busy;
+  // Снапшот для единого тика: без них тик видел stale queue/idx из замыкания
+  // и либо не находил трек, либо перезапускался на каждое изменение очереди.
+  const queueRef = useRef<WaveTrack[]>([]);
+  queueRef.current = queue;
+  const idxRef = useRef(0);
+  idxRef.current = playingIdx;
 
   const ids = useMemo(() => users ?? [], [users]);
 
   const { data: profile } = useSWR(userId ? ["wave-moods", userId] : null, () => api.userProfile(userId));
-  // Handoff: где слушали на другом устройстве и с какой позиции продолжать.
-  const { data: resume } = useSWR(
-    userId ? ["wave-resume", userId] : null,
-    () => api.waveResume(userId),
-    { refreshInterval: 20000 },
-  );
+  // Handoff из того же слепка /live (без отдельного поллинга /resume:
+  // два поллинга видели разные снапшоты и «Сейчас» спорил с «Продолжить»).
+  const [liveMeta, setLiveMeta] = useState<{ position_sec?: number | null; device?: string | null; paused?: boolean }>({});
   const moodOptions = useMemo(() => (profile?.moods ?? []).map((m) => m.name), [profile]);
 
   const cur = queue[Math.min(playingIdx, queue.length - 1)] ?? null;
   const nxt = queue[Math.min(playingIdx + 1, queue.length - 1)] ?? null;
 
-  useEffect(() => {
-    const el = itemRefs.current.get(playingIdx);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [playingIdx, queue.length]);
-
+  // Автоскролл при смене playingIdx УБРАН: он и был «перепрыгиванием списка» —
+  // два тика (телефон 10с + Navidrome 15с) дёргали playingIdx туда-сюда и тянули
+  // за собой ленту. Скролл только по кнопке «К текущему».
   const scrollToCurrent = useCallback(() => {
     const el = itemRefs.current.get(playingIdx);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -244,6 +245,11 @@ export default function WavePage() {
               setQueue(deduped);
               setPlayingIdx(liveCurrentIdx(live, deduped));
               setPhoneAge(live.age_sec ?? null);
+              setLiveMeta({
+                position_sec: live.position_sec ?? null,
+                device: live.device ?? null,
+                paused: live.paused ?? false,
+              });
               setPhoneMirror(true);
               return;
             }
@@ -304,83 +310,115 @@ export default function WavePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playingIdx, queue.length, liveRefill, phoneMirror]);
 
-  // Очередь с телефона: мобила публикует её в POST /api/wave/publish,
-  // веб подхватывает и показывает как есть (свежесть < 5 мин).
-  // Но: если локально очередь меняли ПОСЛЕ публикации телефона (докрутка,
-  // клик) — старый слепок её не затирает, ждём свежей публикации.
+  // ЕДИНЫЙ тик внешних плееров: live + nowPlaying одним снапшотом раз в 10с.
+  // Раньше было два независимых интервала (телефон 10с, Navidrome 15с) —
+  // они видели разные публикации телефона и дёргали playingIdx туда-сюда:
+  // «Сейчас» показывал #6, а реально играл #1. Теперь приоритет один:
+  //   свежий телефон (<60с) — владелец очереди, его current побеждает;
+  //   телефон 60–300с — очередь его, но current может поправить Navidrome,
+  //     если трек из Navidrome есть в очереди;
+  //   телефона нет — Navidrome подсвечивает/перестраивает как раньше.
+  // Локальные правки (докрутка/клик) свежее публикации — слепок не затирает.
   useEffect(() => {
-    if (!followPhone || !userId) return;
+    if ((!followPhone && !followNavidrome) || !userId) return;
     let stop = false;
     const tick = async () => {
       try {
-        const live = await api.waveLive(userId);
+        const [live, np] = await Promise.all([
+          followPhone ? api.waveLive(userId).catch(() => null) : Promise.resolve(null),
+          followNavidrome ? api.nowPlaying(userId, 1).catch(() => null) : Promise.resolve(null),
+        ]);
         if (stop) return;
-        setPhoneAge(live.age_sec ?? null);
-        if (!live.queue?.length || (live.age_sec != null && live.age_sec > 300)) {
-          // Телефон молчит/протух — зеркалить нечего, очередь живёт сама.
-          setPhoneMirror(false);
-          return;
+        const snapQueue = queueRef.current;
+        const snapIdx = idxRef.current;
+
+        let nextQueue: WaveTrack[] | null = null;
+        let nextIdx: number | null = null;
+        let mirror = false;
+
+        if (live && live.queue?.length && (live.age_sec == null || live.age_sec <= 300)) {
+          setPhoneAge(live.age_sec ?? null);
+          setLiveMeta({
+            position_sec: live.position_sec ?? null,
+            device: live.device ?? null,
+            paused: live.paused ?? false,
+          });
+          const phoneTs = Date.now() - (live.age_sec ?? 0) * 1000;
+          if (lastLocalEdit.current <= phoneTs) {
+            const deduped = dedupLive(mapLiveQueue(live.queue));
+            const ids = deduped.map((t) => t.track_id).join("|");
+            if (snapQueue.map((t) => t.track_id).join("|") !== ids) {
+              nextQueue = deduped;
+            }
+            const base = nextQueue ?? snapQueue;
+            const baseIds = (nextQueue ?? deduped).map((t) => t.track_id).join("|");
+            void baseIds;
+            nextIdx = liveCurrentIdx(live, nextQueue ?? deduped);
+            void base;
+            mirror = true;
+            // Navidrome-коррекция при несвежем телефоне: плеер мог уйти вперёд,
+            // а телефон публикует редко. Только если трек Navidrome есть в очереди.
+            const extId = np?.playing?.track_id;
+            if (
+              extId && (live.age_sec ?? 0) > 60 &&
+              extId !== lastSyncedExternal.current
+            ) {
+              const target = (nextQueue ?? deduped).findIndex((t) => t.track_id === extId);
+              if (target >= 0 && target !== nextIdx) {
+                lastSyncedExternal.current = extId;
+                pendingEvents.current.push({ track_id: extId, action: "play" });
+                nextIdx = target;
+              }
+            } else if (extId) {
+              lastSyncedExternal.current = extId;
+            }
+          }
+        } else {
+          // Телефон молчит/протух — зеркалить нечего.
+          setPhoneAge(live?.age_sec ?? null);
+          if (live && !live.queue?.length) setLiveMeta({});
+          const extId = np?.playing?.track_id;
+          if (extId && extId !== lastSyncedExternal.current && snapQueue.length > 0) {
+            const idx = snapQueue.findIndex((t) => t.track_id === extId);
+            lastSyncedExternal.current = extId;
+            if (idx >= 0) {
+              if (idx !== snapIdx) {
+                pendingEvents.current.push({ track_id: extId, action: "play" });
+                nextIdx = idx;
+              }
+            } else if (!mirror) {
+              // Трека нет в очереди и это не зеркало — перестроить хвост.
+              try {
+                const r = await api.waveContinue({
+                  user_id: userId,
+                  queue: snapQueue.map((t) => t.track_id),
+                  current_track_id: extId,
+                  count: 10,
+                  settings: mood ? { mood } : {},
+                  recent_events: [...drainEvents(), { track_id: extId, action: "play" }],
+                });
+                if (stop) return;
+                nextQueue = appendFresh(snapQueue, (r.tracks ?? []) as WaveTrack[]).slice(0, 100);
+                touchLocal();
+              } catch {
+                /* внешний плеер молчит — очередь живёт сама */
+              }
+            }
+          }
         }
-        const phoneTs = Date.now() - (live.age_sec ?? 0) * 1000;
-        if (lastLocalEdit.current > phoneTs) return; // локальные правки свежее — не затираем
-        const deduped = dedupLive(mapLiveQueue(live.queue));
-        const ids = deduped.map((t) => t.track_id).join("|");
-        setQueue((prev) => {
-          if (prev.map((t) => t.track_id).join("|") === ids) return prev;
-          setPlayingIdx(liveCurrentIdx(live, deduped));
-          return deduped;
-        });
-        setPhoneMirror(true);
+
+        if (nextQueue) setQueue(nextQueue);
+        if (nextIdx != null && nextIdx !== idxRef.current) setPlayingIdx(nextIdx);
+        setPhoneMirror(mirror);
       } catch {
-        /* телефона нет в сети — живём своей очередью */
+        /* сеть молчит — очередь живёт сама */
       }
     };
     const id = setInterval(tick, 10000);
     void tick();
     return () => { stop = true; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [followPhone, userId]);
-
-  // Реал-тайм от внешнего плеера: что играет в Navidrome — подсвечиваем как current.
-  // В режиме зеркала телефона — ТОЛЬКО подсветка, без waveContinue: серверная
-  // докрутка поверх телефонного списка и есть то самое «очередь сбрасывается».
-  useEffect(() => {
-    if (!followNavidrome || !userId || queue.length === 0) return;
-    let stop = false;
-    const tick = async () => {
-      try {
-        const np = await api.nowPlaying(userId, 1);
-        const extId = np.playing?.track_id;
-        if (stop || !extId || extId === lastSyncedExternal.current) return;
-        const idx = queue.findIndex((t) => t.track_id === extId);
-        lastSyncedExternal.current = extId;
-        if (idx >= 0) {
-          if (idx !== playingIdx) {
-            pendingEvents.current.push({ track_id: extId, action: "play" });
-            setPlayingIdx(idx);
-          }
-        } else if (!phoneMirror) {
-          const r = await api.waveContinue({
-            user_id: userId,
-            queue: queue.map((t) => t.track_id),
-            current_track_id: extId,
-            count: 10,
-            settings: mood ? { mood } : {},
-            recent_events: [...drainEvents(), { track_id: extId, action: "play" }],
-          });
-          if (stop) return;
-          setQueue((prev) => appendFresh(prev, (r.tracks ?? []) as WaveTrack[]).slice(0, 100));
-          touchLocal();
-        }
-      } catch {
-        /* внешний плеер молчит — очередь живёт сама */
-      }
-    };
-    const id = setInterval(tick, 15000);
-    void tick();
-    return () => { stop = true; clearInterval(id); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [followNavidrome, userId, queue.length, mood, phoneMirror]);
+  }, [followPhone, followNavidrome, userId, mood]);
 
   const curLook = moodLook(cur?.mood ?? "");
   const CurIcon = curLook.icon;
@@ -421,175 +459,113 @@ export default function WavePage() {
       />
 
       {cur && (
-        <Section title="Сейчас → дальше">
-          {/* Sticky now-playing: всегда сверху при скролле страницы */}
-          <div className="sticky top-16 z-20">
-            <Card className="!p-3 sm:!p-4 shadow-md backdrop-blur bg-[color-mix(in_srgb,var(--surface)_88%,transparent)]">
-              <div className="flex items-center gap-3 min-w-0">
-                <button
-                  onClick={scrollToCurrent}
-                  className="flex items-center gap-3 min-w-0 flex-1 text-left group"
-                  title="Показать текущий в списке"
-                >
-                  <div className="relative shrink-0">
-                    <TrackCover
-                      trackId={cur.track_id}
-                      coverArtId={cur.cover_art_id}
-                      size={200}
-                      className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl"
-                    />
-                    <span className="absolute -bottom-1 -right-1 kuma-eq !h-3 bg-bg rounded-full px-1" aria-label="сейчас">
-                      <span /><span /><span />
+        <Section title="Сейчас играет">
+          <Card className="!p-3 sm:!p-4 shadow-md">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                onClick={scrollToCurrent}
+                className="flex items-center gap-3 min-w-0 flex-1 text-left group"
+                title="Показать текущий в списке"
+              >
+                <div className="relative shrink-0">
+                  <TrackCover
+                    trackId={cur.track_id}
+                    coverArtId={cur.cover_art_id}
+                    size={200}
+                    className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl"
+                  />
+                  <span className="absolute -bottom-1 -right-1 kuma-eq !h-3 bg-bg rounded-full px-1" aria-label="сейчас">
+                    <span /><span /><span />
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[11px] uppercase tracking-wider text-muted flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      #{playingIdx + 1} из {queue.length}
+                      {phoneMirror
+                        ? ` · телефон${phoneAge != null ? ` · ${phoneAge} сек назад` : ""}`
+                        : " · мозг"}
+                      {liveMeta.position_sec != null && phoneMirror
+                        ? ` · с ${fmtSec(liveMeta.position_sec)}${liveMeta.device ? ` · ${liveMeta.device}` : ""}${liveMeta.paused ? " · пауза" : ""}`
+                        : ""}
                     </span>
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[11px] uppercase tracking-wider text-muted flex items-center gap-2">
-                      <span className="inline-flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                        Сейчас · #{playingIdx + 1} из {queue.length}
-                      </span>
-                    </div>
-                    <div className="truncate font-semibold leading-tight group-hover:underline underline-offset-4">
-                      {cur.artist_name ? `${cur.artist_name} — ` : ""}{cur.title}
-                    </div>
-                    <div className="text-[11px] text-muted truncate" title={cur.reason}>
-                      {cur.reason || "—"} · скор {cur.score?.toFixed(2)}
-                    </div>
+                  <div className="truncate font-semibold leading-tight group-hover:underline underline-offset-4">
+                    {cur.artist_name ? `${cur.artist_name} — ` : ""}{cur.title}
                   </div>
+                  <div className="text-[11px] text-muted truncate" title={cur.reason}>
+                    {cur.reason || "—"} · скор {cur.score?.toFixed(2)}
+                  </div>
+                </div>
+              </button>
+              <span
+                className="inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow shrink-0"
+                style={{ background: curLook.bg }}
+              >
+                <CurIcon className="w-3.5 h-3.5" />
+                {cur.mood ?? "без настроения"}
+                {cur.energy != null && <span className="opacity-80 tabular-nums">⚡{cur.energy.toFixed(2)}</span>}
+              </span>
+              <ArrowRight className="w-4 h-4 text-muted shrink-0 hidden md:block" />
+              {nxt && nxt.track_id !== cur.track_id && (
+                <button onClick={() => markCurrent(playingIdx + 1)} className="hidden md:flex items-center gap-2 min-w-0 max-w-[260px] text-left opacity-80 hover:opacity-100 transition-opacity" title="Следующий — клик чтобы перейти">
+                  <TrackCover trackId={nxt.track_id} coverArtId={nxt.cover_art_id} size={100} className="w-9 h-9 rounded-lg" />
+                  <span className="min-w-0">
+                    <span className="block text-[10px] uppercase tracking-wider text-muted">Дальше</span>
+                    <span className="block truncate text-sm font-medium">{nxt.artist_name ? `${nxt.artist_name} — ` : ""}{nxt.title}</span>
+                  </span>
                 </button>
-                <span
-                  className="hidden sm:inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold text-white shadow shrink-0"
-                  style={{ background: curLook.bg }}
-                >
-                  <CurIcon className="w-3.5 h-3.5" />
-                  {cur.mood ?? "без настроения"}
-                  {cur.energy != null && <span className="opacity-80 tabular-nums">⚡{cur.energy.toFixed(2)}</span>}
-                </span>
-                <ArrowRight className="w-4 h-4 text-muted shrink-0 hidden md:block" />
-                {nxt && (
-                  <button onClick={() => markCurrent(playingIdx + 1)} className="hidden md:flex items-center gap-2 min-w-0 max-w-[260px] text-left opacity-80 hover:opacity-100 transition-opacity" title="Следующий — клик чтобы перейти">
-                    <TrackCover trackId={nxt.track_id} coverArtId={nxt.cover_art_id} size={100} className="w-9 h-9 rounded-lg" />
-                    <span className="min-w-0">
-                      <span className="block text-[10px] uppercase tracking-wider text-muted">Дальше</span>
-                      <span className="block truncate text-sm font-medium">{nxt.artist_name ? `${nxt.artist_name} — ` : ""}{nxt.title}</span>
-                    </span>
-                  </button>
-                )}
-              </div>
-              <div className="mt-2 h-1 rounded-full bg-border overflow-hidden" title={`Трек ${playingIdx + 1} из ${queue.length}`}>
-                <div
-                  className="h-full rounded-full transition-all"
-                  style={{ width: `${queue.length ? ((playingIdx + 1) / queue.length) * 100 : 0}%`, background: curLook.bg }}
-                />
-              </div>
-              <div className="mt-2 flex items-center gap-2 flex-wrap">
-                <span
-                  className="sm:hidden inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium text-white"
-                  style={{ background: curLook.bg }}
-                >
-                  <CurIcon className="w-3 h-3" />
-                  {cur.mood ?? "без настроения"}
-                </span>
-                <span className="text-[11px] text-muted">
-                  {cur.mood && nxt?.mood
-                    ? cur.mood === nxt.mood
-                      ? "держим вайб"
-                      : `переход: ${cur.mood} → ${nxt.mood}`
+              )}
+            </div>
+            <div className="mt-2 h-1 rounded-full bg-border overflow-hidden" title={`Трек ${playingIdx + 1} из ${queue.length}`}>
+              <div
+                className="h-full rounded-full transition-all"
+                style={{ width: `${queue.length ? ((playingIdx + 1) / queue.length) * 100 : 0}%`, background: curLook.bg }}
+              />
+            </div>
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] text-muted">
+                {cur.mood && nxt?.mood && nxt.track_id !== cur.track_id
+                  ? cur.mood === nxt.mood
+                    ? "держим вайб"
+                    : `переход: ${cur.mood} → ${nxt.mood}`
+                  : phoneMirror
+                    ? "очередь телефона — мозг не докручивает, пока не возьмёшь управление"
                     : "мозг подбирает по аудио + вкусу + коллаборативке"}
+              </span>
+              {followPhone && phoneMirror && phoneAge != null && phoneAge > 60 && (
+                <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title="Телефон давно не публиковал очередь — текущий трек может уже смениться">
+                  очередь {phoneAge} сек назад — возможно устарело
                 </span>
-                {followPhone && (cur.reason === "очередь телефона") && phoneAge != null && phoneAge > 60 && (
-                  <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title="Телефон давно не публиковал очередь — текущий трек может уже смениться">
-                    очередь {phoneAge} сек назад — возможно устарело
-                  </span>
-                )}
-                {drift?.severity && (
-                  <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title={drift.temp_banned_genres.length ? `Временно мимо: ${drift.temp_banned_genres.join(", ")}` : undefined}>
-                    остываем: {drift.consecutive_skips} скипа подряд — энергию вниз
-                  </span>
-                )}
-                {adaptive && (
-                  <span className="text-[11px] rounded-full border border-sky-300 px-2 py-0.5 text-sky-700 dark:text-sky-300" title="Мозг урезал пачку, чтобы новый вайб был слышен быстрее — маленькая пачка при смене настроения, полная в стабильном">
-                    быстрая пачка{lastBatch ? ` · +${lastBatch}` : ""}: {adaptive}
-                  </span>
-                )}
-              </div>
-            </Card>
-          </div>
-          <Card className="!py-3 mt-3">
-            <div className="flex items-center gap-4 flex-wrap text-xs text-muted">
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" checked={liveRefill} onChange={(e) => setLiveRefill(e.target.checked)} />
-                Авто-докрутка (осталось ≤{REFILL_THRESHOLD} — добрать +{lastBatch ?? 10})
-              </label>
-              <label className="flex items-center gap-1.5 cursor-pointer" title="Мобила шлёт очередь в POST /api/wave/publish — страница показывает её как есть, без своей докрутки. Свежая публикация телефона заменяет локальную очередь">
-                <input type="checkbox" checked={followPhone} onChange={(e) => setFollowPhone(e.target.checked)} />
-                Очередь с телефона{phoneAge != null && phoneAge <= 300 ? ` · ${phoneAge} сек назад` : ""}
-              </label>
-              <label className="flex items-center gap-1.5 cursor-pointer" title="Раз в 15 сек смотрим, что играет в Navidrome, и подсвечиваем">
-                <input type="checkbox" checked={followNavidrome} onChange={(e) => setFollowNavidrome(e.target.checked)} />
-                Подсвечивать, что играет в Navidrome
-              </label>
-              {busy && <span className="inline-flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> мозг докладывает…</span>}
-              {phoneMirror && (
-                <span className="text-[11px] rounded-full border border-emerald-300 px-2 py-0.5 text-emerald-700 dark:text-emerald-300" title="Очередь — зеркало телефона: авто-докрутка и перестройка по Navidrome выключены, хвост докручивает сам телефон через POST /api/wave/continue. Нажми «Взять управление» или кликни трек, чтобы рулить с веба.">
-                  зеркало телефона · мозг не докручивает
+              )}
+              {drift?.severity && (
+                <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title={drift.temp_banned_genres.length ? `Временно мимо: ${drift.temp_banned_genres.join(", ")}` : undefined}>
+                  остываем: {drift.consecutive_skips} скипа подряд — энергию вниз
+                </span>
+              )}
+              {adaptive && (
+                <span className="text-[11px] rounded-full border border-sky-300 px-2 py-0.5 text-sky-700 dark:text-sky-300" title="Мозг урезал пачку, чтобы новый вайб был слышен быстрее">
+                  быстрая пачка{lastBatch ? ` · +${lastBatch}` : ""}: {adaptive}
                 </span>
               )}
             </div>
           </Card>
-        </Section>
-      )}
-
-      {resume && resume.available && resume.track && (
-        <div className="h-4" />
-      )}
-      {resume && resume.available && resume.track && (
-        <Section title="Продолжить с другого устройства">
-          <Card>
-            <div className="flex items-center gap-3 flex-wrap">
-              <TrackCover trackId={resume.track.track_id} coverArtId={resume.track.cover_art_id} size={48} className="w-12 h-12 rounded-lg" />
-              <div className="min-w-0 flex-1">
-                <div className="font-medium text-sm truncate">
-                  {resume.track.title} — {resume.track.artist_name}
-                </div>
-                <div className="text-xs text-muted">
-                  {resume.position_sec != null ? `с ${fmtSec(resume.position_sec)}` : "позиция неизвестна"}
-                  {resume.device ? ` · устройство: ${resume.device}` : ""}
-                  {resume.paused ? " · на паузе" : ""}
-                  {resume.age_sec != null ? ` · ${Math.round(resume.age_sec / 60)} мин назад` : ""}
-                </div>
-                {resume.stale && (
-                  <div className="text-xs text-amber-500 mt-0.5">
-                    Данные устарели — очередь могла измениться. Продолжить можно, но сверься сначала.
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  disabled={busy}
-                  title="Взять эту очередь и трек себе"
-                  onClick={() => {
-                    touchLocal();
-                    setPhoneMirror(false);
-                    setQueue(
-                      [{ ...resume!.track!, score: 1, reason: "продолжение с другого устройства" } as unknown as WaveTrack,
-                      ...resume!.queue.map((id) => ({
-                        track_id: id, title: id, score: 0, reason: "очередь с другого устройства",
-                      } as unknown as WaveTrack))],
-                    );
-                    setPlayingIdx(0);
-                    toast(`Взято: «${resume!.track!.title}»${resume!.position_sec != null ? ` с ${fmtSec(resume.position_sec)}` : ""}`, "ok");
-                  }}
-                >
-                  Взять управление
-                </Button>
-              </div>
-            </div>
-            <div className="text-[11px] text-muted mt-2">
-              Мозг хранит позицию, которую прислал клиент (POST /api/wave/publish → position_sec).
-              Звук при этом не проходит через мозг: чтобы продолжить с 1:23, открой трек в своём плеере
-              и перемотай на 1:23.
+          <Card className="!py-3 mt-3">
+            <div className="flex items-center gap-4 flex-wrap text-xs text-muted">
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" checked={liveRefill} onChange={(e) => setLiveRefill(e.target.checked)} />
+                Авто-докрутка (≤{REFILL_THRESHOLD} — +{lastBatch ?? 10})
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer" title="Мобила шлёт очередь в POST /api/wave/publish — страница показывает её как есть. Свежая публикация заменяет локальную очередь">
+                <input type="checkbox" checked={followPhone} onChange={(e) => setFollowPhone(e.target.checked)} />
+                Телефон{phoneAge != null && phoneAge <= 300 ? ` · ${phoneAge} сек назад` : ""}
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer" title="Раз в 10 сек смотрим, что играет во внешнем плеере, и подсвечиваем">
+                <input type="checkbox" checked={followNavidrome} onChange={(e) => setFollowNavidrome(e.target.checked)} />
+                Navidrome
+              </label>
+              {busy && <span className="inline-flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> мозг докладывает…</span>}
             </div>
           </Card>
         </Section>

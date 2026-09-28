@@ -500,6 +500,8 @@ export const api = {
   waveLive: (user_id: string) =>
     http<{
       ok: boolean; user_id: string; current: number; age_sec?: number | null; stale?: boolean;
+      current_track_id?: string | null; position_sec?: number | null; duration_sec?: number | null;
+      device?: string | null; paused?: boolean;
       queue: { track_id: string; title: string; artist_name?: string; album_name?: string | null; genre?: string | null; cover_art_id?: string | null; reason: string; mood?: string | null; moods?: string[]; energy?: number | null; tempo?: number | null; like?: boolean | null }[];
     }>(`/api/wave/live?user_id=${encodeURIComponent(user_id)}`),
   waveFeedback: (params: { user_id?: string; days?: number; source?: string } = {}) => {

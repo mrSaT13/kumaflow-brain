@@ -300,12 +300,16 @@ def wave_live(user_id: str, request: Request, db: Session = Depends(get_db)):
     entry = _live_get(str(u.id))
     if not entry:
         return {'ok': True, 'user_id': str(u.id), 'queue': [], 'current': 0,
-                'age_sec': None}
+                'age_sec': None, 'current_track_id': None,
+                'position_sec': None, 'duration_sec': None,
+                'device': None, 'paused': False}
     age = _live_age(str(u.id), entry)
     if age > _LIVE_TTL_SEC:
         _live_pop(str(u.id))
         return {'ok': True, 'user_id': str(u.id), 'queue': [],
-                'current': 0, 'age_sec': int(age), 'stale': True}
+                'current': 0, 'age_sec': int(age), 'stale': True,
+                'current_track_id': None, 'position_sec': None,
+                'duration_sec': None, 'device': None, 'paused': False}
     tracks: list[dict] = []
     cur_idx = 0
     cur_raw = str(entry.get('current_track_id') or '')
@@ -369,10 +373,12 @@ def wave_live(user_id: str, request: Request, db: Session = Depends(get_db)):
                                               _Dis.track_id.in_(_ids)).all()}
     except Exception:
         pass
+    cur_tid: str | None = None
     for raw, t in found:
         tid = str(t.id)
         if cur_raw and (cur_raw == tid or cur_raw == str(raw)):
             cur_idx = len(tracks)
+            cur_tid = tid
         try:
             moods = list((feats[tid].mood_labels or [])) if tid in feats else []
         except Exception:
@@ -395,5 +401,19 @@ def wave_live(user_id: str, request: Request, db: Session = Depends(get_db)):
                        'energy': energy, 'tempo': tempo,
                        'like': True if tid in liked else (False if tid in disliked else None),
                        'reason': 'очередь телефона'})
+    # Handoff-поля из того же слепка (чтобы веб не дёргал /resume
+    # отдельным поллингом и не видел другой снапшот, чем /live):
+    # current_track_id — резолвленный uuid текущего, position/device/paused —
+    # как прислал клиент в /publish.
+    def _pos(v):
+        try:
+            return max(0, int(v)) if v is not None else None
+        except (TypeError, ValueError):
+            return None
     return {'ok': True, 'user_id': str(u.id), 'queue': tracks,
-            'current': cur_idx, 'age_sec': int(age)}
+            'current': cur_idx, 'age_sec': int(age),
+            'current_track_id': cur_tid,
+            'position_sec': _pos(entry.get('position_sec')),
+            'duration_sec': _pos(entry.get('duration_sec')),
+            'device': entry.get('device'),
+            'paused': bool(entry.get('paused'))}
