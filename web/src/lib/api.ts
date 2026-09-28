@@ -80,6 +80,8 @@ export type WaveResume = {
   stale: boolean;
   age_sec: number | null;
   device: string | null;
+  device_id?: string | null;
+  devices?: { device_id: string; device: string | null; age_sec: number; queue_len: number; paused: boolean }[];
   paused: boolean;
   reason?: string;
   track: {
@@ -497,13 +499,18 @@ export const api = {
   // продолжает прослушивание с того же места (GET /api/wave/resume).
   wavePublish: (body: { user_id: string; queue: string[]; current_track_id?: string | null; position_sec?: number | null; duration_sec?: number | null; device?: string; paused?: boolean }) =>
     http<{ ok: boolean; queued: number }>(`/api/wave/publish`, { method: "POST", body: JSON.stringify(body) }),
-  waveLive: (user_id: string) =>
-    http<{
+  /** Живой слот плеера. device_id — стабильный id плеера; без него — самый свежий слот. */
+  waveLive: (user_id: string, device_id?: string | null) => {
+    const q = new URLSearchParams({ user_id });
+    if (device_id) q.set("device", device_id);
+    return http<{
       ok: boolean; user_id: string; current: number; age_sec?: number | null; stale?: boolean;
       current_track_id?: string | null; position_sec?: number | null; duration_sec?: number | null;
-      device?: string | null; paused?: boolean;
+      device?: string | null; device_id?: string | null; paused?: boolean;
+      devices?: { device_id: string; device: string | null; age_sec: number; queue_len: number; paused: boolean }[];
       queue: { track_id: string; title: string; artist_name?: string; album_name?: string | null; genre?: string | null; cover_art_id?: string | null; reason: string; mood?: string | null; moods?: string[]; energy?: number | null; tempo?: number | null; like?: boolean | null }[];
-    }>(`/api/wave/live?user_id=${encodeURIComponent(user_id)}`),
+    }>(`/api/wave/live?${q.toString()}`);
+  },
   waveFeedback: (params: { user_id?: string; days?: number; source?: string } = {}) => {
     const q = new URLSearchParams();
     if (params.user_id) q.set("user_id", params.user_id);
@@ -512,8 +519,11 @@ export const api = {
     const qs = q.toString();
     return http<WaveFeedback>(`/api/wave/feedback${qs ? `?${qs}` : ""}`);
   },
-  waveResume: (user_id: string) =>
-    http<WaveResume>(`/api/wave/resume?user_id=${encodeURIComponent(user_id)}`),
+  waveResume: (user_id: string, device_id?: string | null) => {
+    const q = new URLSearchParams({ user_id });
+    if (device_id) q.set("device", device_id);
+    return http<WaveResume>(`/api/wave/resume?${q.toString()}`);
+  },
   listCron: () =>
     http<{ jobs: CronJob[] }>(`/api/cron/`),
   /** «Жив ли планировщик» — зовём, когда список задач не пришёл. */

@@ -338,13 +338,12 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
     # трек из Navidrome, а клиент реально играл другой.
     if brain_user is not None:
         try:
-            from app.api.wave import _live_age as _w_age
-            from app.api.wave import _live_get as _w_get
+            from app.api.wave import _live_latest as _w_latest
             from app.services.track_resolve import get_track as _gt
 
-            entry = _w_get(str(brain_user.id))
+            _slot, entry, age = _w_latest(str(brain_user.id))
             if entry and (entry.get("queue") or []):
-                age = _w_age(str(brain_user.id), entry)
+                age = float(age or 0)
                 if age <= 300:
                     q = [str(x) for x in (entry.get("queue") or []) if str(x)]
                     cur_raw = str(entry.get("current_track_id") or "") or (q[0] if q else "")

@@ -142,6 +142,26 @@ export default function WavePage() {
   // Handoff из того же слепка /live (без отдельного поллинга /resume:
   // два поллинга видели разные снапшоты и «Сейчас» спорил с «Продолжить»).
   const [liveMeta, setLiveMeta] = useState<{ position_sec?: number | null; device?: string | null; paused?: boolean }>({});
+  // Плеер, за которым следим: null = авто (самый свежий слот), иначе device_id.
+  // Гонка «много устройств — мозг не знает что показать» решается именно тут:
+  // каждый плеер пишет в СВОЙ слот, веб зеркалит один выбранный.
+  const [deviceSel, setDeviceSel] = useState<string | null>(null);
+  const [devices, setDevices] = useState<{ device_id: string; device: string | null; age_sec: number; queue_len: number; paused: boolean }[]>([]);
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(`wave-device:${userId}`);
+      setDeviceSel(v || null);
+    } catch { setDeviceSel(null); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+  function pinDevice(id: string | null) {
+    setDeviceSel(id);
+    try {
+      if (id) localStorage.setItem(`wave-device:${userId}`, id);
+      else localStorage.removeItem(`wave-device:${userId}`);
+    } catch { /* приватный режим */ }
+    lastLocalEdit.current = 0; // смена плеера — разрешаем свежий слепок сразу
+  }
   const moodOptions = useMemo(() => (profile?.moods ?? []).map((m) => m.name), [profile]);
 
   const cur = queue[Math.min(playingIdx, queue.length - 1)] ?? null;
@@ -311,23 +331,38 @@ export default function WavePage() {
   }, [playingIdx, queue.length, liveRefill, phoneMirror]);
 
   // ЕДИНЫЙ тик внешних плееров: live + nowPlaying одним снапшотом раз в 10с.
-  // Раньше было два независимых интервала (телефон 10с, Navidrome 15с) —
-  // они видели разные публикации телефона и дёргали playingIdx туда-сюда:
-  // «Сейчас» показывал #6, а реально играл #1. Теперь приоритет один:
-  //   свежий телефон (<60с) — владелец очереди, его current побеждает;
-  //   телефон 60–300с — очередь его, но current может поправить Navidrome,
+  // Слот плеера выбирается селектором (deviceSel) или авто (самый свежий).
+  // Каждый плеер пишет в СВОЙ слот — слоты друг друга не затирают, поэтому
+  // «Сейчас #6 vs Продолжить #1» больше невозможно: веб зеркалит один слот.
+  // Приоритет внутри слота:
+  //   свежий слот (<60с) — владелец очереди, его current побеждает;
+  //   слот 60–300с — очередь его, но current может поправить Navidrome,
   //     если трек из Navidrome есть в очереди;
-  //   телефона нет — Navidrome подсвечивает/перестраивает как раньше.
+  //   слота нет — Navidrome подсвечивает/перестраивает как раньше.
   // Локальные правки (докрутка/клик) свежее публикации — слепок не затирает.
+  const deviceSelRef = useRef<string | null>(null);
+  deviceSelRef.current = deviceSel;
   useEffect(() => {
     if ((!followPhone && !followNavidrome) || !userId) return;
     let stop = false;
     const tick = async () => {
       try {
+        const sel = deviceSelRef.current;
         const [live, np] = await Promise.all([
-          followPhone ? api.waveLive(userId).catch(() => null) : Promise.resolve(null),
+          followPhone ? api.waveLive(userId, sel).catch(() => null) : Promise.resolve(null),
           followNavidrome ? api.nowPlaying(userId, 1).catch(() => null) : Promise.resolve(null),
         ]);
+        if (stop) return;
+        if (live?.devices) setDevices(live.devices);
+        // Закреплённый плеер протух, а другой жив — уходим в авто,
+        // иначе веб вечно показывает мёртвый слот («мозг не знает что показать»).
+        if (sel && (!live?.queue?.length) && (live?.devices?.length ?? 0) > 0) {
+          const other = (live?.devices ?? []).find((d) => d.device_id !== sel && d.age_sec <= 300);
+          if (other) {
+            pinDevice(null);
+            return;
+          }
+        }
         if (stop) return;
         const snapQueue = queueRef.current;
         const snapIdx = idxRef.current;
@@ -418,7 +453,7 @@ export default function WavePage() {
     void tick();
     return () => { stop = true; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [followPhone, followNavidrome, userId, mood]);
+  }, [followPhone, followNavidrome, userId, mood, deviceSel]);
 
   const curLook = moodLook(cur?.mood ?? "");
   const CurIcon = curLook.icon;
@@ -484,7 +519,7 @@ export default function WavePage() {
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                       #{playingIdx + 1} из {queue.length}
                       {phoneMirror
-                        ? ` · телефон${phoneAge != null ? ` · ${phoneAge} сек назад` : ""}`
+                        ? ` · ${(liveMeta.device || deviceSel || "плеер").slice(0, 24)}${phoneAge != null ? ` · ${phoneAge} сек назад` : ""}`
                         : " · мозг"}
                       {liveMeta.position_sec != null && phoneMirror
                         ? ` · с ${fmtSec(liveMeta.position_sec)}${liveMeta.device ? ` · ${liveMeta.device}` : ""}${liveMeta.paused ? " · пауза" : ""}`
@@ -557,10 +592,30 @@ export default function WavePage() {
                 <input type="checkbox" checked={liveRefill} onChange={(e) => setLiveRefill(e.target.checked)} />
                 Авто-докрутка (≤{REFILL_THRESHOLD} — +{lastBatch ?? 10})
               </label>
-              <label className="flex items-center gap-1.5 cursor-pointer" title="Мобила шлёт очередь в POST /api/wave/publish — страница показывает её как есть. Свежая публикация заменяет локальную очередь">
+              <label className="flex items-center gap-1.5 cursor-pointer" title="Каждый плеер шлёт очередь в POST /api/wave/publish в СВОЙ слот (device) — страница зеркалит выбранный ниже плеер">
                 <input type="checkbox" checked={followPhone} onChange={(e) => setFollowPhone(e.target.checked)} />
-                Телефон{phoneAge != null && phoneAge <= 300 ? ` · ${phoneAge} сек назад` : ""}
+                Плееры{phoneAge != null && phoneAge <= 300 ? ` · ${phoneAge} сек назад` : ""}
               </label>
+              {devices.length > 1 && (
+                <span className="flex items-center gap-1.5 flex-wrap" title="Каждый плеер — свой слот очереди. Авто = самый свежий. Клик — закрепить плеер">
+                  <button
+                    onClick={() => pinDevice(null)}
+                    className={`kuma-pill transition-colors ${deviceSel == null ? "!bg-text !text-bg font-semibold" : "hover:text-text"}`}
+                  >
+                    Авто
+                  </button>
+                  {devices.map((d) => (
+                    <button
+                      key={d.device_id}
+                      onClick={() => pinDevice(d.device_id)}
+                      className={`kuma-pill transition-colors ${deviceSel === d.device_id ? "!bg-text !text-bg font-semibold" : "hover:text-text"}`}
+                      title={`${d.queue_len} треков · ${d.age_sec} сек назад${d.paused ? " · пауза" : ""}`}
+                    >
+                      {(d.device || d.device_id).slice(0, 18)}{d.age_sec <= 300 ? ` · ${d.age_sec}с` : " · молчит"}
+                    </button>
+                  ))}
+                </span>
+              )}
               <label className="flex items-center gap-1.5 cursor-pointer" title="Раз в 10 сек смотрим, что играет во внешнем плеере, и подсвечиваем">
                 <input type="checkbox" checked={followNavidrome} onChange={(e) => setFollowNavidrome(e.target.checked)} />
                 Navidrome
