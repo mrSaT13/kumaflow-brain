@@ -197,15 +197,24 @@ def match_tier(a: dict, b: dict) -> str | None:
     al2 = norm_text(_f(b, "album_name", "album"))
     if not t1 or not t2 or t1 != t2:
         return None
-    d_tight = _dur_tight(a.get("duration_sec"), b.get("duration_sec"))
-    d_loose = _dur_loose(a.get("duration_sec"), b.get("duration_sec"))
+    d1 = a.get("duration_sec")
+    d2 = b.get("duration_sec")
+    d_tight = _dur_tight(d1, d2)
+    d_loose = _dur_loose(d1, d2)
+    # Длительности нет — это НЕ доказательство различия. Раньше здесь
+    # получалось False, и файл уезжал в «требует решения»: на живой
+    # библиотеке это уводило в отчёт около 65 тысяч пар из 76 тысяч, то
+    # есть отчёт показывал 10 тысяч и молчал про остальные. Отсутствие
+    # данных должно понижать уверенность на ступень, а не отправлять
+    # человека разбирать каждую песню.
+    d_missing = _dur_delta(d1, d2) is None
     if a1 and a1 == a2:
         if al1 and al1 == al2 and d_tight:
             return "exact_meta"
-        if d_loose:
+        if d_loose or d_missing:
             return "norm_meta"
         return None
-    if d_loose:
+    if d_loose or d_missing:
         return "title_duration"
     return None
 
@@ -630,6 +639,18 @@ def source_report(db) -> dict:
         by_tier[p["tier"]] = by_tier.get(p["tier"], 0) + 1
 
     with_features = db.query(TrackFeatures.track_id).count()
+    no_dur = sum(1 for p in safe if p.get("nav_dur") is None)
+    # САМОПРОВЕРКА ОТЧЁТА. Первый прогон на живой библиотеке дал 204 «слить
+    # можно» и 1 519 «сирот» — а локальных файлов было 77 912. То есть 76
+    # тысяч молча не попали ни в одну категорию, и это выглядело как правда,
+    # потому что невязавшиеся просто не показывались. Такую арифметику обязан
+    # считать сам отчёт, а не человек глазами.
+    accounted = len(safe) + len(weak) + len(cands["local_orphans"])
+    unaccounted = cands["local_total"] - accounted
+    if unaccounted:
+        logger.warning("source_report: не учтено {} локальных файлов из {} — "
+                       "вероятно, пустой артист или название", unaccounted,
+                       cands["local_total"])
     return {
         "total": cands["local_total"] + cands["nav_total"],
         "navidrome": cands["nav_total"],
@@ -640,6 +661,12 @@ def source_report(db) -> dict:
         "cross_source_groups": len(pairs),
         "by_tier": by_tier,
         "needs_review": len(weak),
+        "pairs_without_duration": no_dur,
+        # Четыре числа обязаны дать local. Если не дают — отчёт врёт, и это
+        # должно быть видно сразу, а не через месяц на живых данных.
+        "accounted": accounted,
+        "unaccounted": unaccounted,
+        "balances": unaccounted == 0,
         "review_samples": [
             {"title": p.get("title"), "artist_name": p.get("artist_name"),
              "local_dur": p.get("duration_sec"), "nav_dur": p.get("nav_dur"),
@@ -649,9 +676,8 @@ def source_report(db) -> dict:
         "with_features": with_features,
         "note": ("Локальные копии с двойником в Navidrome можно слить в пользу "
                  "Navidrome — фичи переедут, плеер получит id. Без двойника "
-                 "трогать нельзя: это единственные носители файла. Совпадения "
-                 "слабее exact_meta/norm_meta — в needs_review, автоматом не "
-                 "сливаются."),
+                 "трогать нельзя: это единственные носители файла. Слабые "
+                 "совпадения — в needs_review, автоматом не сливаются."),
     }
 
 

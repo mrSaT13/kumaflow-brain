@@ -447,11 +447,39 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
         </div>
       }
     >
-      {src && (src.local_with_navidrome_twin > 0 || src.needs_recannonicalize > 0 || src.local_orphans_no_twin > 0) && (
+      {src && (src.local_with_navidrome_twin > 0 || src.needs_review > 0 || src.local_orphans_no_twin > 0) && (
         <div className="mb-3 rounded-lg border border-warn/30 bg-warn/5 p-4 text-sm">
           <div className="font-medium text-text mb-1">
             Две библиотеки в одной: {src.navidrome} треков Navidrome и {src.local} локальных файлов
           </div>
+          {/* Все числа подряд. Первый прогон показывал 204 и 1519 при 77912
+              файлах — и выглядело это как правда, потому что 76 тысяч молча
+              не попадали ни в одну категорию. Расхождение должно быть видно
+              сразу, а не через месяц. */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-xs">
+            <div className="rounded border border-line px-2 py-1">
+              <div className="text-muted">Слить автоматом</div>
+              <div className="text-text font-medium">{src.local_with_navidrome_twin}</div>
+            </div>
+            <div className="rounded border border-line px-2 py-1">
+              <div className="text-muted">Требует решения</div>
+              <div className="text-text font-medium">{src.needs_review}</div>
+            </div>
+            <div className="rounded border border-line px-2 py-1">
+              <div className="text-muted">Сироты (файла нет в Navidrome)</div>
+              <div className="text-text font-medium">{src.local_orphans_no_twin}</div>
+            </div>
+            <div className={`rounded border px-2 py-1 ${src.balances === false ? "border-warn" : "border-line"}`}>
+              <div className="text-muted">Не учтено (норма — 0)</div>
+              <div className="text-text font-medium">{src.unaccounted ?? "—"}</div>
+            </div>
+          </div>
+          {src.by_tier && (
+            <div className="text-xs text-muted mb-3">
+              Уровни совпадения: точных {src.by_tier.exact_meta ?? 0}, близких {src.by_tier.norm_meta ?? 0}
+              {src.pairs_without_duration ? `, без длительности у Navidrome ${src.pairs_without_duration}` : ""}.
+            </div>
+          )}
           <div className="text-muted mb-3">
             Локальные файлы нужны только ради аудио-фичей, которые Navidrome не отдаёт. Но у них нет
             его id, поэтому при выгрузке плейлиста они молча выбрасываются — вот откуда «создал 30,

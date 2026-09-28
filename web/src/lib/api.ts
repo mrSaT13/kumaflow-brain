@@ -632,7 +632,12 @@ export const api = {
       local_with_navidrome_twin: number;
       local_orphans_no_twin: number;
       cross_source_groups: number;
-      needs_recannonicalize: number;
+      by_tier: { exact_meta?: number; norm_meta?: number };
+      needs_review: number;
+      pairs_without_duration: number;
+      accounted: number;
+      unaccounted: number;
+      balances: boolean;
       with_features: number;
       orphan_samples: { id: string; title: string; artist_name: string }[];
       note: string;
