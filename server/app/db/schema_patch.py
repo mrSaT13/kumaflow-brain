@@ -27,8 +27,8 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("cron_jobs", "last_started_at", "TIMESTAMP"),
     ("cron_jobs", "last_finished_at", "TIMESTAMP"),
     ("cron_jobs", "next_run_at", "TIMESTAMP"),
-    ("cron_jobs", "run_count", "INTEGER"),
-    ("cron_jobs", "fail_count", "INTEGER"),
+    ("cron_jobs", "run_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("cron_jobs", "fail_count", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -74,4 +74,14 @@ def ensure_columns(engine) -> list[str]:
             _lg.getLogger("db").info("schema patch: добавлены колонки {}", added)
         except Exception:
             pass
+    # Backfill: на живых базах run_count/fail_count могли создаться nullable
+    # (старый патч делал bare INTEGER) и уже содержат NULL, который ORM
+    # считает non-Optional. Приводим к 0, чтобы чтение не давало None.
+    try:
+        if "cron_jobs" in existing_tables:
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE cron_jobs SET run_count=0 WHERE run_count IS NULL"))
+                conn.execute(text("UPDATE cron_jobs SET fail_count=0 WHERE fail_count IS NULL"))
+    except Exception:
+        pass
     return added

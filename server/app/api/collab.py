@@ -53,7 +53,7 @@ def recommend(user_id: str, n: int = 30, db: Session = Depends(get_db)):
 
 
 @router.post("/compare")
-def compare_users(payload: dict, request: Request = None, db: Session = Depends(get_db)):
+def compare_users(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Сравнение вкусов N пользователей: общие жанры/артисты/треки + попарные связи.
 
     Body: {user_ids: [uuid...2-10], top_n=12}.
@@ -81,9 +81,9 @@ def compare_users(payload: dict, request: Request = None, db: Session = Depends(
     # Привязка к пользователю: id приходят в теле, а enforce_user_binding
     # смотрит только path-параметр. Без этой проверки per-user токен обычного
     # пользователя читал бы вкусы любого — ровно то, что закрыто в users.py.
-    from app.core.auth import _auth_state
-
-    _info = _auth_state(request, None) if request is not None else None
+    # info берём из request.state (выставил require_brain_auth): повторный
+    # _auth_state(request, None) игнорировал Bearer-заголовок и давал обход.
+    _info = getattr(getattr(request, "state", None), "brain_token", None)
     if _info is not None and not _info.get("is_admin"):
         _owner = _info.get("owner_user_id")
         if _owner and any(u != str(_owner) for u in uids):

@@ -593,7 +593,9 @@ def whoami(request: Request, db: Session = Depends(get_db)):
             got = auth[7:].strip()
     except Exception:
         got = ""
-    if got and env_token and got == env_token:
+    import hmac as _hmac
+
+    if got and env_token and _hmac.compare_digest(got, env_token):
         return {"ok": True, "logged_in": True, "is_admin": True,
                 "owner_user_id": None, "prefix": "env",
                 "locked": True, "tokens_exist": total > 0, "env_configured": True}

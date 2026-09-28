@@ -477,8 +477,8 @@ class CronJob(Base):
     last_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    run_count: Mapped[int] = mapped_column(default=0)
-    fail_count: Mapped[int] = mapped_column(default=0)
+    run_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
 
 class AppSetting(Base):

@@ -272,14 +272,19 @@ def wave_feedback(user_id: str | None = None, request: Request = None, days: int
         #     Раньше здесь стоял 403, из-за чего выбор «все пользователи» в UI
         #     упирался в ошибку на любой стенде без BRAIN_API_TOKEN.
         #   * info есть     → админ видит всех, остальные только себя.
-        from app.core.auth import _auth_state
-
-        info = _auth_state(request, None) if request is not None else None
+        # Берём info из request.state (его уже выставил require_scope и он
+        # понимает и Bearer-заголовок, и ?token=). Повторный вызов
+        # _auth_state(request, None) здесь был дырой: creds=None игнорировал
+        # заголовок, header-юзер получал info=None и видел чужие данные.
+        info = getattr(getattr(request, "state", None), "brain_token", None) \
+            if request is not None else None
         if info is None:
             target = None
         elif not info.get("is_admin"):
             owner = (info or {}).get("owner_user_id")
-            target = str(owner) if owner else None
+            if not owner:
+                raise HTTPException(403, "token bound to another user")
+            target = str(owner)
         else:
             target = None
     return {'ok': True, **_rfb.summary(db, user_id=target, days=days, source=source)}
