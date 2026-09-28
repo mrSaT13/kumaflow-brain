@@ -131,7 +131,11 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
     (иначе на 80k треков — десятки тысяч SQL-запросов).
     """
     with session_scope() as db:
-        target = db.get(Track, track_id)
+        # track_id — uuid ИЛИ external_id (Navidrome song id от плееров):
+        # db.get напрямую ронял бы PG на не-UUID строке, резолвим безопасно.
+        from app.services.track_resolve import get_track as _gt
+
+        target = _gt(db, track_id)
         if not target:
             return []
         f_t = db.get(TrackFeatures, target.id)
@@ -229,6 +233,9 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
                 "title": r.title,
                 "artist_name": r.artist_name,
                 "album_name": r.album_name,
+                # external_id = Navidrome song id: плееры маппят ответ
+                # в локальную библиотеку и играют сразу, без search().
+                "external_id": getattr(r, "external_id", None),
                 "score": round(float(s), 4),
             }
             for s, _, r in scored[:top_k]
@@ -262,6 +269,7 @@ def _load_track_rows(db, playable_only: bool = False):
         Track.play_count,
         Track.starred,
         Track.rating,
+        Track.external_id,
         Track.last_played_at,
     )
     if playable_only:
