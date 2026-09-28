@@ -317,16 +317,28 @@ def find_cross_source_candidates(db, per_key_cap: int = 8) -> dict:
                           "nav_album": best_nav["album_name"],
                           "nav_dur": best_nav["duration_sec"]})
 
-    # Сирота — теперь строго то, у чего пары не нашлось ВООБЩЕ.
+    # Сирота — строго то, у чего пары не нашлось ВООБЩЕ. Отдельно считаем
+    # файлы, которые нельзя сопоставить В ПРИНЦИПЕ: нет артиста или названия,
+    # значит нет ключа, значит пробовать нечего. Раньше они тонули в сиротах,
+    # и было непонятно: файла нет в Navidrome или у файла битые теги.
+    # Это разные действия: первое чинится сканированием Navidrome, второе —
+    # правкой тегов. Поэтому два разных числа.
     local_rows = [r for r in rows if is_local_source(r.external_id)]
+    unmatchable_ids = {str(r.id) for r in local_rows
+                       if _pair_key(r.artist_name, r.title) is None}
     orphans = [{
         "id": str(r.id), "title": r.title, "artist_name": r.artist_name,
-    } for r in local_rows if str(r.id) not in locals_with_pair]
+    } for r in local_rows
+        if str(r.id) not in locals_with_pair and str(r.id) not in unmatchable_ids]
+    unmatchable = [{
+        "id": str(r.id), "title": r.title, "artist_name": r.artist_name,
+    } for r in local_rows if str(r.id) in unmatchable_ids]
 
     return {
         "pairs": pairs,
         "locals_with_pair": locals_with_pair,
         "local_orphans": orphans,
+        "unmatchable": unmatchable,
         "local_total": len(local_rows),
         "nav_total": len(rows) - len(local_rows),
     }
@@ -589,18 +601,29 @@ def merge_tracks(db, keep_id: str, drop_ids: list[str]) -> dict:
 
 
 def auto_merge_exact(db, limit_groups: int = 2000) -> dict:
-    """Автослияние только точных групп (для чекбокса/крона)."""
-    groups = find_duplicate_groups(db, limit_groups=limit_groups)
-    merged = 0
-    for g in groups:
-        try:
-            res = merge_tracks(db, g["keep_id"], [t["id"] for t in g["tracks"] if t["id"] != g["keep_id"]])
-            if res.get("ok"):
-                merged += res["merged"]
-        except Exception as e:  # noqa: BLE001 — одна битая группа не валит всё
-            logger.warning("auto-merge group failed: {}", e)
-            db.rollback()
-    return {"groups": len(groups), "merged": merged}
+    """Автослияние для чекбокса «автоматом после сканирования» и кнопки
+    «Сшить все точные».
+
+    Раньше шло своим путём через find_duplicate_groups — бакет длительности
+    по 5 секунд в ключе, и на живой библиотеке это находило ~200 пар из
+    десятков тысяч. То есть галочка, которую мы советуем включить, чинила
+    почти ничего, а её цифры расходились с планом «Перелить».
+
+    Теперь делегирует единственному массовому пути — recannonicalize:
+    поиск пар по артисту и названию, склейка только exact_meta/norm_meta.
+    Ключи groups/merged сохранены: их читают лог сканирования
+    (tasks/__init__.py) и тост кнопки. limit_groups больше не ограничивает
+    (поиск пар идёт полным проходом), параметр оставлен для совместимости.
+    """
+    _ = limit_groups
+    res = recannonicalize(db, dry_run=False)
+    return {
+        "groups": res.get("groups", 0),
+        "merged": res.get("tracks_merged", 0),
+        "features_moved": res.get("features_moved", 0),
+        "needs_review": res.get("needs_review", 0),
+        "unmatchable": res.get("unmatchable", 0),
+    }
 
 
 def source_report(db) -> dict:
@@ -645,7 +668,8 @@ def source_report(db) -> dict:
     # тысяч молча не попали ни в одну категорию, и это выглядело как правда,
     # потому что невязавшиеся просто не показывались. Такую арифметику обязан
     # считать сам отчёт, а не человек глазами.
-    accounted = len(safe) + len(weak) + len(cands["local_orphans"])
+    accounted = (len(safe) + len(weak) + len(cands["local_orphans"])
+                 + len(cands["unmatchable"]))
     unaccounted = cands["local_total"] - accounted
     if unaccounted:
         logger.warning("source_report: не учтено {} локальных файлов из {} — "
@@ -658,6 +682,8 @@ def source_report(db) -> dict:
         "local_with_navidrome_twin": len(safe),
         "local_orphans_no_twin": len(cands["local_orphans"]),
         "orphan_samples": cands["local_orphans"][:20],
+        "unmatchable": len(cands["unmatchable"]),
+        "unmatchable_samples": cands["unmatchable"][:10],
         "cross_source_groups": len(pairs),
         "by_tier": by_tier,
         "needs_review": len(weak),
@@ -756,6 +782,8 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
             "needs_review": len(review),
             "review_sample": review[:50],
             "local_orphans": len(cands["local_orphans"]),
+            "unmatchable": len(cands["unmatchable"]),
+            "unmatchable_samples": cands["unmatchable"][:10],
             "plan": plan[:200],
             "note": ("Сливаются только exact_meta и norm_meta: совпали название, "
                      "артист и длительность в пределах 2 секунд. Остальное — в "
@@ -783,4 +811,5 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
         "tracks_merged": merged,
         "features_moved": feats,
         "needs_review": len(review),
+        "unmatchable": len(cands["unmatchable"]),
     }

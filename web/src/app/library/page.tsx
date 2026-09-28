@@ -347,7 +347,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
     setBusy(true);
     try {
       const r = await api.autoMergeDuplicates();
-      toast(`Групп: ${r.groups}, сшито треков: ${r.merged}`, "ok");
+      toast(`Групп: ${r.groups}, сшито треков: ${r.merged}${r.features_moved != null ? `, фич переехало: ${r.features_moved}` : ""}${r.needs_review ? `, на проверку: ${r.needs_review}` : ""}`, "ok");
       mutate();
       refreshTracks();
     } catch (e: unknown) {
@@ -434,7 +434,9 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
     <>
       {confirmNode}
     <Section
-      title={`Дубликаты · групп ${data?.group_count ?? 0}, лишних треков ${data?.duplicate_tracks ?? 0}`}
+      title={src
+        ? `Перелив · слить ${src.local_with_navidrome_twin} · проверить ${src.needs_review} · сирот ${src.local_orphans_no_twin}`
+        : `Дубликаты · групп ${data?.group_count ?? 0}, лишних треков ${data?.duplicate_tracks ?? 0}`}
       action={
         <div className="flex items-center gap-2 text-xs">
           <label className="flex items-center gap-1.5 text-muted">
@@ -447,7 +449,10 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
         </div>
       }
     >
-      {src && (src.local_with_navidrome_twin > 0 || src.needs_review > 0 || src.local_orphans_no_twin > 0) && (
+      {/* Блок виден всегда, когда отчёт загружен — без условий на числа.
+          Условие «показывать, только если что-то найдено» прятало блок ровно
+          тогда, когда он был нужнее всего (нули вместо ожидаемых тысяч). */}
+      {src && (
         <div className="mb-3 rounded-lg border border-warn/30 bg-warn/5 p-4 text-sm">
           <div className="font-medium text-text mb-1">
             Две библиотеки в одной: {src.navidrome} треков Navidrome и {src.local} локальных файлов
@@ -456,7 +461,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
               файлах — и выглядело это как правда, потому что 76 тысяч молча
               не попадали ни в одну категорию. Расхождение должно быть видно
               сразу, а не через месяц. */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-xs">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 mb-3 text-xs">
             <div className="rounded border border-line px-2 py-1">
               <div className="text-muted">Слить автоматом</div>
               <div className="text-text font-medium">{src.local_with_navidrome_twin}</div>
@@ -468,6 +473,10 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
             <div className="rounded border border-line px-2 py-1">
               <div className="text-muted">Сироты (файла нет в Navidrome)</div>
               <div className="text-text font-medium">{src.local_orphans_no_twin}</div>
+            </div>
+            <div className="rounded border border-line px-2 py-1" title="Нет артиста или названия — сопоставить нельзя в принципе, чинится правкой тегов">
+              <div className="text-muted">Битые теги</div>
+              <div className="text-text font-medium">{src.unmatchable ?? "—"}</div>
             </div>
             <div className={`rounded border px-2 py-1 ${src.balances === false ? "border-warn" : "border-line"}`}>
               <div className="text-muted">Не учтено (норма — 0)</div>
@@ -513,6 +522,13 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
         <div className="kuma-card p-5 text-sm text-muted">Дублей не найдено. Точным считается совпадение артист + название + длительность ±2с (live/remix-версии не трогаем).</div>
       ) : (
         <div className="space-y-2">
+          {/* Это старый точный список (первые 200) для ручной поштучной
+              склейки — безопасное подмножество плана выше: сюда попадают
+              только пары, которые план тоже слил бы. Полная картина и
+              массовое слияние — кнопками «Показать план» / «Перелить». */}
+          <div className="text-xs text-muted">
+            Точные совпадения (первые {groups.length}) для ручной склейки по одной. Массово — кнопкой «Перелить» выше.
+          </div>
           {shown.map((g) => (
             <div key={g.keep_id} className="kuma-card p-4">
               <div className="flex items-center gap-2 flex-wrap">

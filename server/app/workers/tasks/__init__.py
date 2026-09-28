@@ -815,7 +815,10 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                     with session_scope() as db3:
                         _res = _dd.auto_merge_exact(db3)
                     _append_log(run_id, "info",
-                                f"Автослияние дублей: групп {_res['groups']}, сшито треков {_res['merged']}")
+                                f"Автослияние дублей: групп {_res['groups']}, сшито треков {_res['merged']}, "
+                                f"фич переехало {_res.get('features_moved', 0)}, "
+                                f"на проверку {_res.get('needs_review', 0)}, "
+                                f"битых тегов {_res.get('unmatchable', 0)}")
             except Exception as e_dd:  # noqa: BLE001 — не валим сканирование
                 _append_log(run_id, "warn", f"Автослияние дублей пропущено: {e_dd}")
             _finish_run(run_id, "success")

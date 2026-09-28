@@ -623,7 +623,7 @@ export const api = {
       { method: "POST", body: JSON.stringify({ keep_id, drop_ids }) },
     ),
   autoMergeDuplicates: () =>
-    http<{ ok: boolean; groups: number; merged: number }>(`/api/library/duplicates/auto`, { method: "POST" }),
+    http<{ ok: boolean; groups: number; merged: number; features_moved?: number; needs_review?: number }>(`/api/library/duplicates/auto`, { method: "POST" }),
   sourceReport: () =>
     http<{
       total: number;
@@ -631,6 +631,7 @@ export const api = {
       local: number;
       local_with_navidrome_twin: number;
       local_orphans_no_twin: number;
+      unmatchable: number;
       cross_source_groups: number;
       by_tier: { exact_meta?: number; norm_meta?: number };
       needs_review: number;
