@@ -171,12 +171,23 @@ def update_taste_signals(db, user_id: str, track, action: str,
                     row.skips = int(row.skips or 0) + 1
             except Exception:
                 pass
-        # Руки бандита: артист + жанр в текущем контексте.
+        # Руки бандита: артист + жанр + настроение в текущем контексте.
         reward = action_reward(action, pos)
         ctx = context_of(hour, dow)
+        _mood_name = ""
+        try:
+            from app.db.models import TrackFeatures as _TF
+
+            _mf = db.get(_TF, tid)
+            _ml = list(getattr(_mf, "mood_labels", None) or []) if _mf else []
+            if _ml:
+                _mood_name = str(_ml[0]).lower().strip()
+        except Exception:
+            _mood_name = ""
         for kind, name, prior in (
                 ("artist", (getattr(track, "artist_name", None) or "").strip(), 2.0),
-                ("genre", (getattr(track, "genre", None) or "").strip().lower(), 1.0)):
+                ("genre", (getattr(track, "genre", None) or "").strip().lower(), 1.0),
+                ("mood", _mood_name, 0.5)):
             if not name:
                 continue
             try:

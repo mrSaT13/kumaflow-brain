@@ -250,6 +250,165 @@ def _mood_of(feat) -> str | None:
         return None
 
 
+def _clap_weight() -> float:
+    """Вес CLAP-косинуса в волне. 0 = выключено → поведение 1в1 как раньше.
+
+    Без анализа/эмбеддингов вклад и так 0 (карта пустая), но флаг позволяет
+    откатить фичу из веба без деплоя. Дефолт 0.08: заметно, но не ломает баланс.
+    """
+    try:
+        from app.services.automation import clap_audio_enabled as _flag
+
+        if not _flag():
+            return 0.0
+    except Exception:
+        pass
+    return 0.08
+
+
+def _load_clap_map(db, ids: list[str] | None,
+                   model: str = "clap_audio") -> dict:
+    """track_id -> нормализованный np-вектор CLAP. Пусто = безопасный фолбек.
+
+    Грузим только нужные id (пул скоринга + сиды + сессия, ~1200), батчами.
+    Любая ошибка (нет таблицы, нет анализа, нет numpy) → {} и волна
+    считается только по librosa, ничего не ломается.
+    """
+    if not ids:
+        return {}
+    try:
+        import numpy as _np
+
+        from app.db.models import TrackEmbedding as _TE
+    except Exception:
+        return {}
+    try:
+        uniq = list(dict.fromkeys(map(str, ids)))[:1500]
+        out: dict = {}
+        for i in range(0, len(uniq), 500):
+            try:
+                rows = db.query(_TE).filter(
+                    _TE.model == model,
+                    _TE.track_id.in_(uniq[i:i + 500])).all()
+            except Exception:
+                continue
+            for r in rows:
+                try:
+                    v = _np.frombuffer(r.vector, dtype=_np.float32).astype(_np.float32)
+                    n = float(_np.linalg.norm(v))
+                    if n > 0:
+                        out[str(r.track_id)] = v / n
+                except Exception:
+                    continue
+        return out
+    except Exception:
+        return {}
+
+
+def infer_auto_mood(db, user_id: str, session_ids: list[str] | None,
+                    current_hour: int | None = None) -> str | None:
+    """Автодетект настроения из центроида сессии (без пилюль).
+
+    Берём energy/valence среднего по последним трекам сессии; маппим на
+    русские пилюли MOOD_PRESETS. Нет фичей/сессии → None (чистое авто-без-муда).
+    Ручная пилюля всегда побеждает — см. wave_continue.
+    """
+    try:
+        sids = [str(s) for s in (session_ids or []) if s][:10]
+        if not sids:
+            return None
+        from app.db.models import TrackFeatures as _TF
+
+        feats = {str(f.track_id): f for f in
+                 db.query(_TF).filter(_TF.track_id.in_(sids)).all()}
+        ens, vas = [], []
+        for tid in sids:
+            f = feats.get(tid)
+            if f is None:
+                continue
+            try:
+                if f.energy is not None:
+                    ens.append(float(f.energy))
+                if f.valence is not None:
+                    vas.append(float(f.valence))
+            except (TypeError, ValueError):
+                continue
+        if not ens:
+            return None
+        en = sum(ens) / len(ens)
+        va = sum(vas) / len(vas) if vas else 0.5
+        # Ночь — тянем к спокойному, утро — к бодрому (мягко).
+        try:
+            h = int(current_hour) if current_hour is not None else -1
+        except (TypeError, ValueError):
+            h = -1
+        if va <= 0.38 and en < 0.55:
+            return "грустное"
+        if en >= 0.62 and va >= 0.45:
+            return "бодрое"
+        if en <= 0.42:
+            return "спокойное"
+        if va >= 0.6 and en >= 0.45:
+            return "весёлое"
+        if va <= 0.42:
+            return "тёмное"
+        if h >= 22 or (0 <= h <= 5):
+            return "спокойное" if en < 0.55 else "тёмное"
+        if 6 <= h <= 10:
+            return "бодрое" if en >= 0.5 else "спокойное"
+        return "chill" if en < 0.5 else "бодрое"
+    except Exception:
+        return None
+
+
+def skip_risk(track, feat, pref_g: dict, cur_energy: float | None,
+              drift: dict | None, fatigue: dict | None) -> float:
+    """Эвристический P(skip<30с) 0..1. Без ML-модели — прозрачные правила.
+
+    Признаки: скачок энергии/темпа от текущего, незнакомый жанр,
+    загонянный артист, активный скип-стрик. Обученная логистическая модель
+    (когда наберётся 5-10к событий) просто заменит эту функцию изнутри.
+    """
+    try:
+        r = 0.0
+        if feat is not None:
+            try:
+                en = float(feat.energy) if feat.energy is not None else 0.5
+            except (TypeError, ValueError):
+                en = 0.5
+            try:
+                bpm = float(feat.tempo_bpm) if feat.tempo_bpm else 0.0
+            except (TypeError, ValueError):
+                bpm = 0.0
+            if cur_energy is not None:
+                dj = abs(en - float(cur_energy))
+                if dj > 0.45:
+                    r += 0.35
+                elif dj > 0.3:
+                    r += 0.18
+            if bpm and bpm > 150:
+                r += 0.08
+        g = (getattr(track, "genre", None) or "").strip().lower()
+        if g and float(pref_g.get(g, 0.0)) <= 0.0:
+            r += 0.10
+        if fatigue and getattr(track, "artist_name", None) in fatigue:
+            try:
+                if int(fatigue[getattr(track, "artist_name")] or 0) > 10:
+                    r += 0.20
+            except (TypeError, ValueError):
+                pass
+        sev = (drift or {}).get("severity")
+        if sev == "strong":
+            r += 0.25
+        elif sev == "moderate":
+            r += 0.15
+        elif sev == "mild":
+            r += 0.08
+        return min(max(r, 0.0), 1.0)
+    except Exception:
+        return 0.0
+
+
 def score_candidates(db, user_id: str, candidate_ids: list[str],
                      seed_ids: list[str], settings: dict | None = None,
                      recent_events: list[dict] | None = None,
@@ -269,7 +428,11 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                      time_map: dict[str, float] | None = None,
                      arm_artist: dict[str, float] | None = None,
                      arm_genre: dict[str, float] | None = None,
-                     assoc: dict[str, float] | None = None) -> list[dict]:
+                     assoc: dict[str, float] | None = None,
+                     clap_map: dict | None = None,
+                     clap_weight: float | None = None,
+                     mood_arm: dict[str, float] | None = None,
+                     cur_energy: float | None = None) -> list[dict]:
     """Порт TrackScorer.scoreAndRankTracks на наших таблицах.
 
     jitter_seed: детерминированный per-user джиттер вместо глобального random
@@ -357,6 +520,26 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             neg_centroid = _np.mean(_np.vstack(_nv), axis=0)
     except Exception:
         neg_centroid = None
+    # CLAP-центроиды (семантика аудио, не только librosa-тембр).
+    # Нет эмбеддингов/анализа → None → вклад 0, волна как раньше.
+    _cw = float(clap_weight) if clap_weight is not None else _clap_weight()
+    _cw = min(max(_cw, 0.0), 0.3)
+    clap_map = clap_map or {}
+    clap_centroid = None
+    clap_sess = None
+    if _cw > 0 and clap_map:
+        try:
+            _cv = [clap_map[s] for s in (seed_ids or []) if s in clap_map]
+            if _cv:
+                clap_centroid = _np.mean(_np.vstack(_cv), axis=0)
+            _sv2 = [clap_map[s] for s in (session_ids or []) if s in clap_map]
+            if _sv2:
+                clap_sess = _np.mean(_np.vstack(_sv2), axis=0)
+        except Exception:
+            clap_centroid = None
+            clap_sess = None
+    else:
+        _cw = 0.0
 
     # behaviorBonus по свежим событиям (last 10 как в мобиле)
     bonus: dict[str, float] = Counter()
@@ -621,11 +804,36 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             elif _fp >= 3:
                 pen += 0.05
 
+        # CLAP-семантика: косинус к центроиду сидов + сессия (как audio).
+        # Нет эмбеддинга у трека/сидов → 0, волна 1в1 как раньше.
+        clap_s = 0.0
+        if _cw > 0 and tid in (clap_map or {}):
+            try:
+                _cv = clap_map[tid]
+                if clap_centroid is not None:
+                    clap_s = float(_cosine(_cv, clap_centroid))
+                    if clap_sess is not None:
+                        clap_s = clap_s * 0.6 + float(_cosine(_cv, clap_sess)) * 0.4
+                elif clap_sess is not None:
+                    clap_s = float(_cosine(_cv, clap_sess))
+                clap_s = min(max(clap_s, 0.0), 1.0)
+            except Exception:
+                clap_s = 0.0
+        # Ручка настроения бандита (mood-армы): любит такое в этот контекст.
+        mood_b = 0.0
+        try:
+            if mood_arm and _cm:
+                mood_b = min(max(float(mood_arm.get(_cm, 0.0)), -0.08), 0.12)
+        except (TypeError, ValueError):
+            mood_b = 0.0
+        # Предикт скипа <30с: эвристика сейчас, ML-модель позже заменит изнутри.
+        skip_p = skip_risk(t, f, pref_g, cur_energy, drift, fatigue)
         total = (w['audio'] * audio + w['genre'] * genre_s +
                  w['artist'] * artist_s + w['behavior'] * behavior +
                  w['collab'] * collab + w['novelty'] * novelty +
                  0.08 * novelty + ctx + bonus.get(tid, 0.0) -
                  pen - neg_pen + srv_bonus + time_b + arm_b + assoc_b +
+                 _cw * clap_s + mood_b - 0.25 * skip_p +
                  _rng.random() * 0.12 +
                  0.06 * key_c + 0.06 * cluster_c + 0.05 * lyr_c)
         total = min(max(total, 0.0), 1.0)
@@ -659,7 +867,10 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                              'srv': round(srv_bonus, 3),
                              'time': round(time_b, 3),
                              'arm': round(arm_b, 3),
-                             'assoc': round(assoc_b, 3)}})
+                             'assoc': round(assoc_b, 3),
+                             'clap': round(clap_s, 3),
+                             'skip': round(skip_p, 3),
+                             'mood_arm': round(mood_b, 3)}})
         if t.artist_name:
             used_artists[t.artist_name] = used_artists.get(t.artist_name, 0) + 1
         if t.genre:
@@ -744,32 +955,78 @@ def time_bonus_for(db, user_id: str, track_ids: list[str], hour: int) -> dict[st
 
 
 def arm_boost_for(db, user_id: str, context: str) -> tuple[dict[str, float], dict[str, float]]:
-    """Exploit бандита (порт mobile): средний reward руки -> буст артиста/жанра.
+    """Бандит UCB-lite: exploit среднего + направленный explore неуверенности.
 
-    Возвращает (artist_boost, genre_boost), значения -0.08..+0.08.
-    Explore — джиттером скоринга, отдельно не нужен."""
+    Было: средний reward -> буст -0.08..+0.08, explore только слепым
+    джиттером random*0.12. Стало: exploit тот же + бонус неуверенности
+    sqrt(log(total+1)/(pulls+1)) — малоигранные руки в этом контексте
+    получают шанс показаться, а не тонут. Возвращает (artist, genre),
+    значения -0.08..+0.12. Сигнатура и таблица те же, миграций нет.
+    """
     ab: dict[str, float] = {}
     gb: dict[str, float] = {}
     try:
+        import math as _math
+
         from app.db.models import TasteArm as _TA
 
-        for r in db.query(_TA).filter(
-                _TA.user_id == str(user_id), _TA.context == str(context)).all():
+        rows = db.query(_TA).filter(
+            _TA.user_id == str(user_id), _TA.context == str(context)).all()
+        total = sum(int(r.pulls or 0) for r in rows) or 0
+        for r in rows:
             try:
+                if r.kind not in ("artist", "genre"):
+                    continue
                 pulls = int(r.pulls or 0)
                 if pulls <= 0:
                     continue
                 avg = float(r.reward or 0.0) / pulls
-                b = min(max(avg / 10.0, -1.0), 1.0) * 0.08
+                exploit = min(max(avg / 10.0, -1.0), 1.0) * 0.08
+                explore = 0.05 * _math.sqrt(
+                    _math.log(total + 1.0) / (pulls + 1.0)) if total else 0.0
+                b = min(max(exploit + explore, -0.08), 0.12)
                 if r.kind == "artist":
                     ab[str(r.name)] = b
-                elif r.kind == "genre":
+                else:
                     gb[str(r.name).lower()] = b
             except Exception:
                 continue
     except Exception:
         pass
     return ab, gb
+
+
+def mood_boost_for(db, user_id: str, context: str) -> dict[str, float]:
+    """Буст настроения-руки (kind='mood') в контексте. Нет рук → {}.
+
+    Пишется в update_taste_signals best-effort; старые базы без mood-рук
+    просто дают пусто и ничего не ломают.
+    """
+    out: dict[str, float] = {}
+    try:
+        import math as _math
+
+        from app.db.models import TasteArm as _TA
+
+        rows = db.query(_TA).filter(
+            _TA.user_id == str(user_id), _TA.context == str(context),
+            _TA.kind == "mood").all()
+        total = sum(int(r.pulls or 0) for r in rows) or 0
+        for r in rows:
+            try:
+                pulls = int(r.pulls or 0)
+                if pulls <= 0:
+                    continue
+                avg = float(r.reward or 0.0) / pulls
+                exploit = min(max(avg / 10.0, -1.0), 1.0) * 0.08
+                explore = 0.04 * _math.sqrt(
+                    _math.log(total + 1.0) / (pulls + 1.0)) if total else 0.0
+                out[str(r.name).lower()] = min(max(exploit + explore, -0.08), 0.12)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
 
 
 def session_assoc(db, user_id: str, seed_ids: list[str],
@@ -1379,7 +1636,53 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         _ctx = "day_wd"
     time_map = time_bonus_for(db, user_id, cand[:800], _cur_hour)
     arm_artist, arm_genre = arm_boost_for(db, user_id, _ctx)
+    try:
+        mood_arm_map = mood_boost_for(db, user_id, _ctx)
+    except Exception:
+        mood_arm_map = {}
     assoc = session_assoc(db, user_id, seeds)
+    # CLAP-карта пула+сидов+сессии: нет анализа → {} → вклад 0, не ломается.
+    try:
+        _clap_ids = list(dict.fromkeys(
+            list(cand[:800]) + list(seeds) + list(session_ids)))[:1500]
+        clap_map = _load_clap_map(db, _clap_ids)
+    except Exception:
+        clap_map = {}
+    # Энергия текущего трека — якорь скип-риска (резкий скачок = риск).
+    _cur_en2: float | None = None
+    try:
+        if _cf is not None and getattr(_cf, "energy", None) is not None:
+            _cur_en2 = float(_cf.energy)
+    except (TypeError, ValueError):
+        _cur_en2 = None
+    # Авто-настроение: ручная пилюля побеждает всегда; авто — только мягкий
+    # ctx-бонус в скоринге, жёсткий mood-фильтр выше уже отработал по ручной.
+    _manual_mood = (settings.get('mood') or '').strip().lower() or None
+    _auto_mood: str | None = None
+    try:
+        if not _manual_mood:
+            _auto_mood = infer_auto_mood(db, user_id, session_ids, _cur_hour)
+    except Exception:
+        _auto_mood = None
+    settings_eff = dict(settings)
+    mood_source = "manual" if _manual_mood else ("auto" if _auto_mood else "none")
+    if mood_source == "auto" and _auto_mood:
+        settings_eff["mood"] = _auto_mood
+    # Целевой сентимент под эффективное настроение (для lyr_c).
+    _eff_mood_norm = None
+    try:
+        _eff_mood_norm = _norm_mood(settings_eff.get("mood"))
+    except Exception:
+        _eff_mood_norm = None
+    target_sentiment_eff = target_sentiment
+    try:
+        if _eff_mood_norm and not _manual_mood:
+            if _eff_mood_norm in _POS_MOODS:
+                target_sentiment_eff = "positive"
+            elif _eff_mood_norm in _NEG_MOODS:
+                target_sentiment_eff = "negative"
+    except Exception:
+        pass
     # Скоренное окно: обычный пул режем 800, но коллаборативные треки,
     # добавленные в cand сверх лимита, в это окно не попали бы — и их вклад
     # в скор снова исчез бы. Поэтому берём обычные 800 и сверху добавляем
@@ -1390,7 +1693,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         _extra = [t for t in collab_scores if t in cand and t not in _in_pool]
         if _extra:
             _score_pool = _score_pool + _extra[:200]
-    ranked = score_candidates(db, user_id, _score_pool, seeds, settings,
+    ranked = score_candidates(db, user_id, _score_pool, seeds, settings_eff,
                               norm_events, collab_scores,
                               current_hour=_cur_hour,
                               jitter_seed=f"{user_id}:{len(played)}:{_pq}",
@@ -1398,7 +1701,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                               cluster_map=cluster_map or None,
                               seed_clusters=seed_clusters or None,
                               ref_sentiment=ref_sentiment,
-                              target_sentiment=target_sentiment,
+                              target_sentiment=target_sentiment_eff,
                               session_ids=session_ids or None,
                               neg_ids=neg_ids or None,
                               last_played=last_played or None,
@@ -1406,7 +1709,11 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                               time_map=time_map or None,
                               arm_artist=arm_artist or None,
                               arm_genre=arm_genre or None,
-                              assoc=assoc or None)
+                              assoc=assoc or None,
+                              clap_map=clap_map or None,
+                              clap_weight=None,
+                              mood_arm=mood_arm_map or None,
+                              cur_energy=_cur_en2)
     # Недавнее реже (новизна как у cold-start novelty=True): уже учтено
     # novelty-членом, дубли очереди на всякий случай режем ещё раз
     ranked = [r for r in ranked if r['track_id'] not in played]
@@ -1576,6 +1883,9 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             'count_requested': count,
             'count_effective': eff_count,
             'adaptive': adapt_reason,
+            'auto_mood': _auto_mood,
+            'mood_source': mood_source,
+            'mood_effective': settings_eff.get('mood') or None,
             'drift': {k: drift.get(k) for k in
                       ("severity", "consecutive_skips", "temp_banned_genres",
                        "warmth", "positive_streak")}
