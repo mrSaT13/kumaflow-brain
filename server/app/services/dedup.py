@@ -112,14 +112,45 @@ def _path_exists(path: str | None) -> bool:
         return False
 
 
-def _dur_ok(a, b, tol: float = 2.0) -> bool:
-    """Длительности сходятся с точностью до tol секунд."""
+def _dur_delta(a, b) -> float | None:
+    """Модуль расхождения длительностей, либо None если сравнивать нечем."""
     try:
         if a is None or b is None:
-            return False
-        return abs(float(a) - float(b)) <= tol
+            return None
+        return abs(float(a) - float(b))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dur_tight(a, b, tol: float = 2.0) -> bool:
+    """Строгий допуск: для одного и того же файла, прочитанного однимTools."""
+    d = _dur_delta(a, b)
+    return d is not None and d <= tol
+
+
+def _dur_loose(a, b) -> bool:
+    """Мягкий допуск для СРАВНЕНИЯ РАЗНЫХ ИНСТРУМЕНТОВ.
+
+    Длительность локального файла считает mutagen из тегов, а у трека
+    Navidrome — его собственный сканер. На живой библиотеке это расходится
+    на секунды: один и тот же файл попадает в разные 5-секундные бакеты, и
+    строгий ±2с отсекал почти всё в «требует решения». Отсюда относительный
+    допуск: 5 секунд ИЛИ 1% длительности, что для трёхминутной песни
+    терпит ~1.8с, а для часовой — 36с.
+
+    Две РАЗНЫЕ песни с одинаковым названием и артистом различаются длиной
+    гораздо сильнее, чем на 1%, поэтому относительный допуск не открывает
+    дверь к неверной склейке — а вот абсолютные 2 секунды её открывали бы
+    слишком часто.
+    """
+    d = _dur_delta(a, b)
+    if d is None:
+        return False
+    try:
+        base = max(abs(float(a)), abs(float(b)), 1.0)
     except (TypeError, ValueError):
         return False
+    return d <= max(5.0, base * 0.01)
 
 
 def match_tier(a: dict, b: dict) -> str | None:
@@ -166,20 +197,130 @@ def match_tier(a: dict, b: dict) -> str | None:
     al2 = norm_text(_f(b, "album_name", "album"))
     if not t1 or not t2 or t1 != t2:
         return None
-    d_ok = _dur_ok(a.get("duration_sec"), b.get("duration_sec"))
+    d_tight = _dur_tight(a.get("duration_sec"), b.get("duration_sec"))
+    d_loose = _dur_loose(a.get("duration_sec"), b.get("duration_sec"))
     if a1 and a1 == a2:
-        if al1 and al1 == al2 and d_ok:
+        if al1 and al1 == al2 and d_tight:
             return "exact_meta"
-        if d_ok:
+        if d_loose:
             return "norm_meta"
         return None
-    if d_ok:
+    if d_loose:
         return "title_duration"
     return None
 
 
 # Уровни, которые сливаются автоматически. title_duration и None — никогда.
 AUTO_MERGE_TIERS = ("exact_meta", "norm_meta")
+
+
+def _pair_key(artist: str | None, title: str | None) -> tuple[str, str] | None:
+    """Ключ для поиска пары «локальный файл ↔ трек Navidrome».
+
+    ТОЛЬКО артист и название, БЕЗ длительности. Это и было причиной, почему
+    на живых данных нашлось 204 совпадения из ~76 тысяч файлов: exact_key
+    кладёт в ключ бакет длительности по 5 секунд, а длительность локального
+    файла читает mutagen, а у трека Navidrome её считает собственный сканер.
+    Они расходятся на секунды почти всегда, и стоит разойтись по разные
+    стороны границы бакета — ключи становятся разными, и пара не находится
+    ВООБЩЕ. До match_tier дело не доходит: он не получает кандидатов.
+
+    Длительность никуда не делась — она проверяется в match_tier, где решает
+    «склеивать или показать человеку», а не «найти или не найти».
+
+    Версии в скобках НЕ вырезаются. Раньше `_has_version_marker` отбрасывала
+    «Stupider (Remix)» целиком, и такие файлы автоматически попадали в
+    «сироты» независимо от того, есть ли близнец в Navidrome. Теперь строки
+    сравниваются как есть: «X (Remix)» совпадёт с «X (Remix)» и НЕ совпадёт
+    с «X» — то есть защита от склейки ремикса с оригиналом сохраняется
+    самим фактом неравенства строк, а возможность найти пару появляется.
+    """
+    a, t = norm_text(artist), norm_text(title)
+    if not a or not t:
+        return None
+    return (a, t)
+
+
+def find_cross_source_candidates(db, per_key_cap: int = 8) -> dict:
+    """Пары «локальный файл ↔ трек Navidrome» + честный список сирот.
+
+    Полный проход колонками (без ORM-нагрузки) — на 150k+ треков это
+    единицы секунд. Возвращает:
+
+      pairs            — пары, у каждой tier (см. match_tier);
+      locals_with_pair — id локальных файлов, у которых нашлась хоть одна пара;
+      local_orphans    — локальные файлы, у которых пары НЕТ вообще.
+
+    per_key_cap ограничивает комбинаторный взрыв: у популярной песни бывает
+    по 10-20 записей на источник, и 20×20 пар впустую. Больше 8 от каждого
+    источника в группе не рассматриваем — сверх этого это всё равно не наши
+    песни, а сборки одной и той же композиции.
+    """
+    from app.db.models import Track
+
+    rows = db.query(
+        Track.id, Track.external_id, Track.title, Track.artist_name,
+        Track.album_name, Track.duration_sec,
+    ).all()
+
+    by_key: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        k = _pair_key(r.artist_name, r.title)
+        if k is None:
+            continue
+        slot = by_key.get(k)
+        if slot is None:
+            slot = by_key[k] = {"nav": [], "loc": []}
+        bucket = "loc" if is_local_source(r.external_id) else "nav"
+        if len(slot[bucket]) < per_key_cap:
+            slot[bucket].append({
+                "id": str(r.id), "title": r.title, "artist_name": r.artist_name,
+                "album_name": r.album_name, "duration_sec": r.duration_sec,
+                "source": "local" if bucket == "loc" else "navidrome",
+            })
+
+    pairs: list[dict] = []
+    locals_with_pair: set[str] = set()
+    for slot in by_key.values():
+        if not slot["nav"] or not slot["loc"]:
+            continue
+        for lv in slot["loc"]:
+            best_tier: str | None = None
+            best_nav: dict | None = None
+            for nv in slot["nav"]:
+                got = match_tier(lv, nv)
+                if got is None:
+                    continue
+                if best_tier is None or AUTO_MERGE_TIERS.index(got) < AUTO_MERGE_TIERS.index(best_tier):
+                    best_tier, best_nav = got, nv
+            if best_tier is None:
+                # Артист+название совпали, но длительность не сошлась даже
+                # мягко. Не склеиваем и НЕ считаем сиротой: пара существует,
+            # просто требует решения человека.
+                locals_with_pair.add(lv["id"])
+                pairs.append({**lv, "nav_id": None, "tier": None,
+                              "reason": "совпали артист и название, но длительность "
+                                        "расходится больше чем на 2 секунды"})
+                continue
+            locals_with_pair.add(lv["id"])
+            pairs.append({**lv, "nav_id": best_nav["id"], "tier": best_tier,
+                          "nav_title": best_nav["title"],
+                          "nav_album": best_nav["album_name"],
+                          "nav_dur": best_nav["duration_sec"]})
+
+    # Сирота — теперь строго то, у чего пары не нашлось ВООБЩЕ.
+    local_rows = [r for r in rows if is_local_source(r.external_id)]
+    orphans = [{
+        "id": str(r.id), "title": r.title, "artist_name": r.artist_name,
+    } for r in local_rows if str(r.id) not in locals_with_pair]
+
+    return {
+        "pairs": pairs,
+        "locals_with_pair": locals_with_pair,
+        "local_orphans": orphans,
+        "local_total": len(local_rows),
+        "nav_total": len(rows) - len(local_rows),
+    }
 
 
 def find_duplicate_groups(db, limit_groups: int = 500) -> list[dict]:
@@ -474,74 +615,43 @@ def source_report(db) -> dict:
         else:
             nav += 1
 
-    # Группы, где смешаны оба источника: локальная копия + её Navidrome-двойник.
-    # Именно их безопасно сливать (в пользу Navidrome), потому что плеер знает
-    # только Navidrome-часть, а фичи/фичерпринты переезжают на неё целиком.
-    groups = find_duplicate_groups(db, limit_groups=10000)
-    cross: list[dict] = []
-    removable = 0
-    for g in groups:
-        srcs = [t["source"] for t in g["tracks"]]
-        has_nav = "navidrome" in srcs
-        has_loc = "disk" in srcs or "demo" in srcs
-        if not (has_nav and has_loc):
-            continue
-        keep = next((t for t in g["tracks"] if t["id"] == g["keep_id"]), None)
-        drops_local = [t for t in g["tracks"] if t["id"] != g["keep_id"]
-                       and t["source"] in ("disk", "demo")]
-        removable += len(drops_local)
-        if keep is not None and keep["source"] == "navidrome":
-            cross.append({
-                "key": g["key"],
-                "keep_id": g["keep_id"],
-                "drop_ids": [t["id"] for t in drops_local],
-                "drop_count": len(drops_local),
-            })
-        else:
-            # Каноническим сейчас локальный трек (уже слитый раньше или
-            # созданный диском раньше Navidrome). Для отчёта — план починки.
-            cross.append({
-                "key": g["key"],
-                "keep_id": g["keep_id"],
-                "keep_source": keep["source"] if keep else None,
-                "drop_ids": [t["id"] for t in drops_local],
-                "drop_count": len(drops_local),
-                "needs_recannonicalize": True,
-            })
-
-    # Локальные треки БЕЗ двойника в Navidrome — их нельзя сливать: это
-    # единственные носители файла (Navidrome про них не знает). Их надо
-    # оставить, иначе песня исчезнет из мозга вообще.
-    nav_keys = set()
-    for r in rows:
-        if not is_local_source(r.external_id):
-            k = exact_key(r.artist_name, r.title, r.duration_sec)
-            if k:
-                nav_keys.add(k)
-    orphans = 0
-    for r in rows:
-        if is_local_source(r.external_id):
-            k = exact_key(r.artist_name, r.title, r.duration_sec)
-            if k not in nav_keys:
-                orphans += 1
-                if len(orphan_samples) < 20:
-                    orphan_samples.append({"id": str(r.id), "title": r.title,
-                                           "artist_name": r.artist_name})
+    # --- Новый поиск пар: ТОЛЬКО артист + название, без бакета длительности ---
+    # Старый путь (find_duplicate_groups + exact_key) на живых данных дал
+    # 204 совпадения из ~76 тысяч файлов: бакет длительности по 5 секунд
+    # разводил ключи, потому что mutagen и сканер Navidrome считают длину
+    # по-разному. Длительность остаётся проверкой в match_tier, но больше
+    # не участвует в ПОИСКЕ.
+    cands = find_cross_source_candidates(db)
+    pairs = cands["pairs"]
+    safe = [p for p in pairs if p.get("tier") in AUTO_MERGE_TIERS and p.get("nav_id")]
+    weak = [p for p in pairs if p not in safe]
+    by_tier: dict[str, int] = {}
+    for p in safe:
+        by_tier[p["tier"]] = by_tier.get(p["tier"], 0) + 1
 
     with_features = db.query(TrackFeatures.track_id).count()
     return {
-        "total": len(rows),
-        "navidrome": nav,
-        "local": loc,
-        "local_with_navidrome_twin": removable,
-        "local_orphans_no_twin": orphans,
-        "orphan_samples": orphan_samples,
-        "cross_source_groups": len(cross),
-        "needs_recannonicalize": sum(1 for c in cross if c.get("needs_recannonicalize")),
+        "total": cands["local_total"] + cands["nav_total"],
+        "navidrome": cands["nav_total"],
+        "local": cands["local_total"],
+        "local_with_navidrome_twin": len(safe),
+        "local_orphans_no_twin": len(cands["local_orphans"]),
+        "orphan_samples": cands["local_orphans"][:20],
+        "cross_source_groups": len(pairs),
+        "by_tier": by_tier,
+        "needs_review": len(weak),
+        "review_samples": [
+            {"title": p.get("title"), "artist_name": p.get("artist_name"),
+             "local_dur": p.get("duration_sec"), "nav_dur": p.get("nav_dur"),
+             "tier": p.get("tier"), "reason": p.get("reason")}
+            for p in weak[:20]
+        ],
         "with_features": with_features,
         "note": ("Локальные копии с двойником в Navidrome можно слить в пользу "
-                 "Navidrome — фичи переедут, плеер получит id. Локальные без "
-                 "двойника трогать нельзя: это единственные носители файла."),
+                 "Navidrome — фичи переедут, плеер получит id. Без двойника "
+                 "трогать нельзя: это единственные носители файла. Совпадения "
+                 "слабее exact_meta/norm_meta — в needs_review, автоматом не "
+                 "сливаются."),
     }
 
 
@@ -563,10 +673,11 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
 
     dry_run=True (по умолчанию) — только план, ничего не меняет.
     """
-    groups = find_duplicate_groups(db, limit_groups=limit_groups)
-    # Кто из локальных копий уже посчитан: именно их фичи поедут на
-    # Navidrome-строку. Считаем заранее, чтобы в отчёте было видно, сколько
-    # работы переедет, а не сколько строк вообще исчезнет.
+    # Поиск пар идёт через find_cross_source_candidates: артист + название,
+    # длительность — мягкая проверка. Старый путь через find_duplicate_groups
+    # искал бакетом длительности по 5 секунд и на живых данных нашёл 204
+    # совпадения из ~76 тысяч локальных файлов, то есть практически ничего.
+    cands = find_cross_source_candidates(db)
     feat_ids: set[str] = set()
     try:
         from app.db.models import TrackFeatures
@@ -577,109 +688,72 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
 
     plan: list[dict] = []
     review: list[dict] = []
-    for g in groups:
-        members = g["tracks"]
-        nav_members = [t for t in members if t["source"] == "navidrome"]
-        if not nav_members:
-            continue  # нет Navidrome-двойника — сливать не с кем, файл пропадёт
-        local_members = [t for t in members if t["source"] in ("disk", "demo")]
-        if not local_members:
-            continue
-        # Уверенность: сверяем КАЖДУЮ локальную копию с КАЖДЫМ треком
-        # Navidrome в группе и берём лучший уровень. Если ни одна пара не
-        # убедила — группа уходит в «требует решения» и НЕ сливается.
-        best_tier: str | None = None
-        best_pair: tuple[dict, dict] | None = None
-        for lv in sorted((t for t in local_members), key=lambda t: len(t["title"] or ""), reverse=True):
-            for nv in nav_members:
-                got = match_tier(lv, nv)
-                if got is None:
-                    continue
-                if best_tier is None or AUTO_MERGE_TIERS.index(got) < AUTO_MERGE_TIERS.index(best_tier):
-                    best_tier, best_pair = got, (lv, nv)
-            if best_tier == "exact_meta":
-                break
-        local_row, nav_row = best_pair if best_pair else (local_members[0], nav_members[0])
-        entry = {
-            "key": g["key"],
-            "title": nav_row.get("title") or local_row.get("title"),
-            "artist_name": nav_row.get("artist_name") or local_row.get("artist_name"),
-            "local_title": local_row.get("title"),
-            "local_artist": local_row.get("artist_name"),
-            "local_album": local_row.get("album_name"),
-            "nav_title": nav_row.get("title"),
-            "nav_album": nav_row.get("album_name"),
-            "local_dur": local_row.get("duration_sec"),
-            "nav_dur": nav_row.get("duration_sec"),
-            "tier": best_tier,
-        }
-        if best_tier not in AUTO_MERGE_TIERS:
-            # Сомнительно. Показываем, но НЕ трогаем: склейка необратима.
-            entry["reason"] = ("только название сошлось, артиста нет — такие "
-                               "не склеиваем автоматически")
-            review.append(entry)
-            continue
-        keep = next((t for t in members if t["id"] == g["keep_id"]), None)
-        if keep is not None and keep["source"] == "navidrome":
-            # Уже правильно: Navidrome канонический, локальные — лишние.
-            entry.update({
-                "keep_id": keep["id"],
-                "drop_ids": [t["id"] for t in local_members],
-                "drop_count": len(local_members),
-                "features_moving": sum(1 for t in local_members if t["id"] in feat_ids),
-                "action": "drop_local",
+    for p in cands["pairs"]:
+        # Мягкие и пустые уровни — в отчёт, НЕ сливаются: склейка необратима.
+        if p.get("tier") not in AUTO_MERGE_TIERS or not p.get("nav_id"):
+            review.append({
+                "title": p.get("title"),
+                "artist_name": p.get("artist_name"),
+                "local_dur": p.get("duration_sec"),
+                "nav_dur": p.get("nav_dur"),
+                "tier": p.get("tier"),
+                "reason": p.get("reason") or "уровень ниже автоматического",
             })
-        else:
-            # Канонический — локальный. Чиним: Navidrome-член становится keep,
-            # локальный уходит в drop вместе с остальными дублями.
-            drops = [t for t in members if t["id"] != nav_row["id"]]
-            entry.update({
-                "keep_id": nav_row["id"],
-                "old_keep_id": g["keep_id"],
-                "drop_ids": [t["id"] for t in drops],
-                "drop_count": len(drops),
-                "features_moving": sum(1 for t in drops if t["id"] in feat_ids),
-                "action": "recannonicalize",
-            })
-        plan.append(entry)
+            continue
+        local_id, nav_id = p["id"], p["nav_id"]
+        plan.append({
+            "key": "%s — %s" % (p.get("artist_name") or "", p.get("title") or ""),
+            "title": p.get("title"),
+            "artist_name": p.get("artist_name"),
+            "tier": p["tier"],
+            # Каноническим всегда становится трек Navidrome: только у него
+            # есть номер, который понимает плеер. Если сейчас каноническим
+            # числится локальная копия (старые базы, где диск сканировался
+            # первым) — это тот же состав, просто с обратным выбором.
+            "keep_id": nav_id,
+            "drop_ids": [local_id],
+            "drop_count": 1,
+            "features_moving": 1 if local_id in feat_ids else 0,
+            "action": "drop_local",
+        })
 
     if dry_run:
         return {
             "dry_run": True,
             "groups": len(plan),
-            "recannonicalize": sum(1 for p in plan if p["action"] == "recannonicalize"),
-            "drop_local": sum(1 for p in plan if p["action"] == "drop_local"),
+            "recannonicalize": 0,
+            "drop_local": len(plan),
             "tracks_to_merge": sum(p["drop_count"] for p in plan),
             "features_to_move": sum(p["features_moving"] for p in plan),
             "by_tier": {t: sum(1 for p in plan if p["tier"] == t)
-                        for t in ("exact_meta", "norm_meta")},
+                        for t in AUTO_MERGE_TIERS},
             "needs_review": len(review),
             "review_sample": review[:50],
+            "local_orphans": len(cands["local_orphans"]),
             "plan": plan[:200],
-            "note": ("Сливаются только exact_meta и norm_meta — там совпали "
-                     "название, артист и длительность. Совпадения только по "
-                     "названию — в needs_review и не трогаются. Крупные слияния "
-                     "идут по одной песне с отдельным commit: можно "
-                     "остановить, состояние останется целым."),
+            "note": ("Сливаются только exact_meta и norm_meta: совпали название, "
+                     "артист и длительность в пределах 2 секунд. Остальное — в "
+                     "needs_review и не трогается. Каждая песня отдельным "
+                     "commit: можно остановить, состояние останется целым."),
         }
 
-    fixed = merged = feats = 0
+    merged = feats = 0
     for p in plan:
         try:
             res = merge_tracks(db, p["keep_id"], p["drop_ids"])
             if res.get("ok"):
                 merged += res["merged"]
                 feats += p["features_moving"]
-                if p["action"] == "recannonicalize":
-                    fixed += 1
-        except Exception as e:  # noqa: BLE001 — одна битая группа не валит всё
-            logger.warning("recannonicalize group failed: {}", e)
+        except Exception as e:  # noqa: BLE001 — одна битая пара не валит всё
+            logger.warning("recannonicalize {} failed: {}", p["key"], e)
             db.rollback()
+    logger.info("recannonicalize: {} pairs, {} tracks merged, {} features moved",
+                len(plan), merged, feats)
     return {
         "dry_run": False,
         "groups": len(plan),
-        "recannonicalize": fixed,
-        "drop_local": sum(1 for p in plan if p["action"] == "drop_local"),
+        "recannonicalize": 0,
+        "drop_local": len(plan),
         "tracks_merged": merged,
         "features_moved": feats,
         "needs_review": len(review),
