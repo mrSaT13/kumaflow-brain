@@ -1088,7 +1088,24 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # Пул кандидатов: всё кроме сыгранного/дизлайков/банов, капом 2000.
     # Без IN-чанков: берём с запасом и режем в питоне (старый цикл
     # исключал в SQL только первый чанк skip и всё равно дофильтровывал).
+    #
+    # Только то, что реально сыграет плеер. Локальные файлы (disk:/demo-) в
+    # плейлист не попадают: у них нет Navidrome-id, поэтому при выгрузке они
+    # молча выбрасываются и очередь на выходе оказывается короче запрошенного.
+    # В демо-режиме фильтр выключается сам (playable.has_navidrome) — там диск
+    # и есть единственная библиотека.
     q = db.query(Track.id)
+    try:
+        from app.services import playable as _pl
+
+        q = _pl.apply(q, db)
+    except Exception as e:  # noqa: BLE001 — лучше лишний трек, чем пустая волна
+        try:
+            from app.core.logging import get_logger as _gl
+
+            _gl("wave").warning("playable filter unavailable, using full pool: {}", e)
+        except Exception:
+            pass
     skip_n = len(played | dis)
     cand: list[str] = [str(r[0]) for r in q.limit(2000 + skip_n).all()]
     cand = [c for c in cand if c not in played and c not in dis][:2000]

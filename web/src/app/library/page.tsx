@@ -322,6 +322,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
   const { data, mutate } = useSWR("/api/library/duplicates", () => api.duplicates());
   const { data: fp, mutate: mutateFp } = useSWR("/api/library/duplicates/fingerprint", () => api.fingerprintDuplicates(0.985));
   const { data: settings, mutate: mutateSettings } = useSWR("/api/library/dedup-settings", () => api.getDedupSettings());
+  const { data: src } = useSWR("/api/library/source-report", () => api.sourceReport());
   const [busy, setBusy] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
@@ -385,6 +386,50 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
   const shown = showAll ? groups : groups.slice(0, 10);
   const fpGroups = fp?.groups ?? [];
 
+  // План починки: сколько треков переедет на Navidrome-версию и сколько
+  // локальных копий останутся нетронутыми (у них нет двойника — это единственные
+  // носители файла, стирать их нельзя).
+  const [plan, setPlan] = useState<Awaited<ReturnType<typeof api.recannonicalize>> | null>(null);
+
+  async function previewFix() {
+    setBusy(true);
+    try {
+      const r = await api.recannonicalize(true);
+      setPlan(r);
+      toast(
+        `План: ${r.groups} групп, перелить треков ${r.tracks_to_merge ?? 0}` +
+        `${r.recannonicalize ? `, из них ${r.recannonicalize} с неверным каноническим` : ""}.`,
+        "info",
+      );
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyFix() {
+    if (!(await confirm({
+      title: "Перелить дубли в Navidrome-треки?",
+      message: "Аудио-фичи, лайки, история и плейлисты переедут на треки, которые видит плеер. Локальные копии без двойника в Navidrome останутся на месте.",
+      confirmText: "Перелить",
+      danger: true,
+    }))) return;
+    setBusy(true);
+    try {
+      const r = await api.recannonicalize(false);
+      toast(`Готово: сшито треков ${r.tracks_merged ?? 0}${r.recannonicalize ? `, из них исправлено канонических ${r.recannonicalize}` : ""}.`, "ok");
+      setPlan(null);
+      mutate();
+      mutateFp();
+      refreshTracks();
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       {confirmNode}
@@ -402,6 +447,30 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
         </div>
       }
     >
+      {src && (src.local_with_navidrome_twin > 0 || src.needs_recannonicalize > 0) && (
+        <div className="mb-3 rounded-lg border border-warn/30 bg-warn/5 p-4 text-sm">
+          <div className="font-medium text-text mb-1">
+            Две библиотеки в одной: {src.navidrome} треков Navidrome и {src.local} локальных файлов
+          </div>
+          <div className="text-muted mb-3">
+            Локальные файлы нужны только ради аудио-фичей, которые Navidrome не отдаёт. Но у них нет
+            его id, поэтому при выгрузке плейлиста они молча выбрасываются — вот откуда «создал 30,
+            плеер получил 23». Перелив переносит фичи на Navidrome-трек, и тот начинает играть.
+            Без двойника в Navidrome остаётся {src.local_orphans_no_twin} треков — их не трогаем,
+            это единственные носители файла.
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button className="kuma-pill hover:text-text" onClick={previewFix} disabled={busy}>
+              Показать план
+            </button>
+            {plan?.dry_run && (
+              <button className="kuma-pill hover:text-text" onClick={applyFix} disabled={busy}>
+                Перелить {plan.tracks_to_merge ?? 0} треков
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {groups.length === 0 ? (
         <div className="kuma-card p-5 text-sm text-muted">Дублей не найдено. Точным считается совпадение артист + название + длительность ±2с (live/remix-версии не трогаем).</div>
       ) : (

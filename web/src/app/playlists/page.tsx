@@ -46,7 +46,19 @@ export default function PlaylistsPage() {
   const { data, mutate } = useSWR(["/api/playlists", showHidden], () => api.listPlaylists(showHidden), { refreshInterval: 4000 });
   const { users: usersList, userId: coldUser, setUserId: setColdUser } = useCurrentUser();
   const usersData = { users: usersList };
-  const [busy, setBusy] = useState(false);
+  // Не просто «занято», а ЧТО именно занято: иначе крутилка висит на одной
+  // кнопке, а человек нажал другую и решает, что она не работает. Генерация
+  // плейлиста занимает секунды-минуты (LLM, cold-start, выгрузка в Navidrome),
+  // и без обратной связи это выглядит как «нажал и ничего не произошло».
+  const [busy, setBusy] = useState<string | null>(null);
+  const busyAny = busy !== null;
+  // Секундомер: показывает, что процесс идёт, а не завис.
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!busyAny) { setElapsed(0); return; }
+    const t = setInterval(() => setElapsed((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [busyAny]);
   const [coldN, setColdN] = useState(30);
   const [aiQuery, setAiQuery] = useState("");
   const [plQuery, setPlQuery] = usePersisted<string>("kf:pl:q", "");
@@ -67,7 +79,7 @@ export default function PlaylistsPage() {
   });
 
   async function generate() {
-    setBusy(true);
+    setBusy("generate");
     try {
       const r = await api.generateDailyPlaylist(coldN || 30, coldUser || undefined);
       setLastSteps(r.steps ?? null);
@@ -76,12 +88,12 @@ export default function PlaylistsPage() {
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
   async function coldStartOnly() {
-    setBusy(true);
+    setBusy("cold");
     try {
       const r = await api.coldStart(coldN || 30);
       setLastSteps(r.steps ?? null);
@@ -89,13 +101,13 @@ export default function PlaylistsPage() {
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
   async function aiMix() {
     if (!aiQuery.trim()) { toast("Опишите настроение/жанр — например «вечерний лоуфай для работы»", "info"); return; }
-    setBusy(true);
+    setBusy("ai");
     try {
       const r = await api.aiGenerate(aiQuery.trim(), coldN || 30, coldUser || undefined);
       mutate();
@@ -103,14 +115,14 @@ export default function PlaylistsPage() {
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
   async function myWave() {
     const uid = coldUser || (usersData?.users ?? [])[0]?.id;
     if (!uid) { toast("Сначала добавьте пользователя на странице «Пользователи»", "info"); return; }
-    setBusy(true);
+    setBusy("wave");
     try {
       const r = await api.myWave(uid, coldN || 30);
       mutate();
@@ -118,7 +130,7 @@ export default function PlaylistsPage() {
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
@@ -139,7 +151,7 @@ export default function PlaylistsPage() {
   }
 
   async function exportOne(id: string, name: string) {
-    setBusy(true);
+    setBusy("export");
     try {
       const r = await api.exportPlaylist(id);
       if (!r.ok) toast(`Ошибка: ${r.error ?? "неизвестная"}`, "err");
@@ -150,7 +162,7 @@ export default function PlaylistsPage() {
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
@@ -162,16 +174,39 @@ export default function PlaylistsPage() {
         subtitle="Ежедневный плейлист пересоздаётся автоматически (если уже есть — удаляется и делается заново). Cold-start в 3 шага."
         actions={
           <div className="flex items-center gap-2 flex-wrap">
-            <Button variant="ghost" onClick={myWave} disabled={busy}>
-              <Play className="w-4 h-4" /> Моя волна
+            <Button variant="ghost" onClick={myWave} disabled={busyAny}>
+              {busy === "wave"
+                ? <><RefreshCw className="w-4 h-4 animate-spin" /> Собираю волну…</>
+                : <><Play className="w-4 h-4" /> Моя волна</>}
             </Button>
-            <Button onClick={generate} disabled={busy}>
-              <RefreshCw className={`w-4 h-4 ${busy ? "animate-spin" : ""}`} />
-              {busy ? "Генерирую…" : "Пройти холодный старт"}
+            <Button onClick={generate} disabled={busyAny}>
+              <RefreshCw className={`w-4 h-4 ${busy === "generate" ? "animate-spin" : ""}`} />
+              {busy === "generate" ? "Генерирую…" : "Пройти холодный старт"}
             </Button>
           </div>
         }
       />
+
+      {/* Что именно идёт и сколько уже ждём. Без этого нажатие на «Создать
+          AI-микс» выглядит как «ничего не произошло»: запрос синхронный, а
+          ответ приходит через секунды-минуты (LLM + сбор кандидатов). */}
+      {busyAny && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-accent/30 bg-accent/5 px-4 py-3 text-sm">
+          <RefreshCw className="w-4 h-4 shrink-0 animate-spin text-accent" />
+          <span className="text-text font-medium">
+            {{
+              generate: "Собираю ежедневный плейлист",
+              cold: "Считаю cold-start",
+              ai: "AI подбирает треки",
+              wave: "Собираю вашу волну",
+              weekly: "Ищу открытия недели",
+              clusters: "Пересобираю кластеры",
+              export: "Выгружаю в Navidrome",
+            }[busy] ?? "Работаю"}
+          </span>
+          <span className="text-muted">уже {elapsed} с — не закрывайте страницу</span>
+        </div>
+      )}
 
       <Section title="Алгоритм">
         <Card>
@@ -221,26 +256,28 @@ export default function PlaylistsPage() {
             <Button
               variant="ghost"
               onClick={coldStartOnly}
-              disabled={busy}
+              disabled={busyAny}
             >
-              <Sparkles className="w-4 h-4" /> Тест cold-start
+              {busy === "cold"
+                ? <><RefreshCw className="w-4 h-4 animate-spin" /> Считаю…</>
+                : <><Sparkles className="w-4 h-4" /> Тест cold-start</>}
             </Button>
             <Button
               variant="ghost"
               onClick={async () => {
-                setBusy(true);
+                setBusy("clusters");
                 try {
                   const r = await api.buildClusters();
                   toast(`Кластеризация запущена (задача ${r.run_id.slice(0, 8)}). Следите в «Задачи и логи».`, "ok");
                 } catch (e: unknown) {
                   toast(fmtErr(e), "err");
                 } finally {
-                  setBusy(false);
+                  setBusy(null);
                 }
               }}
-              disabled={busy}
+              disabled={busyAny}
             >
-              Пересобрать кластеры
+              {busy === "clusters" ? "Запускаю…" : "Пересобрать кластеры"}
             </Button>
           </div>
         </Card>
@@ -255,8 +292,10 @@ export default function PlaylistsPage() {
               onChange={(e) => setAiQuery(e.target.value)}
               placeholder="Например: вечерний лоуфай для работы, без вокала"
             />
-            <Button onClick={aiMix} disabled={busy}>
-              <Wand2 className="w-4 h-4" /> Создать AI-микс
+            <Button onClick={aiMix} disabled={busyAny}>
+              {busy === "ai"
+                ? <><RefreshCw className="w-4 h-4 animate-spin" /> AI думает…</>
+                : <><Wand2 className="w-4 h-4" /> Создать AI-микс</>}
             </Button>
           </div>
           <div className="text-xs text-muted mt-2">Использует настроенного AI-провайдера (Настройки → AI). Без AI — подберёт по ключевым словам.</div>
@@ -278,7 +317,7 @@ export default function PlaylistsPage() {
             <Button
               onClick={async () => {
                 if (!coldUser) { toast("Выбери пользователя для Открытий недели", "info"); return; }
-                setBusy(true);
+                setBusy("weekly");
                 try {
                   const r = await api.weeklyDiscovery(coldUser, coldN || 30);
                   mutate();
@@ -288,12 +327,14 @@ export default function PlaylistsPage() {
                 } catch (e: unknown) {
                   toast(fmtErr(e), "err");
                 } finally {
-                  setBusy(false);
+                  setBusy(null);
                 }
               }}
-              disabled={busy}
+              disabled={busyAny}
             >
-              <Sparkles className="w-4 h-4" /> Собрать открытия недели
+              {busy === "weekly"
+                ? <><RefreshCw className="w-4 h-4 animate-spin" /> Собираю…</>
+                : <><Sparkles className="w-4 h-4" /> Собрать открытия недели</>}
             </Button>
           </div>
           {weekly.length > 0 && (
@@ -368,7 +409,7 @@ export default function PlaylistsPage() {
                   <Link href={`/playlists/${p.id}`} className="kuma-btn kuma-btn-ghost text-sm">
                     Открыть
                   </Link>
-                  <button className="kuma-pill hover:text-text" onClick={() => exportOne(p.id, p.name)} disabled={busy}>
+                  <button className="kuma-pill hover:text-text" onClick={() => exportOne(p.id, p.name)} disabled={busyAny}>
                     <Send className="w-3 h-3" /> {p.in_navidrome ? "обновить в Navidrome" : "в Navidrome"}
                   </button>
                   {p.is_hidden ? (

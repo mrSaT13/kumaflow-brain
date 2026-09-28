@@ -242,9 +242,17 @@ def recommend_by_track(track_id: str, top_k: int = 20) -> list[dict[str, Any]]:
 # .in_(ids) на 150k id (лимиты параметров БД). Один проход лёгкими колонками,
 # фичи/кластеры — маленькими таблицами целиком.
 
-def _load_track_rows(db):
-    """Лёгкие строки треков: только колонки, нужные скорингу (атрибутный доступ)."""
-    return db.query(
+def _load_track_rows(db, playable_only: bool = False):
+    """Лёгкие строки треков: только колонки, нужные скорингу (атрибутный доступ).
+
+    playable_only=True оставляет лишь то, что Navidrome сможет отдать плееру.
+    Нужен генераторам плейлистов: локальные файлы (disk:/demo-) — служебные,
+    они нужны ради аудио-фичей, но в плейлисте им место только мешает, потому
+    что при выгрузке `playlist_push` их отбрасывает и очередь выходит короче
+    запрошенного. Для поиска и подбора похожих фильтр не нужен — там локальные
+    копии не мешают, а иногда полезны.
+    """
+    q = db.query(
         Track.id,
         Track.title,
         Track.artist_name,
@@ -255,7 +263,26 @@ def _load_track_rows(db):
         Track.starred,
         Track.rating,
         Track.last_played_at,
-    ).all()
+    )
+    if playable_only:
+        try:
+            from app.services import playable as _pl
+
+            f = _pl.playable_filter(db)
+            if f is not None:
+                # external_id нужен и в выборке, чтобы отсечь уже в питоне —
+                # LIKE по неиндексированному полю на 150k строк дорог.
+                q = q.add_columns(Track.external_id)
+                rows = q.all()
+                out = []
+                for r in rows:
+                    ext = r[-1]
+                    if _pl.is_playable(ext):
+                        out.append(r[:-1])
+                return out
+        except Exception:  # noqa: BLE001 — не блокируем подбор из-за фильтра
+            pass
+    return q.all()
 
 
 def _load_feat_map(db) -> dict[str, TrackFeatures]:
@@ -603,7 +630,9 @@ def cold_start_playlist(server_id: str, n: int = 30, user_id: str | None = None,
     Один проход лёгкими строками (без ORM-нагрузки): безопасно на 150k+ треков.
     """
     with session_scope() as db:
-        rows = _load_track_rows(db)
+        # Плейлист уедет в Navidrome, а Navidrome не знает локальных файлов:
+        # оставляем только те треки, у которых есть его id.
+        rows = _load_track_rows(db, playable_only=True)
         feat_map = _load_feat_map(db)
         cluster_map = _load_cluster_map(db)
         hist_cnt: dict[str, int] = {}

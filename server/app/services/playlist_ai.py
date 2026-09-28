@@ -85,7 +85,19 @@ def _build_candidates(db: Session, query: str, desired: int = 30, limit: int = 2
     from app.services.vibe import analyze_track, detect_mood, vibe_similarity
 
     # pool: все треки (в prod 700 stratified — упрощаем)
-    pool = db.query(Track).limit(2000).all()
+    #
+    # Только то, что сыграет плеер. Локальные файлы (disk:/demo-) — служебные:
+    # они нужны ради аудио-фичей, но в плейлисте им место только мешает, потому
+    # что при выгрузке в Navidrome `playlist_push` их отбрасывает и очередь
+    # выходит короче, чем запросили. В демо-режиме фильтр выключен сам.
+    q = db.query(Track)
+    try:
+        from app.services import playable as _pl
+
+        q = _pl.apply(q, db)
+    except Exception:  # noqa: BLE001 — не блокируем подбор из-за фильтра
+        pass
+    pool = q.limit(2000).all()
     if not pool:
         return []
     # vibe target из запроса (эвристика mood слов)

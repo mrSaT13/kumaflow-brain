@@ -411,13 +411,41 @@ def similar_artists(name: str, limit: int = Query(6, le=12), db: Session = Depen
 def list_duplicates(limit: int = Query(200, le=1000), db: Session = Depends(get_db)):
     """Группы точных дублей (артист+название+длительность±2с, без live/remix-версий).
 
-    keep_id — кого оставить (больше прослушиваний/starred/старше).
+    keep_id — кого оставить. Приоритет: трек Navidrome важнее локального файла
+    (иначе плейлист потеряет его при выгрузке), затем прослушивания/starred/возраст.
     """
     from app.services import dedup as _dd
 
     groups = _dd.find_duplicate_groups(db, limit_groups=limit)
     dup_tracks = sum(len(g["tracks"]) - 1 for g in groups)
     return {"groups": groups, "group_count": len(groups), "duplicate_tracks": dup_tracks}
+
+
+@router.get("/source-report")
+def library_source_report(db: Session = Depends(get_db)):
+    """Разбор библиотеки: сколько треков играет в плеере, сколько только файлы.
+
+    Read-only. Показывает, сколько локальных копий имеют Navidrome-двойник
+    (их можно слить без потерь — фичи переедут) и сколько существуют без
+    двойника (такие трогать нельзя, иначе песня исчезнет из мозга).
+    """
+    from app.services import dedup as _dd
+
+    return _dd.source_report(db)
+
+
+@router.post("/recannonicalize", dependencies=[Depends(require_admin)])
+def recannonicalize(payload: dict | None = None, db: Session = Depends(get_db)):
+    """Слить дубли в пользу Navidrome: {dry_run=true} по умолчанию.
+
+    dry_run — только план (что и куда переедет), база не меняется.
+    Без dry_run — переливает локальные копии в Navidrome-треки: аудио-фичи,
+    эмбеддинги, лайки и плейлисты переезжают, трек начинает выгружаться в плеер.
+    """
+    from app.services import dedup as _dd
+
+    dry = bool((payload or {}).get("dry_run", True))
+    return _dd.recannonicalize(db, dry_run=dry)
 
 
 @router.post("/duplicates/merge", dependencies=[Depends(require_admin)])

@@ -592,6 +592,28 @@ export const api = {
     ),
   autoMergeDuplicates: () =>
     http<{ ok: boolean; groups: number; merged: number }>(`/api/library/duplicates/auto`, { method: "POST" }),
+  sourceReport: () =>
+    http<{
+      total: number;
+      navidrome: number;
+      local: number;
+      local_with_navidrome_twin: number;
+      local_orphans_no_twin: number;
+      cross_source_groups: number;
+      needs_recannonicalize: number;
+      with_features: number;
+      orphan_samples: { id: string; title: string; artist_name: string }[];
+      note: string;
+    }>(`/api/library/source-report`),
+  recannonicalize: (dry_run: boolean) =>
+    http<{
+      dry_run: boolean;
+      groups: number;
+      recannonicalize: number;
+      drop_local?: number;
+      tracks_to_merge?: number;
+      tracks_merged?: number;
+    }>(`/api/library/recannonicalize`, { method: "POST", body: JSON.stringify({ dry_run }) }),
   getDedupSettings: () => http<{ auto_merge: boolean }>(`/api/library/dedup-settings`),
   saveDedupSettings: (auto_merge: boolean) =>
     http<{ ok: boolean }>(`/api/library/dedup-settings`, { method: "POST", body: JSON.stringify({ auto_merge }) }),
