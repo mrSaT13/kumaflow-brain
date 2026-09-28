@@ -430,6 +430,27 @@ class TasteProfile(Base):
     )
 
 
+class WaveSettings(Base):
+    """Общие настройки «Моей волны» (user_id PK): одна волна на всех устройствах.
+
+    Пилюли (mood/activity/characteristic/language), выбранные на любом плеере,
+    лежат здесь — остальные подхватывают при старте. Сброс на одном устройстве
+    (PUT {} / DELETE) виден всем: version растёт, очередь перестраивается
+    следующей докруткой. Новая таблица — create_all создаёт сам.
+    """
+
+    __tablename__ = "wave_settings"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    settings: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class ScanRun(Base):
     __tablename__ = "scan_runs"
 

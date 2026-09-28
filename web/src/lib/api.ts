@@ -495,6 +495,15 @@ export const api = {
     http<{ ok: boolean; user_id: string; seeds: string[] }>(
       `/api/wave/seeds?user_id=${encodeURIComponent(user_id)}&limit=${limit}`,
     ),
+  /** Общие пилюли волны (одни на всех устройствах): mood/activity/characteristic/language. */
+  waveSettings: (user_id: string) =>
+    http<{ ok: boolean; user_id: string; settings: Record<string, string>; version: number; updated_at: string | null }>(
+      `/api/wave/settings?user_id=${encodeURIComponent(user_id)}`,
+    ),
+  saveWaveSettings: (user_id: string, settings: Record<string, string>) =>
+    http<{ ok: boolean; user_id: string; settings: Record<string, string>; version: number; updated_at: string | null }>(
+      `/api/wave/settings`, { method: "PUT", body: JSON.stringify({ user_id, settings }) },
+    ),
   // position_sec/duration_sec/device — это handoff: по ним другое устройство
   // продолжает прослушивание с того же места (GET /api/wave/resume).
   wavePublish: (body: { user_id: string; queue: string[]; current_track_id?: string | null; position_sec?: number | null; duration_sec?: number | null; device?: string; paused?: boolean }) =>

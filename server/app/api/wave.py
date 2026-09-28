@@ -206,13 +206,20 @@ def wave_continue(payload: dict, request: Request, db: Session = Depends(get_db)
     check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
     try:
+        # Общие пилюли волны: чего запрос не прислал — доберём из stored
+        # (настроил на мобильном — ПК подхватит). Явный ключ запроса
+        # побеждает даже пустым («авто» здесь — значит «авто»).
+        from app.services import wave_settings as _wset
+
+        _eff = _wset.effective_settings(db, str(u.id),
+                                        (payload or {}).get('settings'))
         return {'ok': True, 'user_id': str(u.id),
                 **_wave.wave_continue(
                     db, str(u.id),
                     queue=list((payload or {}).get('queue') or []),
                     current_track_id=(payload or {}).get('current_track_id'),
                     count=int((payload or {}).get('count') or 20),
-                    settings=dict((payload or {}).get('settings') or {}),
+                    settings=_eff,
                     exclude_ids=list((payload or {}).get('exclude_ids') or []),
                     recent_events=list((payload or {}).get('recent_events') or []),
                     ratings_delta=list((payload or {}).get('ratings_delta') or []),
@@ -236,6 +243,53 @@ def wave_seeds(user_id: str, request: Request, characteristic: str | None = None
     seeds = _wave.select_seeds(db, str(u.id), characteristic,
                                limit=max(1, min(10, int(limit or 5))))
     return {'ok': True, 'user_id': str(u.id), 'seeds': seeds}
+
+
+@router.get('/settings')
+def wave_settings_get(user_id: str, request: Request, db: Session = Depends(get_db)):
+    """Общие настройки волны (одни на всех устройствах).
+
+    {settings{mood?, activity?, characteristic?, language?}, version, updated_at}.
+    Клиент читает при старте плеера; пишет — при смене пилюль.
+    """
+    from app.services import wave_settings as _wset
+
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
+    u = _require_user(db, user_id)
+    return {'ok': True, 'user_id': str(u.id), **_wset.get_settings(db, str(u.id))}
+
+
+@router.put('/settings')
+def wave_settings_put(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Сохранить пилюли волны (merge). Пустая строка стирает пилюлю.
+
+    Body: {user_id, settings{mood?, activity?, characteristic?, language?}}.
+    PUT {} — сброс для всех устройств (version растёт, очередь
+    перестраивается следующей докруткой).
+    """
+    from app.services import wave_settings as _wset
+
+    user_id = str((payload or {}).get('user_id') or '')
+    if not user_id:
+        raise HTTPException(400, 'user_id required')
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
+    u = _require_user(db, user_id)
+    patch = (payload or {}).get('settings')
+    if patch is not None and not isinstance(patch, dict):
+        raise HTTPException(400, 'settings must be an object')
+    return {'ok': True, 'user_id': str(u.id),
+            **_wset.save_settings(db, str(u.id), patch or {})}
+
+
+@router.delete('/settings')
+def wave_settings_delete(user_id: str, request: Request, db: Session = Depends(get_db)):
+    """Сброс настроек волны для всех устройств (то же, что PUT {})."""
+    from app.services import wave_settings as _wset
+
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
+    u = _require_user(db, user_id)
+    return {'ok': True, 'user_id': str(u.id),
+            **_wset.reset_settings(db, str(u.id))}
 
 
 @router.post('/publish')

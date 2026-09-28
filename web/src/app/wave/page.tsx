@@ -163,6 +163,35 @@ export default function WavePage() {
     lastLocalEdit.current = 0; // смена плеера — разрешаем свежий слепок сразу
   }
   const moodOptions = useMemo(() => (profile?.moods ?? []).map((m) => m.name), [profile]);
+  // Общие пилюли волны: выбрал на мобильном — веб подхватит (и наоборот).
+  // Поллинг 30с: сброс на другом устройстве станет виден без перезагрузки.
+  const { data: sharedSettings, mutate: mutateShared } = useSWR(
+    userId ? ["wave-settings", userId] : null,
+    () => api.waveSettings(userId),
+    { refreshInterval: 30000 },
+  );
+  const moodTouched = useRef(false);
+  useEffect(() => { moodTouched.current = false; }, [userId]);
+  // Серверная пилюля первична, пока юзер тут ничего не трогал.
+  useEffect(() => {
+    if (!moodTouched.current && sharedSettings && !mood) {
+      const m = sharedSettings.settings?.mood ?? "";
+      if (m) setMood(m);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sharedSettings]);
+  async function changeMood(v: string) {
+    moodTouched.current = true;
+    setMood(v);
+    setPhoneMirror(false);
+    if (!userId) return;
+    try {
+      const r = await api.saveWaveSettings(userId, v ? { mood: v } : { mood: "" });
+      mutateShared(r, false);
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    }
+  }
 
   const cur = queue[Math.min(playingIdx, queue.length - 1)] ?? null;
   const nxt = queue[Math.min(playingIdx + 1, queue.length - 1)] ?? null;
@@ -477,8 +506,8 @@ export default function WavePage() {
             <select
               className="kuma-input kuma-input-inline w-40"
               value={mood}
-              onChange={(e) => { setMood(e.target.value); setPhoneMirror(false); }}
-              title="Настроение волны: авто — мозг решает сам по треку, времени суток и твоим вкусам; выбери вручную чтобы подрулить"
+              onChange={(e) => void changeMood(e.target.value)}
+              title="Настроение волны — общее для всех устройств: выбрал здесь — мобила и ПК подхватят; «авто» снимает пилюлю везде"
             >
               <option value="">Настроение: авто</option>
               {moodOptions.map((m) => (

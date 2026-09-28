@@ -333,7 +333,7 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
         action = str(e.get("action") or "")
         # Мобила шлёт external_id (Navidrome song id) — резолвим в наш uuid.
         _t = _gt(db, raw_tid) if raw_tid else None
-        if _t is None or action not in ACTIONS:
+        if _t is None:
             skipped += 1
             continue
         tid = str(_t.id)
@@ -342,6 +342,39 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
             pos = int(pos) if pos is not None else None
         except (TypeError, ValueError):
             pos = None
+        # Явные оценки из плеера (♥/👎 на треке волны): раньше валились
+        # в skipped — их нет в ACTIONS. Итог: лайк не создавал Favorite и не
+        # закрывал «показ» в метриках, отсюда «ЛАЙК С ВОЛНЫ 0%» при живых
+        # лайках. Теперь — как rate: оценка + исход рекомендации.
+        if action in ("like", "favorite"):
+            db.query(TrackDislike).filter_by(user_id=user_id, track_id=tid).delete()
+            if db.query(Favorite).filter_by(user_id=user_id, track_id=tid).first() is None:
+                db.add(Favorite(user_id=user_id, track_id=tid))
+            update_taste_signals(db, user_id, _t, action, pos, _hour, _dow)
+            try:
+                from app.services import rec_feedback as _rfb
+
+                _rfb.mark_outcome(db, user_id, tid, "like", pos,
+                                  _t.duration_sec if _t else None)
+            except Exception:
+                pass
+            stored += 1
+            continue
+        if action == "dislike":
+            _add_dislike(db, user_id, tid, "mobile")
+            update_taste_signals(db, user_id, _t, action, pos, _hour, _dow)
+            try:
+                from app.services import rec_feedback as _rfb2
+
+                _rfb2.mark_outcome(db, user_id, tid, "dislike", pos,
+                                   _t.duration_sec if _t else None)
+            except Exception:
+                pass
+            stored += 1
+            continue
+        if action not in ACTIONS:
+            skipped += 1
+            continue
         db.add(PlayEvent(user_id=user_id, track_id=tid, action=action,
                          position_sec=pos, hour=_hour,
                          day_of_week=_dow))
