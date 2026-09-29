@@ -120,6 +120,36 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Слэш-редиректы Starlette отдают Location с хостом, который видит backend
+    # (http://backend:8000 за Next-rewrite). Браузер идёт туда напрямую —
+    # имени backend в его DNS нет — и падает в CORS/DNS вместо ответа.
+    # Так умирали /api/me/devices (роут "/" vs запрос без слэша) и любые
+    # будущие несовпадения слэшей. Режем абсолют в относительный: валидно
+    # для всех клиентов (плееры резолвят от своего хоста).
+    from starlette.middleware.base import BaseHTTPMiddleware as _BaseMW
+
+    class _RelativeRedirect(_BaseMW):
+        async def dispatch(self, request, call_next):
+            resp = await call_next(request)
+            try:
+                loc = resp.headers.get("location")
+            except Exception:
+                loc = None
+            if loc and resp.status_code in (301, 302, 307, 308) and "://" in loc:
+                try:
+                    from urllib.parse import urlsplit as _split
+
+                    parts = _split(loc)
+                    if parts.path.startswith("/api/"):
+                        resp.headers["location"] = parts.path + (
+                            ("?" + parts.query) if parts.query else ""
+                        )
+                except Exception:
+                    pass
+            return resp
+
+    app.add_middleware(_RelativeRedirect)
+
     app.include_router(status.router, prefix="/api", tags=["status"])
     app.include_router(settings_api.router, prefix="/api/settings", tags=["settings"])
     app.include_router(library.router, prefix="/api/library", tags=["library"])

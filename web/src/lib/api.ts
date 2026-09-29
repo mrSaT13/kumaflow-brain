@@ -555,7 +555,9 @@ export const api = {
   waveSeedClear: (user_id: string) =>
     http<{ ok: boolean }>(`/api/wave/seed?user_id=${encodeURIComponent(user_id)}`, { method: "DELETE" }),
   /** Мои устройства: живые слоты + имена + токены. user_id НЕ передаём —
-   *  бэк берёт владельца из токена (чужие устройства не видны конструкцией). */
+   *  бэк берёт владельца из токена (чужие устройства не видны конструкцией).
+   *  Слэш в конце обязателен: роут "/" без него даёт 307 с хостом backend,
+   *  который браузер не резолвит (CORS). */
   myDevices: () =>
     http<{
       ok: boolean; user_id: string;
@@ -567,7 +569,7 @@ export const api = {
       tokens: { id: string; name: string; prefix: string; scopes: string[]; enabled: boolean; last_used_at?: string | null; name_duplicate: boolean }[];
       duplicate_token_names: string[];
       note?: string;
-    }>(`/api/me/devices`),
+    }>(`/api/me/devices/`),
   renameDevice: (device_id: string, display_name: string) =>
     http<{ ok: boolean; device_id: string; display_name?: string | null; reset?: boolean }>(
       `/api/me/devices/${encodeURIComponent(device_id)}`,

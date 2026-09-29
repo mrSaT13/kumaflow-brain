@@ -34,6 +34,7 @@ def _me(request: Request, user_id: str | None = None) -> str:
     )
 
 
+@router.get("")
 @router.get("/")
 def my_devices(request: Request, user_id: str | None = None, db: Session = Depends(get_db)):
     """Все устройства владельца токена: живые слоты + сохранённые имена + токены.

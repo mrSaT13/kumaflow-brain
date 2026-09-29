@@ -45,6 +45,7 @@ def _scope(db, user_id: str | None, all: bool = False):
     return q
 
 
+@router.get("")
 @router.get("/")
 def list_notifications(user_id: str | None = None, limit: int = 50, all: bool = False,
                        db: Session = Depends(get_db)):
