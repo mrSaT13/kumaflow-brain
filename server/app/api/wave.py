@@ -329,13 +329,32 @@ def wave_publish(payload: dict, request: Request, db: Session = Depends(get_db))
     return {'ok': True, 'user_id': str(u.id), 'queued': len(queue), 'device_id': slot}
 
 
-def _devices_summary(user_id: str) -> list[dict]:
-    """Кратко по всем живым слотам: что показать в селекторе устройств."""
+def _devices_summary(user_id: str, db=None) -> list[dict]:
+    """Кратко по всем живым слотам: что показать в селекторе устройств.
+
+    display_name — своё имя из /api/me/devices, если есть, иначе сырая метка
+    плеера. Плеерам (телефон: «Продолжить с …») имя достаётся бесплатно в уже
+    существующем опросе — отдельного запроса не нужно.
+    """
+    names: dict[str, str] = {}
+    if db is not None:
+        try:
+            from app.db.models import DeviceName
+
+            names = {
+                d.device_slot: d.display_name
+                for d in db.query(DeviceName).filter(DeviceName.owner_user_id == user_id).all()
+            }
+        except Exception:
+            names = {}
     out: list[dict] = []
     for slot, e, age in _live_slots(user_id):
         q = [str(x) for x in (e.get('queue') or []) if str(x)]
+        raw = e.get('device') or slot
         out.append({'device_id': slot,
-                    'device': e.get('device') or slot,
+                    'device': raw,
+                    'display_name': names.get(slot) or raw,
+                    'renamed': slot in names,
                     'age_sec': int(age),
                     'queue_len': len(q),
                     'paused': bool(e.get('paused'))})
@@ -356,7 +375,7 @@ def wave_resume(user_id: str, request: Request, device: str | None = None,
 
     check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
-    devices = _devices_summary(str(u.id))
+    devices = _devices_summary(str(u.id), db)
     slot: str | None = _norm_device(device) if device else None
     entry: dict | None = None
     age: float | None = None
@@ -479,7 +498,7 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
 
     check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
-    devices = _devices_summary(str(u.id))
+    devices = _devices_summary(str(u.id), db)
     slot: str | None = _norm_device(device) if device else None
     entry: dict | None = None
     age: float | None = None
@@ -616,3 +635,141 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
             'device_id': slot,
             'devices': devices,
             'paused': bool(entry.get('paused'))}
+
+
+def _seed_to_dict(s) -> dict | None:
+    if s is None:
+        return None
+    return {'kind': s.kind, 'ref': s.ref, 'label': s.label,
+            'playlist_id': s.playlist_id,
+            'created_at': s.created_at.isoformat() if s.created_at else None}
+
+
+@router.get('/seed')
+def wave_seed_get(user_id: str, request: Request, db: Session = Depends(get_db)):
+    """Отдать записанный сид радио для капсулы на главной (или null).
+
+    Мозг ЗАПИСЫВАЕТ сид при старте радио (POST) и ОТДАЁТ здесь: зашёл через
+    неделю — видишь «волна по Eminem», а не пустое место.
+    """
+    from app.db.models import WaveSeed
+
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
+    u = _require_user(db, user_id)
+    s = db.get(WaveSeed, str(u.id))
+    return {'ok': True, 'user_id': str(u.id), 'seed': _seed_to_dict(s)}
+
+
+@router.post('/seed')
+def wave_seed_start(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Старт радио по сиду для плеера (кнопок в вебе нет — плеер дёргает сам).
+
+    {user_id, kind='artist'|'track', artist_name | track_id}.
+    Строит очередь гибридом (локальные похожие + серверные getSimilarSongs2,
+    ранжирует общий скоринг волны), ЗАПИСЫВАЕТ сид и собирает/обновляет
+    автоплейлист «Волна по {label} · {дата}» (авто-пуш — за тумблером).
+    Капсула «волна по Eminem» lives in плеерах: GET /seed отдаёт сид.
+    """
+    import uuid as _uuid
+    from datetime import datetime
+
+    from app.core.time import local_today
+    from app.db.models import Playlist, PlaylistTrack, WaveSeed
+    from app.services import seed_radio as _sr
+
+    user_id = str((payload or {}).get('user_id') or '')
+    if not user_id:
+        raise HTTPException(400, 'user_id required')
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
+    u = _require_user(db, user_id)
+    kind = str((payload or {}).get('kind') or 'artist').strip().lower()
+    if kind == 'artist':
+        artist = str((payload or {}).get('artist_name') or '').strip()
+        if not artist:
+            raise HTTPException(400, 'artist_name required')
+        res = _sr.artist_radio(db, str(u.id), artist)
+        ref = artist
+    elif kind == 'track':
+        track_ref = str((payload or {}).get('track_id') or '').strip()
+        if not track_ref:
+            raise HTTPException(400, 'track_id required')
+        res = _sr.track_radio(str(u.id), track_ref)
+        ref = res.get('seed_track_id') or track_ref
+    else:
+        raise HTTPException(400, 'kind: artist|track')
+    tids = res.get('tracks') or []
+    if not tids:
+        raise HTTPException(404, res.get('error') or 'сид не нашёлся в играбельной библиотеке')
+
+    # Энергетическая арка для трек-сида (у артиста уже внутри): сид первым.
+    if kind == 'track':
+        try:
+            from app.db.models import Track
+            from app.services.orchestrator import create_energy_wave
+
+            tracks = [t for t in (db.get(Track, tid) for tid in tids) if t]
+            waved = create_energy_wave(tracks)
+            order = {str(t.id): i for i, t in enumerate(waved)}
+            first, rest = tids[0], tids[1:]
+            tids = [first] + sorted(rest, key=lambda tid: order.get(tid, 999))
+        except Exception:
+            pass
+
+    today = local_today()
+    label = res.get('label') or ref
+    # Старый плейлист этого же сида заменяем (как smart: не копим).
+    olds = db.query(Playlist).filter(
+        Playlist.is_auto_generated.is_(True),
+        Playlist.server_id == u.server_id,
+        Playlist.owner_user_id == u.id,
+    ).all()
+    for p in olds:
+        if str(p.name or '').startswith(f"Волна по {label} "):
+            db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
+            db.delete(p)
+    db.flush()
+    pl = Playlist(id=str(_uuid.uuid4()), server_id=u.server_id, owner_user_id=u.id,
+                  name=f"Волна по {label} · {today.isoformat()}",
+                  is_auto_generated=True,
+                  generated_for_date=datetime.combine(today, datetime.min.time()))
+    db.add(pl)
+    db.flush()
+    for pos, tid in enumerate(tids):
+        db.add(PlaylistTrack(playlist_id=pl.id, track_id=tid, position=pos))
+    s = db.get(WaveSeed, str(u.id))
+    if s is None:
+        s = WaveSeed(user_id=str(u.id), kind=kind, ref=ref, label=label,
+                     playlist_id=str(pl.id))
+        db.add(s)
+    else:
+        s.kind, s.ref, s.label, s.playlist_id = kind, ref, label, str(pl.id)
+    db.commit()
+
+    pushed = None
+    try:
+        from app.services.playlist_push import maybe_auto_push as _push
+
+        from app.db.database import session_scope as _scope
+
+        with _scope() as _pdb:
+            _pr = _push(_pdb, str(pl.id))
+            if _pr and _pr.get('ok'):
+                pushed = _pr.get('exported')
+    except Exception:
+        pass
+    return {'ok': True, 'user_id': str(u.id), 'seed': _seed_to_dict(s),
+            'playlist_id': str(pl.id), 'tracks': tids,
+            'similar_artists': res.get('similar_artists') or [],
+            'server_used': bool(res.get('server_used')), 'pushed': pushed}
+
+
+@router.delete('/seed')
+def wave_seed_clear(user_id: str, request: Request, db: Session = Depends(get_db)):
+    """Сбросить сид (плейлист остаётся, волна снова обычная)."""
+    from app.db.models import WaveSeed
+
+    check_body_user(getattr(request.state, "brain_token", None), user_id)
+    u = _require_user(db, user_id)
+    db.query(WaveSeed).filter(WaveSeed.user_id == str(u.id)).delete()
+    db.commit()
+    return {'ok': True, 'user_id': str(u.id), 'seed': None}
