@@ -6,6 +6,7 @@ import { KeyRound, LogIn, UserRound } from "lucide-react";
 import { Button, Card, Input } from "@/components/ui";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api, setBrowserToken } from "@/lib/api";
+import KumaSplash from "@/components/KumaSplash";
 
 /** Gate: если API закрыт токенами, а у браузера токена нет — окно логина. */
 export default function LoginGate({ children }: { children: React.ReactNode }) {
@@ -71,11 +72,7 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
   }
 
   if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-sm text-muted">Загрузка…</div>
-      </div>
-    );
+    return <KumaSplash status="Загрузка…" />;
   }
   // бэкенд недоступен — не лочим весь UI, страницы сами покажут ошибки
   if (error || !data) return <>{children}</>;

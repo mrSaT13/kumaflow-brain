@@ -20,7 +20,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#111111",
+  themeColor: "#122131",
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
@@ -32,7 +32,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.classList.add('dark');}catch(e){}})();`,
+            __html: `(function(){try{var t=localStorage.getItem('theme')||'polar-dark';var r=document.documentElement;if(t==='dark'||t==='polar-dark')r.classList.add('dark');if(t==='polar-dark')r.classList.add('polar-dark');if(t==='polar-light')r.classList.add('polar-light');}catch(e){try{document.documentElement.classList.add('dark','polar-dark');}catch(_){}}})();`,
           }}
         />
         <ToastProvider>

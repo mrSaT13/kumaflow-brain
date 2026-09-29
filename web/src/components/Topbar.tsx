@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, Menu, Moon, Sun } from "lucide-react";
+import { Bell, Menu, Palette } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -8,6 +8,14 @@ import useSWR from "swr";
 import { api } from "@/lib/api";
 import { fmtDate } from "@/lib/format";
 import PwaInstall from "@/components/PwaInstall";
+import { applyTheme, readTheme, type ThemeId } from "@/lib/theme";
+
+const THEME_LABEL: Record<ThemeId, string> = {
+  "polar-dark": "Полар тёмная",
+  "polar-light": "Полар светлая",
+  dark: "Тёмная",
+  light: "Светлая",
+};
 
 const KIND_DOT: Record<string, string> = {
   success: "bg-green-500",
@@ -119,23 +127,17 @@ function BellBox() {
 }
 
 export function Topbar({ onMenu }: { onMenu?: () => void } = {}) {
-  const [dark, setDark] = useState(false);
+  const [theme, setTheme] = useState<ThemeId>("polar-dark");
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
-    setDark(document.documentElement.classList.contains("dark"));
+    setTheme(readTheme());
   }, []);
 
-  function toggle() {
-    const next = !dark;
-    setDark(next);
-    document.documentElement.classList.toggle("dark", next);
-    try {
-      localStorage.setItem("theme", next ? "dark" : "light");
-    } catch {
-      /* приватный режим — тема просто не сохранится */
-    }
+  function change(next: ThemeId) {
+    setTheme(next);
+    applyTheme(next);
   }
 
   if (!mounted) {
@@ -165,10 +167,21 @@ export function Topbar({ onMenu }: { onMenu?: () => void } = {}) {
       <div className="flex items-center gap-2 shrink-0">
         <BellBox />
         <PwaInstall />
-        <button onClick={toggle} className="kuma-pill shrink-0" aria-label="Переключить тему" suppressHydrationWarning>
-          {dark ? <Sun className="w-3 h-3" /> : <Moon className="w-3 h-3" />}
-          <span className="hidden sm:inline">{dark ? "Светлая" : "Тёмная"}</span>
-        </button>
+        <label className="kuma-pill shrink-0 cursor-pointer" aria-label="Тема оформления" suppressHydrationWarning>
+          <Palette className="w-3 h-3" />
+          <select
+            value={theme}
+            onChange={(e) => change(e.target.value as ThemeId)}
+            className="bg-transparent outline-none cursor-pointer text-xs max-w-28"
+            aria-label="Тема оформления"
+          >
+            {(Object.keys(THEME_LABEL) as ThemeId[]).map((t) => (
+              <option key={t} value={t}>
+                {THEME_LABEL[t]}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
     </div>
   );
