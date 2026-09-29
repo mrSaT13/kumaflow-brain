@@ -1,12 +1,12 @@
-"""Дедупликация треков: поиск и аккуратное сшивание дублей.
+"""Дедупликация треков: две библиотеки в одной таблице, один канонический трек.
 
-Точный дубль (кандидат на авто-слияние): одинаковые нормализованные
-артист + название + длительность (±2с). Несколько проверок перед сшиванием:
-  1) группы только из >=2 треков с одинаковым ключом;
-  2) live/remix/edit/instrumental-маркеры в скобках — разные версии, не трогаем;
-  3) сшиваем в канонический (больше прослушиваний/starred/старше), FK переносим.
-Похожие (тот же артист+базовое название, но длительность/версия различаются) —
-только на ручное решение, автоматом никогда.
+Пары «локальный файл ↔ трек Navidrome» ищутся по нормализованным
+артисту и названию (БЕЗ длительности в ключе — mutagen и сканер Navidrome
+считают длину по-разному, бакет разводил пары). Длительность решает
+«склеивать или показать человеку» внутри match_tier.
+Уровни exact_meta/norm_meta сливаются автоматически, остальное —
+в needs_review. Каноническим всегда становится трек Navidrome
+(только у него есть id, который понимает плеер).
 """
 from __future__ import annotations
 
@@ -44,9 +44,8 @@ _VERSION_RE = re.compile(
 
 _DURATION_TOLERANCE = 2  # секунды
 
-# Префиксы external_id, которые НЕ играют в плеере.
-# Единый источник — services/playable.py (там же SQL-фильтр и has_navidrome).
-from app.services.playable import LOCAL_PREFIXES as _LOCAL_PREFIXES
+# Префиксы external_id, которые НЕ играют в плеере — единый источник
+# services/playable.py (там же SQL-фильтр и has_navidrome).
 from app.services.playable import is_local_source
 
 
@@ -167,8 +166,10 @@ def match_tier(a: dict, b: dict) -> str | None:
       exact_meta     — название + артист + альбом совпали И длительность ±2с.
                        Это наш основной случай: теги одного файла против
                        метаданных того же файла из Navidrome.
-      norm_meta      — название + артист совпали, длительность ±2с, альбом
-                       не учитываем (Navidrome мог назвать сборку иначе).
+      norm_meta      — название + артист совпали, длительность в мягком
+                       допуске (5с или 1%), альбом не учитываем (Navidrome
+                       мог назвать сборку иначе). Без длительности — только
+                       если и альбом сошёлся, иначе это склейка вслепую.
       title_duration — совпало только название и длительность. НЕ
                        склеиваем автоматически: артиста нет, а значит
                        «Yellow» двух разных групп склеился бы в один.
@@ -211,16 +212,30 @@ def match_tier(a: dict, b: dict) -> str | None:
     if a1 and a1 == a2:
         if al1 and al1 == al2 and d_tight:
             return "exact_meta"
-        if d_loose or d_missing:
+        if d_loose:
             return "norm_meta"
+        if d_missing:
+            # Длительности нет — вслепую клеим только если и альбом сошёлся
+            # (теги одного файла против метаданных того же файла). Разные
+            # альбомы без длительности — в review: это могут быть разные
+            # записи с одним названием.
+            if al1 and al1 == al2:
+                return "norm_meta"
+            return "title_duration"
         return None
-    if d_loose or d_missing:
+    if d_loose:
+        return "title_duration"
+    if d_missing:
         return "title_duration"
     return None
 
 
 # Уровни, которые сливаются автоматически. title_duration и None — никогда.
 AUTO_MERGE_TIERS = ("exact_meta", "norm_meta")
+# Ранг уверенности (меньше — сильнее). Отдельно от кортежа, чтобы неизвестный
+# уровень давал ValueError ещё на чтении ранга, а не падал в сравнении
+# посреди перебора пар на живой библиотеке.
+_TIER_RANK = {"exact_meta": 0, "norm_meta": 1}
 
 
 def _pair_key(artist: str | None, title: str | None) -> tuple[str, str] | None:
@@ -300,7 +315,12 @@ def find_cross_source_candidates(db, per_key_cap: int = 8) -> dict:
                 got = match_tier(lv, nv)
                 if got is None:
                     continue
-                if best_tier is None or AUTO_MERGE_TIERS.index(got) < AUTO_MERGE_TIERS.index(best_tier):
+                if got not in _TIER_RANK:
+                    # title_duration внутри слота невозможен (ключ уже
+                    # зафиксировал равенство артистов), но молча пропускаем,
+                    # а не роняем весь проход ValueError из .index().
+                    continue
+                if best_tier is None or _TIER_RANK[got] < _TIER_RANK[best_tier]:
                     best_tier, best_nav = got, nv
             if best_tier is None:
                 # Артист+название совпали, но длительность не сошлась даже
@@ -309,7 +329,7 @@ def find_cross_source_candidates(db, per_key_cap: int = 8) -> dict:
                 locals_with_pair.add(lv["id"])
                 pairs.append({**lv, "nav_id": None, "tier": None,
                               "reason": "совпали артист и название, но длительность "
-                                        "расходится больше чем на 2 секунды"})
+                                        "расходится сильнее мягкого допуска (5с или 1%)"})
                 continue
             locals_with_pair.add(lv["id"])
             pairs.append({**lv, "nav_id": best_nav["id"], "tier": best_tier,
@@ -439,6 +459,12 @@ def merge_tracks(db, keep_id: str, drop_ids: list[str]) -> dict:
             # станет дублем — ровно то, что нужно.
             drops.append(keep)
             keep = _adopt
+            # ВАЖНО: ниже весь код работает со строкой keep_id (FK-переносы,
+            # LocalFileLink, return). Без пересборки они уехали бы на старую
+            # локальную строку, которую в конце удаляем. drop_ids тоже
+            # пересобираем из объектов: в нём ещё лежит id нового keep.
+            keep_id = str(keep.id)
+            drop_ids = [str(d.id) for d in drops]
             logger.info("merge: каноническим сделан трек Navidrome {} вместо "
                         "локальной копии", str(keep.id)[:8])
         else:
@@ -634,19 +660,12 @@ def source_report(db) -> dict:
     локальный файл, и сколько локальных копий можно безопасно убрать, потому
     что у них есть Navidrome-двойник.
     """
-    from app.db.models import TrackFeatures, Track
+    from app.db.models import TrackFeatures
 
-    local_prefixes = _LOCAL_PREFIXES
-    rows = db.query(Track.id, Track.external_id, Track.duration_sec,
-                    Track.title, Track.artist_name, Track.play_count, Track.starred).all()
-    nav = loc = 0
-    orphan_samples: list[dict] = []
-    for r in rows:
-        if is_local_source(r.external_id):
-            loc += 1
-        else:
-            nav += 1
-
+    # Один полный проход вместо двух: раньше здесь отдельно грузились все
+    # треки для подсчёта nav/loc, а find_cross_source_candidates грузил их
+    # ещё раз. Счётчики nav/loc/orphan_samples нигде не использовались —
+    # в return идут итоги из cands (та же логика is_local_source).
     # --- Новый поиск пар: ТОЛЬКО артист + название, без бакета длительности ---
     # Старый путь (find_duplicate_groups + exact_key) на живых данных дал
     # 204 совпадения из ~76 тысяч файлов: бакет длительности по 5 секунд
@@ -655,8 +674,15 @@ def source_report(db) -> dict:
     # не участвует в ПОИСКЕ.
     cands = find_cross_source_candidates(db)
     pairs = cands["pairs"]
-    safe = [p for p in pairs if p.get("tier") in AUTO_MERGE_TIERS and p.get("nav_id")]
-    weak = [p for p in pairs if p not in safe]
+    # Один проход вместо двух: было `weak = [p for p in pairs if p not in safe]` —
+    # O(n²) сравнений dict'ов, на ~10к парах висело заметно.
+    safe: list[dict] = []
+    weak: list[dict] = []
+    for p in pairs:
+        if p.get("tier") in AUTO_MERGE_TIERS and p.get("nav_id"):
+            safe.append(p)
+        else:
+            weak.append(p)
     by_tier: dict[str, int] = {}
     for p in safe:
         by_tier[p["tier"]] = by_tier.get(p["tier"], 0) + 1
@@ -785,8 +811,9 @@ def recannonicalize(db, dry_run: bool = True, limit_groups: int = 10000) -> dict
             "unmatchable": len(cands["unmatchable"]),
             "unmatchable_samples": cands["unmatchable"][:10],
             "plan": plan[:200],
-            "note": ("Сливаются только exact_meta и norm_meta: совпали название, "
-                     "артист и длительность в пределах 2 секунд. Остальное — в "
+            "note": ("Сливаются только exact_meta (название+артист+альбом, "
+                     "длительность ±2с) и norm_meta (название+артист, "
+                     "длительность в мягком допуске 5с или 1%). Остальное — в "
                      "needs_review и не трогается. Каждая песня отдельным "
                      "commit: можно остановить, состояние останется целым."),
         }
