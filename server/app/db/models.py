@@ -459,6 +459,59 @@ class LocalFileLink(Base):
     )
 
 
+class DeviceName(Base):
+    """Человекочитаемое имя устройства плеера.
+
+    Слоты волны (`wave:live:{user}:{slot}`) называются стабильными UUID —
+    в селекторе волны и в «Продолжить с …» они выглядят как
+    EF9D7D06-4AED-… и ни о чём не говорят. Здесь лежит переименование
+    «слот → Десктоп ПК», одно на пользователя.
+
+    Изоляция: PK включает owner_user_id — чужие устройства не видны и не
+    правятся даже при прямом обращении (эндпоинт /api/me/* вообще не
+    принимает user_id, берёт владельца из токена). Новая таблица —
+    create_all создаёт сам, как local_file_links.
+    """
+
+    __tablename__ = "device_names"
+
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    device_slot: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class WaveSeed(Base):
+    """Активный сид радио-волны («волна по Eminem») — один на пользователя.
+
+    Мозг ЗАПИСЫВАЕТ сид при старте радио и ОТДАЁТ его для капсулы на главной:
+    зашёл через неделю — видишь «волна по Eminem», жмёшь — докручивает дальше.
+    kind: 'artist' (ref = имя артиста) или 'track' (ref = track_id).
+    label — человекочитаемое («Eminem», «City on Lockdown») для капсулы.
+    Новая таблица — create_all создаёт сам.
+    """
+
+    __tablename__ = "wave_seeds"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="artist")
+    ref: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    label: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    playlist_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("playlists.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class WaveSettings(Base):
     """Общие настройки «Моей волны» (user_id PK): одна волна на всех устройствах.
 

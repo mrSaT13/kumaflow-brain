@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import LiveWave from "@/components/LiveWave";
+import UserDevices from "@/components/UserDevices";
 import { PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
@@ -99,6 +100,10 @@ export default function UserProfilePage() {
   const { data: drift, mutate: mutateDrift } = useSWR(["drift", id], () => api.drift(id));
   const curYear = new Date().getFullYear();
   const { data: activity } = useSWR(["activity", id], () => api.userActivity(id, curYear));
+  // Свои устройства видны только себе: секция ниже рендерится лишь когда
+  // профиль открыт владельцем токена (бэк /api/me/* тоже не отдаст чужие).
+  const { data: me } = useSWR(["whoami"], () => api.whoami());
+  const isMine = !!me?.owner_user_id && me.owner_user_id === id;
   const [busy, setBusy] = useState(false);
   const [waveMood, setWaveMood] = useState("");
   const toast = useToast();
@@ -383,6 +388,12 @@ export default function UserProfilePage() {
       <Section title="Живая волна · как у клиента">
         <LiveWave userId={id} />
       </Section>
+
+      {isMine && (
+        <Section title="Мои устройства">
+          <UserDevices />
+        </Section>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Section title={`Дизлайки · ${data.dislikedSongs.length}`}>

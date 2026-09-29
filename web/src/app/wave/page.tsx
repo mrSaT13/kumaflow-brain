@@ -96,7 +96,7 @@ const COMP_LABELS: { key: keyof WaveComp; label: string }[] = [
 ];
 
 export default function WavePage() {
-  const { users, userId, setUserId } = useCurrentUser();
+  const { users, userId, setUserId, isMine } = useCurrentUser();
   const [mood, setMood] = useState("");
   const [queue, setQueue] = useState<WaveTrack[]>([]);
   const [playingIdx, setPlayingIdx] = useState(0);
@@ -147,6 +147,26 @@ export default function WavePage() {
   // каждый плеер пишет в СВОЙ слот, веб зеркалит один выбранный.
   const [deviceSel, setDeviceSel] = useState<string | null>(null);
   const [devices, setDevices] = useState<{ device_id: string; device: string | null; age_sec: number; queue_len: number; paused: boolean }[]>([]);
+  // Свои имена устройств (профиль → Мои устройства): в селекторе вместо UUID.
+  // Только для своего юзера: слоты чужих пользователей под теми же id не значат то же.
+  const { data: myDev } = useSWR(
+    isMine ? "/api/me/devices-names" : null,
+    () => api.myDevices().catch(() => null),
+  );
+  const devNames = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const d of myDev?.devices ?? []) {
+      if (d.renamed) m[d.device_id] = d.display_name;
+    }
+    return m;
+  }, [myDev]);
+  // Сырая метка плеера (UUID) → своё имя. Нормализация та же, что _norm_device
+  // на бэке: lower + [a-z0-9_-] + 32 символа. Без имени — сырая метка как была.
+  function devLabel(raw: string | null | undefined): string {
+    const s = (raw ?? deviceSel ?? "").toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
+    if (s && devNames[s]) return devNames[s];
+    return raw || deviceSel || "плеер";
+  }
   useEffect(() => {
     try {
       const v = localStorage.getItem(`wave-device:${userId}`);
@@ -548,10 +568,10 @@ export default function WavePage() {
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                       #{playingIdx + 1} из {queue.length}
                       {phoneMirror
-                        ? ` · ${(liveMeta.device || deviceSel || "плеер").slice(0, 24)}${phoneAge != null ? ` · ${phoneAge} сек назад` : ""}`
+                        ? ` · ${devLabel(liveMeta.device || deviceSel).slice(0, 24)}${phoneAge != null ? ` · ${phoneAge} сек назад` : ""}`
                         : " · мозг"}
                       {liveMeta.position_sec != null && phoneMirror
-                        ? ` · с ${fmtSec(liveMeta.position_sec)}${liveMeta.device ? ` · ${liveMeta.device}` : ""}${liveMeta.paused ? " · пауза" : ""}`
+                        ? ` · с ${fmtSec(liveMeta.position_sec)}${liveMeta.device ? ` · ${devLabel(liveMeta.device)}` : ""}${liveMeta.paused ? " · пауза" : ""}`
                         : ""}
                     </span>
                   </div>
@@ -640,7 +660,8 @@ export default function WavePage() {
                       className={`kuma-pill transition-colors ${deviceSel === d.device_id ? "!bg-text !text-bg font-semibold" : "hover:text-text"}`}
                       title={`${d.queue_len} треков · ${d.age_sec} сек назад${d.paused ? " · пауза" : ""}`}
                     >
-                      {(d.device || d.device_id).slice(0, 18)}{d.age_sec <= 300 ? ` · ${d.age_sec}с` : " · молчит"}
+                      {/* Своё имя устройства вместо сырого UUID (профиль → Мои устройства). */}
+                      {(devNames[d.device_id] || d.device || d.device_id).slice(0, 18)}{d.age_sec <= 300 ? ` · ${d.age_sec}с` : " · молчит"}
                     </button>
                   ))}
                 </span>

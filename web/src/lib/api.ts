@@ -544,6 +544,35 @@ export const api = {
     if (device_id) q.set("device", device_id);
     return http<WaveResume>(`/api/wave/resume?${q.toString()}`);
   },
+  /** Записанный сид радио для капсулы («волна по Eminem»). */
+  waveSeedGet: (user_id: string) =>
+    http<{ ok: boolean; user_id: string; seed: { kind: string; ref: string; label: string; playlist_id?: string | null; created_at?: string | null } | null }>(
+      `/api/wave/seed?user_id=${encodeURIComponent(user_id)}`),
+  /** Старт радио по сиду для плеера (кнопок в вебе нет). kind=artist|track. */
+  waveSeedStart: (user_id: string, seed: { kind: "artist"; artist_name: string } | { kind: "track"; track_id: string }) =>
+    http<{ ok: boolean; user_id: string; seed: { kind: string; label: string; playlist_id?: string | null } | null; playlist_id: string; tracks: string[]; similar_artists: string[]; server_used: boolean; pushed?: number | null }>(
+      `/api/wave/seed`, { method: "POST", body: JSON.stringify({ user_id, ...seed }) }),
+  waveSeedClear: (user_id: string) =>
+    http<{ ok: boolean }>(`/api/wave/seed?user_id=${encodeURIComponent(user_id)}`, { method: "DELETE" }),
+  /** Мои устройства: живые слоты + имена + токены. user_id НЕ передаём —
+   *  бэк берёт владельца из токена (чужие устройства не видны конструкцией). */
+  myDevices: () =>
+    http<{
+      ok: boolean; user_id: string;
+      devices: {
+        device_id: string; raw_label: string; display_name: string; renamed: boolean;
+        age_sec: number | null; queue_len: number; paused: boolean;
+        now_playing: { title?: string | null; artist_name?: string | null; position_sec?: number | null; duration_sec?: number | null } | null;
+      }[];
+      tokens: { id: string; name: string; prefix: string; scopes: string[]; enabled: boolean; last_used_at?: string | null; name_duplicate: boolean }[];
+      duplicate_token_names: string[];
+      note?: string;
+    }>(`/api/me/devices`),
+  renameDevice: (device_id: string, display_name: string) =>
+    http<{ ok: boolean; device_id: string; display_name?: string | null; reset?: boolean }>(
+      `/api/me/devices/${encodeURIComponent(device_id)}`,
+      { method: "PATCH", body: JSON.stringify({ display_name }) },
+    ),
   listCron: () =>
     http<{ jobs: CronJob[] }>(`/api/cron/`),
   /** «Жив ли планировщик» — зовём, когда список задач не пришёл. */
