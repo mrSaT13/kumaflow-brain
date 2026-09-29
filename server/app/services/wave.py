@@ -73,6 +73,49 @@ def _norm_language(v: str | None) -> str | None:
     return None
 
 
+def _has_cyrillic(*parts: object) -> bool:
+    """Есть ли кириллица в любом из кусков (метаданные трека)."""
+    for p in parts:
+        if not p:
+            continue
+        for c in str(p):
+            if "\u0400" <= c <= "\u04ff":
+                return True
+    return False
+
+
+def _meta_ru_ids(db, ids: list) -> set:
+    """Кириллический fast-path: треки БЕЗ текстов (нет в Lyrics), но с
+    кириллицей в метаданных (артист/название/альбом) считаем русскоязычными.
+
+    High-precision без сети. Обратное неверно: латиница НЕ означает foreign
+    (русские группы с английскими названиями сплошь и рядом), поэтому
+    не-кириллические unknown по-прежнему пропускаем (unknown = pass).
+    Реально чинит фильтры 'foreign' (убирает русское без текстов) и
+    'instrumental' (у кириллического трека точно есть слова). Фильтр 'ru'
+    от иностранных без текстов лечится только скачанными текстами или
+    language_strict (см. ниже)."""
+    from app.db.models import Track as _Track
+
+    out: set = set()
+    uniq = list(dict.fromkeys(str(i) for i in (ids or []) if i))[:2000]
+    for i in range(0, len(uniq), 500):
+        try:
+            rows = db.query(_Track).filter(_Track.id.in_(uniq[i:i + 500])).all()
+        except Exception:
+            break
+        for t in rows or []:
+            try:
+                if _has_cyrillic(getattr(t, "artist_name", None),
+                                getattr(t, "title", None),
+                                getattr(t, "album_name", None)):
+                    out.add(str(getattr(t, "id", "")))
+            except Exception:
+                continue
+    out.discard("")
+    return out
+
+
 def _resolve_ids(db, ids: list[str]) -> list[str]:
     """uuid как есть, external_id (мобильный id) -> наш track_id. Не падает на PG."""
     from app.services.track_resolve import resolve_track_ids as _r
@@ -1770,8 +1813,13 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
     # Фильтр по языку (пилюли клиента «по языку»): ru / foreign / instrumental.
     # Язык берём из Lyrics.language (детект при скачивании текстов).
-    # Треки без текстов НЕ выкидываем (unknown = пропуск) — иначе пустая очередь.
+    # Треки без текстов НЕ выкидываем (unknown = пропуск) — иначе пустая очередь,
+    # кроме опционального settings.language_strict=true (только доказанные).
+    # Кириллический fast-path (_meta_ru_ids): трек без текстов, но с кириллицей
+    # в метаданных — точно русский: держится в 'ru', выкидывается из 'foreign'
+    # и 'instrumental'. Латиница без текстов — по-прежнему unknown=pass.
     lang = _norm_language(settings.get('language'))
+    strict = bool(settings.get('language_strict'))
     if lang and cand:
         from app.db.models import Lyrics as _Ly
 
@@ -1789,14 +1837,32 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 _lm[str(r.track_id)] = _lang_v
         except Exception:
             _lm = {}
+        _meta_ru: set = set()
+        if lang in ('foreign', 'instrumental') or strict:
+            try:
+                _meta_ru = _meta_ru_ids(db, [c for c in cand[:2000] if c not in _lm])
+            except Exception:
+                _meta_ru = set()
         if lang == 'ru':
-            cand = [c for c in cand
-                    if c not in _lm or (_lm.get(c) or '') == 'ru']
+            if strict:
+                cand = [c for c in cand
+                        if (_lm.get(c) or '') == 'ru' or c in _meta_ru]
+            else:
+                cand = [c for c in cand
+                        if c not in _lm or (_lm.get(c) or '') == 'ru']
         elif lang == 'foreign':
-            cand = [c for c in cand if (_lm.get(c) or '') != 'ru']
+            if strict:
+                cand = [c for c in cand if (_lm.get(c) or '') == 'foreign']
+            else:
+                cand = [c for c in cand
+                        if (_lm.get(c) or '') != 'ru' and c not in _meta_ru]
         elif lang == 'instrumental':
-            cand = [c for c in cand
-                    if c not in _lm or (_lm.get(c) or '') == 'instrumental']
+            if strict:
+                cand = [c for c in cand if (_lm.get(c) or '') == 'instrumental']
+            else:
+                cand = [c for c in cand
+                        if (c not in _lm or (_lm.get(c) or '') == 'instrumental')
+                        and c not in _meta_ru]
 
     # collab-подмес считается выше по коду (до формирования пула кандидатов),
     # чтобы его треки гарантированно попадали в скоренное окно.
