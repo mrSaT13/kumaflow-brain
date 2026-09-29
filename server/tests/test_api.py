@@ -18,7 +18,8 @@ def test_yandex_status():
 
 def test_yandex_enrich_501():
     r = client.post("/api/yandex/enrich")
-    assert r.status_code in (400, 501)  # 400 без токена, 501 legacy
+    # 403 без токена (require_admin), 400 без yandex-токена, 501 legacy
+    assert r.status_code in (400, 403, 501)
 
 def test_search_by_text_empty():
     r = client.post("/api/analysis/search-by-text", json={"q": ""})

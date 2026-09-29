@@ -9,6 +9,24 @@
 from __future__ import annotations
 
 
+def _rerank_safe(db, user_id: str, tids: list[str], n: int) -> list[str]:
+    """Порядок пула — ядру волны (скип-риск, руки, новизна, CLAP-вес).
+    Любая ошибка — исходный порядок, плейлист не пустеет никогда."""
+    try:
+        from app.services.wave import rerank_pool as _rr
+
+        r = _rr(db, user_id, list(tids), kind="weekly", n=n, source="weekly")
+        return r or list(tids)[:n]
+    except Exception:
+        return list(tids)[:n]
+
+
+def _reorder_items(items: list[dict], order: list[str]) -> list[dict]:
+    by_id = {str(it.get("track_id")): it for it in (items or [])
+             if isinstance(it, dict) and it.get("track_id")}
+    return [by_id[t] for t in order if t in by_id]
+
+
 def weekly_discovery(db, user_id: str, n: int = 30) -> dict:
     from app.db.models import Favorite, Track, TrackEmbedding, TrackFeatures
 
@@ -36,8 +54,10 @@ def weekly_discovery(db, user_id: str, n: int = 30) -> dict:
             sid = str(_ras(db).id)
             db.commit()
         r = cold_start_playlist(sid, n=n, user_id=user_id)
+        _tids = r.get("tracks") or []
+        _ordered = _rerank_safe(db, user_id, _tids, n)
         return {"mode": "cold_start_fallback", "reason": "CLAP нет или мало лайков (<3)",
-                "tracks": r.get("tracks") or [], "items": r.get("items") or [],
+                "tracks": _ordered, "items": _reorder_items(r.get("items") or [], _ordered),
                 "explanations": [], "steps": r.get("steps") or []}
 
     import numpy as _np
@@ -69,8 +89,10 @@ def weekly_discovery(db, user_id: str, n: int = 30) -> dict:
             sid = str(_ras2(db).id)
             db.commit()
         r = cold_start_playlist(sid, n=n, user_id=user_id)
+        _tids = r.get("tracks") or []
+        _ordered = _rerank_safe(db, user_id, _tids, n)
         return {"mode": "cold_start_fallback", "reason": "мало CLAP-векторов у лайков",
-                "tracks": r.get("tracks") or [], "items": r.get("items") or [],
+                "tracks": _ordered, "items": _reorder_items(r.get("items") or [], _ordered),
                 "explanations": [], "steps": r.get("steps") or []}
 
     q = _np.mean(_np.vstack(list(liked_vecs.values())), axis=0)
@@ -188,6 +210,27 @@ def weekly_discovery(db, user_id: str, n: int = 30) -> dict:
                 if len(picks) >= n:
                     break
     picks = picks[:n]
+
+    # Единый скоринг: CLAP+MMR выше — это recall-пул, финальный порядок —
+    # ядро волны. MMR-кап (<=2 на артиста) чиним после реранка добивкой.
+    _ranked = _rerank_safe(db, user_id, picks, len(picks))
+    if _ranked:
+        _final: list[str] = []
+        _acount: dict[str, int] = {}
+        _rest: list[str] = []
+        for tid in _ranked:
+            t = meta.get(tid)
+            a = (t.artist_name or "") if t else ""
+            if _acount.get(a, 0) >= 2:
+                _rest.append(tid)
+                continue
+            _final.append(tid)
+            _acount[a] = _acount.get(a, 0) + 1
+        for tid in _rest:
+            if len(_final) >= n:
+                break
+            _final.append(tid)
+        picks = _final[:n]
 
     # explanations
     liked_list = list(liked_vecs.items())

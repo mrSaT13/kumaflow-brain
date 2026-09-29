@@ -141,6 +141,20 @@
    - `GET .../vault` — статус, `DELETE .../vault` — забыть,
      `POST .../refresh-now` — обновить сейчас без ожидания ночи.
 
+6. **Сонар — «что сейчас играет» (кнопка записи в плеере)**:
+   - Админ включает тумблер (веб: Настройки → Автоматизация → Сонар) и снимает
+     отпечатки (кнопка «снять +500» там же, чанками). Без тумблера/отпечатков
+     endpoint отвечает 403/пусто — кнопку в плеере прячь за проверкой
+     `GET /api/sonar/` (`{enabled, coverage{fingerprinted, tracks_total}}`).
+   - Кнопка: записать 5–20 с (микрофон или loopback), отправить как
+     `POST /api/sonar/recognize` multipart, поле `audio` (wav/m4a/mp3, до 10МБ).
+     Токен — как обычно в `Authorization: Bearer`.
+   - Ответ: `{ok, match: {track_id, external_id, title, artist_name, album_name,
+     hits, coherence} | None, query_hashes, took_ms}`. `external_id` — это
+     Navidrome song id: сразу открывай/играй. `match: null` — не узнал
+     (тишина/дома нет отпечатка): показать «не узнал».
+   - Best-effort: запись ушла в фон, таймаут ~30с, недоступно — тихий fallback.
+
 ## Правила поведения клиента
 
 - Всё общение — best-effort: сервер недоступен → тихий fallback на локальную логику,

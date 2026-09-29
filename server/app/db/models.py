@@ -692,3 +692,24 @@ class ApiToken(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class AudioFingerprint(Base):
+    """Локальный Shazam: спектральные пиковые хэши трека (Dejavu-принцип).
+
+    Строка = один хэш (f1|f2|dt) с оффсетом. Матчинг — гистограммой дельт
+    оффсетов (см. services/shazam.py). Новая таблица — create_all создаёт сам.
+    Объём: ~500 хэшей на трек при ENROLL_SECONDS=90 (см. shazam.py).
+    """
+
+    __tablename__ = "audio_fingerprints"
+
+    track_id: Mapped[str] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), primary_key=True
+    )
+    h: Mapped[str] = mapped_column(String(16), primary_key=True, index=True)
+    t_off: Mapped[float] = mapped_column(Float, primary_key=True)
+
+    __table_args__ = (
+        Index("ix_audiofp_hash", "h"),
+    )

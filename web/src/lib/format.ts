@@ -48,6 +48,7 @@ export const PHASE_LABELS: Record<string, string> = {
   collab: "Коллаборативная фильтрация",
   smart: "Умные плейлисты",
   taste_refresh: "Обновление вкусов",
+  sonar: "Сонар-отпечатки",
 };
 
 export const STATUS_LABELS: Record<string, string> = {

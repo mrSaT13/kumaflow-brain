@@ -6,6 +6,7 @@ import { Play, Save } from "lucide-react";
 import { Badge, Button, Card } from "@/components/ui";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { useIsAdmin } from "@/lib/useIsAdmin";
 import { fmtDate } from "@/lib/format";
 
 const KIND_RU: Record<string, { title: string; desc: string }> = {
@@ -67,6 +68,8 @@ export default function Automation() {
   }
 
   const jobs = data?.jobs ?? [];
+  // Все мутации крона/автоматизации — require_admin. Не-админ видит список read-only.
+  const { isAdmin } = useIsAdmin();
   // 401/403 — это НЕ упавший backend, а токен: его нет в этом браузере,
   // он удалён/выключен или выпущен для другого backend. Прямая проверка
   // /api/cron/ в адресной строке всегда даст 401 — браузер не шлёт Bearer.
@@ -76,7 +79,7 @@ export default function Automation() {
   const { data: auto, mutate: mutateAuto } = useSWR("/api/settings/automation", () => api.getAutomation(), { refreshInterval: 10000 });
   const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
 
-  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood" | "playlists_push_navidrome" | "clap_enabled" | "clap_audio_enabled") {
+  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood" | "playlists_push_navidrome" | "clap_enabled" | "clap_audio_enabled" | "sonar_enabled") {
     const cur = key === "analysis_fetch_lyrics"
       ? (auto?.flags?.analysis_fetch_lyrics ?? true)
       : key === "analysis_ai_mood"
@@ -85,7 +88,9 @@ export default function Automation() {
           ? (auto?.flags?.clap_enabled ?? true)
           : key === "clap_audio_enabled"
             ? (auto?.flags?.clap_audio_enabled ?? true)
-            : (auto?.flags?.playlists_push_navidrome ?? false);
+            : key === "sonar_enabled"
+              ? (auto?.flags?.sonar_enabled ?? false)
+              : (auto?.flags?.playlists_push_navidrome ?? false);
     const label = key === "analysis_fetch_lyrics"
       ? "Тексты"
       : key === "analysis_ai_mood"
@@ -94,7 +99,9 @@ export default function Automation() {
           ? "CLAP-поиск по смыслу"
           : key === "clap_audio_enabled"
             ? "CLAP-аудио-гибрид"
-            : "Авто-пуш плейлистов";
+            : key === "sonar_enabled"
+              ? "Сонар"
+              : "Авто-пуш плейлистов";
     setBusy(true);
     try {
       await api.saveAutomation({ [key]: !cur });
@@ -148,7 +155,7 @@ export default function Automation() {
           <input
             type="checkbox"
             checked={auto?.flags?.clap_enabled ?? true}
-            disabled={busy}
+            disabled={busy || !isAdmin}
             onChange={() => toggleLyrics("clap_enabled")}
             className="w-4 h-4 accent-black dark:accent-white shrink-0"
           />
@@ -165,7 +172,7 @@ export default function Automation() {
           <input
             type="checkbox"
             checked={auto?.flags?.clap_audio_enabled ?? true}
-            disabled={busy}
+            disabled={busy || !isAdmin}
             onChange={() => toggleLyrics("clap_audio_enabled")}
             className="w-4 h-4 accent-black dark:accent-white shrink-0"
           />
@@ -185,7 +192,7 @@ export default function Automation() {
         <input
           type="checkbox"
           checked={auto?.flags?.analysis_fetch_lyrics ?? true}
-          disabled={busy}
+          disabled={busy || !isAdmin}
           onChange={() => toggleLyrics("analysis_fetch_lyrics")}
           className="w-4 h-4 accent-black dark:accent-white shrink-0"
         />
@@ -201,7 +208,7 @@ export default function Automation() {
         <input
           type="checkbox"
           checked={auto?.flags?.analysis_ai_mood ?? true}
-          disabled={busy}
+          disabled={busy || !isAdmin}
           onChange={() => toggleLyrics("analysis_ai_mood")}
           className="w-4 h-4 accent-black dark:accent-white shrink-0"
         />
@@ -217,7 +224,7 @@ export default function Automation() {
         <input
           type="checkbox"
           checked={auto?.flags?.playlists_push_navidrome ?? false}
-          disabled={busy}
+          disabled={busy || !isAdmin}
           onChange={() => toggleLyrics("playlists_push_navidrome")}
           className="w-4 h-4 accent-black dark:accent-white shrink-0"
         />
@@ -228,7 +235,25 @@ export default function Automation() {
           </span>
         </span>
       </label>
+      <div className="h-3" />
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={auto?.flags?.sonar_enabled ?? false}
+          disabled={busy || !isAdmin}
+          onChange={() => toggleLyrics("sonar_enabled")}
+          className="w-4 h-4 accent-black dark:accent-white shrink-0"
+        />
+        <span>
+          <span className="font-medium text-sm">Сонар — что сейчас играет</span>
+          <span className="text-xs text-muted block">
+            Локальные аудио-отпечатки библиотеки. Плеер присылает запись кнопкой — мозг отвечает треком (external_id). Без внешних API. Enroll качает аудио — на 55к идти чанками.
+          </span>
+        </span>
+      </label>
     </Card>
+    <div className="h-4" />
+    <SonarCard isAdmin={isAdmin} busy={busy} setBusy={setBusy} />
     <div className="h-4" />
     <Card>
       {error && !data ? (
@@ -267,7 +292,7 @@ export default function Automation() {
                   <input
                     type="checkbox"
                     checked={j.enabled}
-                    disabled={busy}
+                    disabled={busy || !isAdmin}
                     onChange={() => toggle(j.id, j.enabled)}
                     className="w-4 h-4 accent-black dark:accent-white shrink-0"
                   />
@@ -301,12 +326,14 @@ export default function Automation() {
                     onChange={(e) => setExprs((m) => ({ ...m, [j.id]: e.target.value }))}
                     title="cron-выражение (мин час день месяц день-недели)"
                   />
-                  <Button variant="ghost" onClick={() => saveExpr(j.id, j.cron_expr)} disabled={busy} title="Сохранить расписание">
+                  <Button variant="ghost" onClick={() => saveExpr(j.id, j.cron_expr)} disabled={busy || !isAdmin} title="Сохранить расписание">
                     <Save className="w-3 h-3" />
                   </Button>
+                  {isAdmin && (
                   <Button variant="ghost" onClick={() => run(j.id, ru.title)} disabled={busy || !j.enabled} title="Запустить сейчас в фоне">
                     <Play className="w-3 h-3" /> сейчас
                   </Button>
+                  )}
                 </div>
               </div>
             );
@@ -315,8 +342,112 @@ export default function Automation() {
       )}
       <div className="text-xs text-muted mt-3">
         Тумблер — вкл/выкл задачу. Расписание — cron «мин час * * день-недели». «Сейчас» ставит задачу в фон (прогресс в «Задачи и логи»). Всё персональное (daily, smart, открытия) считается отдельно под каждого пользователя.
+        {!isAdmin && " Изменение настроек доступно админу."}
       </div>
     </Card>
     </>
+  );
+}
+
+/** Сонар: покрытие отпечатками + ручной enroll чанками (админ). */
+function SonarCard({ isAdmin, busy, setBusy }: {
+  isAdmin: boolean; busy: boolean;
+  setBusy: (v: boolean) => void;
+}) {
+  const { data, mutate } = useSWR("/api/sonar", () => api.sonarStatus(), {
+    refreshInterval: 15000,
+  });
+  const toast = useToast();
+  const cov = data?.coverage;
+
+  async function enroll() {
+    setBusy(true);
+    try {
+      const r = await api.sonarEnroll(500, false);
+      toast(`Сонар: отпечатки ставятся в фон (run ${r.run_id.slice(0, 8)}). Следите в «Задачи и логи».`, "ok");
+      mutate();
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function enrich() {
+    setBusy(true);
+    try {
+      const r = await api.sonarEnrich();
+      toast(r.ok ? `Сонар: добито метаданных у ${r.tracks} треков (пар ${r.pairs}).` : "Сонар: enrich не удался", r.ok ? "ok" : "err");
+      mutate();
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const [dups, setDups] = useState<{ track_a: string; track_b: string; shared: number; meta_a?: { title?: string; artist_name?: string | null } | null; meta_b?: { title?: string; artist_name?: string | null } | null }[] | null>(null);
+
+  async function loadDups() {
+    setBusy(true);
+    try {
+      const r = await api.sonarDuplicates(25);
+      setDups(r.groups.slice(0, 10));
+      toast(r.groups.length ? `Сонар: пар-дублей ${r.groups.length} (показаны первые 10).` : "Сонар: дублей по отпечаткам нет", r.groups.length ? "ok" : "info");
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <div className="flex items-center gap-2 flex-wrap text-sm">
+        <span className="font-medium">Сонар</span>
+        <Badge tone={data?.enabled ? "ok" : "default"}>
+          {data ? (data.enabled ? "вкл" : "выкл") : "…"}
+        </Badge>
+        {cov && (
+          <span className="text-xs text-muted">
+            отпечатки: {cov.fingerprinted} из {cov.tracks_total} ({cov.coverage_pct}%) · хэшей {cov.hashes_total}
+          </span>
+        )}
+        {isAdmin && (
+          <span className="flex gap-2 ml-auto">
+            <Button variant="ghost" onClick={enroll} disabled={busy || !data?.enabled} title="Снять отпечатки следующими 500 трекам без печатей">
+              <Play className="w-3 h-3" /> снять +500
+            </Button>
+            <Button variant="ghost" onClick={enrich} disabled={busy || !data?.enabled} title="Добить пустые жанр/год/альбом из двойников по отпечаткам">
+              Добить метаданные
+            </Button>
+            <Button variant="ghost" onClick={loadDups} disabled={busy || !data?.enabled} title="Пары треков с общими отпечатками — кандидаты на сшивку вручную">
+              Пары-дубли
+            </Button>
+          </span>
+        )}
+      </div>
+      {dups !== null && dups.length > 0 && (
+        <div className="mt-3 space-y-1 text-xs">
+          {dups.map((g) => (
+            <div key={`${g.track_a}-${g.track_b}`} className="flex gap-2 items-baseline flex-wrap">
+              <a href={`/track/${g.track_a}`} className="kuma-link font-medium">
+                {g.meta_a?.artist_name ? `${g.meta_a.artist_name} — ` : ""}{g.meta_a?.title ?? g.track_a.slice(0, 8)}
+              </a>
+              <span className="text-muted">≈</span>
+              <a href={`/track/${g.track_b}`} className="kuma-link font-medium">
+                {g.meta_b?.artist_name ? `${g.meta_b.artist_name} — ` : ""}{g.meta_b?.title ?? g.track_b.slice(0, 8)}
+              </a>
+              <span className="text-muted tabular-nums">общих {g.shared}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {!data?.enabled && (
+        <div className="text-xs text-muted mt-2">
+          Включите тумблер «Сонар» выше — тогда плееры смогут спрашивать «что сейчас играет?» кнопкой записи.
+        </div>
+      )}
+    </Card>
   );
 }

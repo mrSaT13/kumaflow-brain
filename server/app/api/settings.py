@@ -43,6 +43,7 @@ def list_settings(db: Session = Depends(get_db)):
     return {"runtime": runtime, "db": db_settings}
 
 
+@router.put("", include_in_schema=False)
 @router.put("/")
 def upsert_setting(payload: dict, db: Session = Depends(get_db)):
     key = payload.get("key")

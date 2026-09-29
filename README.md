@@ -39,6 +39,7 @@
 | 🖼 | **Обложки как на мобиле** — size-aware, `ETag` + `Cache-Control 7d`, LRU до 2 ГБ, prefetch батчами по 8 |
 | 🤖 | **Ollama Cloud parity** — `api/chat` + Bearer, `/api/tags`, pull модели из UI |
 | 🌉 | **Мост метаданных** — MusicBrainz + Last.fm (опциональный сервис `:8001`) |
+| 📡 | **Сонар** — локальное «что сейчас играет»: аудио-отпечатки библиотеки (пиковые хэши, без внешних API). Плеер присылает запись кнопкой (`POST /api/sonar/recognize`), мозг отвечает треком (`external_id`). Включается админом тумблером (Настройки → Автоматизация → Сонар), отпечатки снимаются чанками. Бонусом — дубли по звуку и добивка пустых жанр/год/альбом из двойника |
 | 💾 | **Ночные бэкапы** — `pg_dump` в `./backups`, ротация 14 дней |
 
 Веб-UI (`:3000`): библиотека · трек · волна · плейлисты · история · cold-start · сканы · пользователи · Wrapped · настройки.
@@ -143,6 +144,7 @@ docker compose --profile bridge up -d
 | 📻 Плейлисты | `POST /api/playlists/generate-daily` · `POST /api/playlists/ai-generate` · `GET /api/analysis/cold-start?user_id=&n=30` |
 | 🔍 Анализ | `POST /api/analysis/search-by-text` (`embedding`/`keyword`) · `POST /api/scan/clap` |
 | 📚 Библиотека | `/api/library/*` · `/api/tracks/*` · `/api/covers/*` · `/api/lyrics/*` · `/api/collab/*` · `/api/cron` · `/api/settings/*` |
+| 📡 Сонар | `POST /api/sonar/recognize` (поле `audio`, до 10МБ) · `GET /api/sonar/` (покрытие) · `POST /api/sonar/enroll?limit=` · `GET /api/sonar/duplicates` · `POST /api/sonar/enrich` |
 
 ## 🛠 Локальная разработка
 

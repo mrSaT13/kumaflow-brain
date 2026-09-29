@@ -304,9 +304,10 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
         push = _auto_push(db, str(p.id))
         return {"queued": True, "playlist_id": str(p.id), "tracks": len(ids), "name": res.get("name"), "comment": res.get("comment"), "from_fallback": res.get("from_fallback"), "mode": "ai",
                 "pushed": bool(push.get("ok")), "push": push}
-    # иначе cold-start per-user + оркестратор
+    # иначе cold-start per-user + единое ядро волны + оркестратор
     try:
-        result = cold_start_playlist(str(server.id), n=n, user_id=resolved_user)
+        result = cold_start_playlist(str(server.id), n=max(n * 2, 60),
+                                     user_id=resolved_user)
     except Exception as e:  # noqa: BLE001 — отдаём текст, а не голый 500
         from app.core.logging import get_logger as _gl
 
@@ -319,6 +320,20 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
 
         # резолв треков для волны
         tids = result["tracks"]
+        if resolved_user:
+            try:
+                from app.services.wave import rerank_pool as _rr
+
+                _ranked = _rr(db, resolved_user, tids[:120],
+                              kind="daily", n=n, source="daily")
+                if _ranked:
+                    tids = _ranked
+                else:
+                    tids = tids[:n]
+            except Exception:
+                tids = tids[:n]
+        else:
+            tids = tids[:n]
         tracks = [db.get(Track, tid) for tid in tids]
         tracks = [t for t in tracks if t]
         waved = create_energy_wave(tracks)
@@ -381,9 +396,17 @@ def my_wave(payload: dict, request: Request, db: Session = Depends(get_db)):
         db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
         db.delete(p)
     db.flush()
-    result = cold_start_playlist(str(server.id), n=n, user_id=str(u.id),
+    result = cold_start_playlist(str(server.id), n=max(n * 2, 60), user_id=str(u.id),
                                  seed_track_id=seed, mood=mood, novelty=True)
     tids = result["tracks"]
+    try:
+        from app.services.wave import rerank_pool as _rr2
+
+        _ranked = _rr2(db, str(u.id), tids[:120], kind="my_wave",
+                       n=n, source="wave")
+        tids = _ranked or tids[:n]
+    except Exception:
+        tids = tids[:n]
     try:
         from app.services.orchestrator import create_energy_wave
 

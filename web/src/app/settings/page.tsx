@@ -304,6 +304,13 @@ export default function SettingsPage() {
   return (
     <>
       <PageHeader title="Настройки" subtitle="Подключения, токены и провайдеры" />
+      {whoami && !whoami.is_admin && (
+        <Card>
+          <div className="text-sm text-muted">Настройки доступны только админу. Твои персональные штуки — в своём профиле: устройства, токены, вкусы.</div>
+        </Card>
+      )}
+      {(!whoami || whoami.is_admin) && (
+      <>
       <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
         {(["connections", "yandex", "ai", "bridge", "tokens", "auto", "diag"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm border-b-2 -mb-px whitespace-nowrap ${tab === t ? "border-accent text-text" : "border-transparent text-muted hover:text-text"}`}>
@@ -670,6 +677,8 @@ export default function SettingsPage() {
         </Card>
       </Section>
       }
+      </>
+      )}
     </>
   );
 }

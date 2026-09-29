@@ -2,11 +2,12 @@
 
 import useSWR from "swr";
 import { useEffect, useRef, useState } from "react";
-import { Activity, FileText, RefreshCw, Sparkles, XCircle, Zap, Trash2, Play } from "lucide-react";
+import { Activity, AudioWaveform, FileText, RefreshCw, Sparkles, XCircle, Zap, Trash2, Play } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section } from "@/components/ui";
 import { useConfirm } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api, type LogLine } from "@/lib/api";
+import { useIsAdmin } from "@/lib/useIsAdmin";
 import { fmtDate, PHASE_LABELS, STATUS_LABELS, STATUS_TONE } from "@/lib/format";
 
 function ProgressBar({ value, total }: { value: number; total: number }) {
@@ -83,6 +84,8 @@ export default function ScansPage() {
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [tab, setTab] = useState<"active" | "history" | "logs">("active");
+  // Бэк на мутациях уже отдаёт 403 не-админам — кнопки прячем, списки/логи видны всем.
+  const { isAdmin } = useIsAdmin();
 
   async function cancel(id: string) {
     if (!(await confirm({ title: "Отменить задачу?", message: "Воркер остановится на ближайшем чекпоинте.", confirmText: "Отменить", danger: true }))) return;
@@ -98,13 +101,14 @@ export default function ScansPage() {
     }
   }
 
-  async function start(kind: "library" | "analysis" | "lyrics" | "clusters" | "smart") {
+  async function start(kind: "library" | "analysis" | "lyrics" | "clusters" | "smart" | "sonar") {
     try {
       let res: { run_id: string };
       if (kind === "library") res = await api.startLibraryScan();
       else if (kind === "analysis") res = await api.startAnalysis();
       else if (kind === "lyrics") res = await api.startLyrics();
       else if (kind === "smart") res = await api.startSmart();
+      else if (kind === "sonar") res = await api.sonarEnroll(500, false);
       else res = await api.startClusters();
       setSelectedRun(res.run_id);
       refreshRuns();
@@ -157,6 +161,8 @@ export default function ScansPage() {
         subtitle="История и live-статус всех фоновых задач"
         actions={
           <div className="flex items-center gap-2 flex-wrap">
+            {isAdmin ? (
+              <>
             <Button variant="ghost" onClick={() => start("library")}>
               <RefreshCw className="w-4 h-4" /> Библиотека
             </Button>
@@ -175,12 +181,19 @@ export default function ScansPage() {
             <Button variant="ghost" onClick={() => start("smart")}>
               <Sparkles className="w-4 h-4" /> Умные плейлисты
             </Button>
+            <Button variant="ghost" onClick={() => start("sonar")} title="Снять аудио-отпечатки (+500 треков без печатей)">
+              <AudioWaveform className="w-4 h-4" /> Сонар
+            </Button>
             <Button variant="ghost" onClick={purge} title="Удалить завершённые задачи и логи">
               <Trash2 className="w-4 h-4" /> Очистить логи
             </Button>
             <Button variant="ghost" onClick={clearHistory} title="Стереть историю прослушиваний">
               <Trash2 className="w-4 h-4" /> Очистить историю
             </Button>
+              </>
+            ) : (
+              <span className="text-xs text-muted">Запуск и отмена задач доступны админу</span>
+            )}
           </div>
         }
       />
@@ -206,6 +219,7 @@ export default function ScansPage() {
                     <span className="font-medium">{PHASE_LABELS[cur.phase] ?? cur.phase}</span>
                     <Badge tone={STATUS_TONE[cur.status]}>{STATUS_LABELS[cur.status]}</Badge>
                     <span className="ml-auto text-xs text-muted">старт {fmtDate(cur.started_at)}</span>
+                    {isAdmin && (
                     <Button
                       variant="ghost"
                       className="!text-rose-600 !border-rose-300"
@@ -215,6 +229,7 @@ export default function ScansPage() {
                       <XCircle className="w-4 h-4" />
                       {cancelling === cur.id ? "Отмена…" : "Отменить задание"}
                     </Button>
+                    )}
                   </div>
                   <ProgressBar value={cur.processed_items} total={cur.total_items} />
                   <div className="text-xs text-muted">
@@ -262,7 +277,7 @@ export default function ScansPage() {
                         <button className="kuma-pill hover:text-text" onClick={() => { setSelectedRun(r.id); setTab("logs"); }}>
                           <FileText className="w-3 h-3" /> логи
                         </button>
-                        {(r.status === "queued" || r.status === "running") && (
+                        {(r.status === "queued" || r.status === "running") && isAdmin && (
                           <button
                             className="kuma-pill hover:text-rose-600 !border-rose-300 ml-2"
                             onClick={() => cancel(r.id)}

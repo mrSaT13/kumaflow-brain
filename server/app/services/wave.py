@@ -409,6 +409,68 @@ def skip_risk(track, feat, pref_g: dict, cur_energy: float | None,
         return 0.0
 
 
+def _skip_prob(pipe, track, feat, pref_g: dict, cur_energy: float | None,
+               drift: dict | None, fatigue: dict | None,
+               agg_entry: dict | None, hour: int, dow: int) -> float:
+    """P(skip<30с): обученная модель, при недоступности — эвристика.
+
+    Сигнатура шире, чем у skip_risk: модели нужны агрегаты пары и время.
+    Любая ошибка внутри — тихий фолбек на старые правила.
+    """
+    if pipe is not None:
+        try:
+            from app.services import skip_model as _sm
+
+            try:
+                en = float(feat.energy) if feat is not None and feat.energy is not None else 0.5
+            except (TypeError, ValueError):
+                en = 0.5
+            try:
+                va = float(feat.valence) if feat is not None and feat.valence is not None else 0.5
+            except (TypeError, ValueError):
+                va = 0.5
+            try:
+                da = float(feat.danceability) if feat is not None and feat.danceability is not None else 0.5
+            except (TypeError, ValueError):
+                da = 0.5
+            try:
+                bpm = float(feat.tempo_bpm) if feat is not None and feat.tempo_bpm else 0.0
+            except (TypeError, ValueError):
+                bpm = 0.0
+            g = (getattr(track, "genre", None) or "").strip().lower()
+            try:
+                fam = float((pref_g or {}).get(g, 0.0)) if g else 0.0
+            except (TypeError, ValueError):
+                fam = 0.0
+            try:
+                an = getattr(track, "artist_name", None)
+                _fc = int((fatigue or {}).get(an, 0) or 0) if an else 0
+            except (TypeError, ValueError):
+                _fc = 0
+            a = agg_entry or {}
+            try:
+                sev = (drift or {}).get("severity")
+                dl = 3 if sev == "strong" else (2 if sev == "moderate" else (1 if sev == "mild" else 0))
+            except Exception:
+                dl = 0
+            vec = _sm.features_for(
+                energy=en, valence=va, danceability=da, tempo_bpm=bpm,
+                anchor_energy=cur_energy,
+                unfamiliar_genre=bool(g and fam <= 0.0),
+                artist_fatigue=min(_fc, 20) / 20.0,
+                hour=hour, day_of_week=dow,
+                plays=int(a.get("plays") or 0),
+                early_skips=int(a.get("early_skips") or 0),
+                completes=int(a.get("completes") or 0),
+                drift_level=dl)
+            p = _sm.predict_proba(pipe, vec)
+            if p is not None:
+                return p
+        except Exception:
+            pass
+    return skip_risk(track, feat, pref_g, cur_energy, drift, fatigue)
+
+
 def score_candidates(db, user_id: str, candidate_ids: list[str],
                      seed_ids: list[str], settings: dict | None = None,
                      recent_events: list[dict] | None = None,
@@ -453,6 +515,21 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         hour = current_hour if current_hour is not None else _local_hour()
     except Exception:
         hour = current_hour if current_hour is not None else datetime.now().hour
+    try:
+        from app.core.time import server_now as _server_now2
+
+        _dow = _server_now2().isoweekday() % 7
+    except Exception:
+        _dow = datetime.now().isoweekday() % 7
+    # Обученный скип-предиктор: один раз на вызов (TTL-кэш внутри get_model).
+    # Нет данных — None, и кандидаты идут на эвристике skip_risk().
+    _skip_pipe = None
+    try:
+        from app.services import skip_model as _sm0
+
+        _skip_pipe = _sm0.get_model(db)
+    except Exception:
+        _skip_pipe = None
     # Пресеты: русские пилюли клиента -> диапазоны фичей для ctx-бонусов.
     _mood_preset = MOOD_PRESETS.get((settings.get('mood') or '').strip().lower(), {})
     _act_preset = ACTIVITY_PRESETS.get(activity_raw.strip().lower(),
@@ -826,8 +903,9 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                 mood_b = min(max(float(mood_arm.get(_cm, 0.0)), -0.08), 0.12)
         except (TypeError, ValueError):
             mood_b = 0.0
-        # Предикт скипа <30с: эвристика сейчас, ML-модель позже заменит изнутри.
-        skip_p = skip_risk(t, f, pref_g, cur_energy, drift, fatigue)
+        # Предикт скипа <30с: обученная модель, иначе эвристика.
+        skip_p = _skip_prob(_skip_pipe, t, f, pref_g, cur_energy, drift,
+                            fatigue, agg.get(tid), hour, _dow)
         total = (w['audio'] * audio + w['genre'] * genre_s +
                  w['artist'] * artist_s + w['behavior'] * behavior +
                  w['collab'] * collab + w['novelty'] * novelty +
@@ -900,6 +978,224 @@ def spread_scores(items: list[dict], key: str = "score") -> list[dict]:
         except Exception:
             pass
     return items
+
+
+def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
+                seeds: list[str] | None = None, kind: str = "",
+                day: str | None = None, settings: dict | None = None,
+                n: int = 30, source: str | None = None) -> list[str]:
+    """Единый скоринг плейлистов на ядре волны.
+
+    Плейлистные генерации (daily/smart/weekly/discovery) раньше считали
+    каждая свой скор; теперь все отдают свой предфильтрованный пул сюда и
+    получают порядок от общего ядра: CLAP, skip-risk (модель/эвристика),
+    UCB-руки, auto-mood, коллаборативка, новизна. Предфильтры генераций
+    (предикаты night/sport, forgotten-окно, playable) живут у вызывающих —
+    характер плейлиста не меняется, меняется только ранжирование внутри.
+
+    Возвращает топ-n track_id. Выдачу фиксирует в rec_feedback (source) —
+    это же и обучающая выборка для скип-предиктора.
+    """
+    from datetime import date as _date
+
+    cand = [str(c) for c in (candidate_ids or []) if c]
+    if not cand:
+        return []
+    n = max(1, min(100, int(n or 30)))
+    try:
+        from app.core.time import local_hour as _lh, local_today as _lt
+
+        _hour = _lh()
+        _day = day or _lt().isoformat()
+    except Exception:
+        from datetime import datetime as _dt
+
+        _hour = _dt.now().hour
+        _day = day or _date.today().isoformat()
+    # сиды вкуса
+    _seeds = [str(s) for s in (seeds or []) if s]
+    if not _seeds:
+        try:
+            _seeds = select_seeds(db, user_id, limit=5)
+        except Exception:
+            _seeds = []
+    # свежие события -> дрейф + behaviorBonus (последние 60)
+    recent_events: list[dict] = []
+    try:
+        from app.db.models import PlayEvent as _PE
+
+        for r in db.query(_PE).filter(_PE.user_id == str(user_id)).order_by(
+                _PE.created_at.desc()).limit(60).all():
+            recent_events.append({"track_id": str(r.track_id),
+                                  "action": r.action,
+                                  "position_sec": r.position_sec})
+        recent_events.reverse()
+    except Exception:
+        recent_events = []
+    try:
+        drift = session_drift(db, recent_events)
+    except Exception:
+        drift = {}
+    # коллаборативка
+    collab_scores: dict[str, float] = {}
+    try:
+        from app.services import collab as _cb
+
+        rec = _cb.recommend_for_user(db, user_id, n=200)
+        for it in rec.get("items", []):
+            collab_scores[str(it["track_id"])] = float(it.get("score", 0) or 0)
+    except Exception:
+        pass
+    # кластеры сидов
+    cluster_map: dict[str, int] = {}
+    seed_clusters: set[int] = set()
+    try:
+        from app.db.models import TrackCluster as _TC
+
+        _need = list({str(c) for c in (cand[:800] + _seeds)})
+        for i in range(0, len(_need), 500):
+            try:
+                for row in db.query(_TC).filter(
+                        _TC.algorithm == "kmeans",
+                        _TC.track_id.in_(_need[i:i + 500])).all():
+                    cluster_map[str(row.track_id)] = int(row.cluster_id)
+            except Exception:
+                pass
+        seed_clusters = {cluster_map[s] for s in _seeds if s in cluster_map}
+    except Exception:
+        pass
+    # негатив, recency, усталость
+    try:
+        from app.db.models import TrackDislike as _TD
+
+        neg_ids = [str(r.track_id) for r in
+                   db.query(_TD).filter_by(user_id=str(user_id))
+                   .order_by(_TD.created_at.desc()).limit(500).all()]
+    except Exception:
+        neg_ids = []
+    last_played: dict[str, Any] = {}
+    try:
+        from app.db.models import PlayHistory as _PH
+
+        for i in range(0, len(cand[:800]), 500):
+            try:
+                for tid, when in db.query(_PH.track_id, _PH.played_at).filter(
+                        _PH.user_id == str(user_id),
+                        _PH.track_id.in_(cand[:800][i:i + 500])).all():
+                    if when and (str(tid) not in last_played or
+                                 when > last_played[str(tid)]):
+                        last_played[str(tid)] = when
+            except Exception:
+                pass
+    except Exception:
+        pass
+    fatigue: dict[str, int] = {}
+    last_ids: list[str] = []
+    try:
+        from datetime import datetime as _dt2
+        from datetime import timedelta as _td2
+
+        from app.db.models import PlayHistory as _PH2
+        from app.db.models import Track as _T2
+
+        _since = _dt2.utcnow() - _td2(days=7)
+        _recent = [str(r[0]) for r in
+                   db.query(_PH2.track_id).filter(
+                       _PH2.user_id == str(user_id),
+                       _PH2.played_at >= _since)
+                   .order_by(_PH2.played_at.desc()).limit(5000).all()]
+        last_ids = list(dict.fromkeys(_recent))[:20]
+        if _recent:
+            _amap: dict[str, str] = {}
+            _uniq = list(dict.fromkeys(_recent))
+            for i in range(0, len(_uniq), 500):
+                try:
+                    for t in db.query(_T2).filter(
+                            _T2.id.in_(_uniq[i:i + 500])).all():
+                        if t.artist_name:
+                            _amap[str(t.id)] = t.artist_name
+                except Exception:
+                    pass
+            for tid in _recent:
+                _an = _amap.get(tid)
+                if _an:
+                    fatigue[_an] = fatigue.get(_an, 0) + 1
+    except Exception:
+        pass
+    session_ids = last_ids[:20]
+    # якорь энергии — последний игранный
+    cur_energy: float | None = None
+    try:
+        if last_ids:
+            from app.db.models import TrackFeatures as _TF3
+
+            _lf = db.query(_TF3).filter(_TF3.track_id == last_ids[0]).first()
+            if _lf is not None and _lf.energy is not None:
+                cur_energy = float(_lf.energy)
+    except Exception:
+        cur_energy = None
+    # контекст: час, руки, ассоциации, CLAP, авто-муд
+    try:
+        from app.core.time import server_now as _sn
+
+        _dow = _sn().isoweekday() % 7
+    except Exception:
+        from datetime import datetime as _dt3
+
+        _dow = _dt3.now().isoweekday() % 7
+    try:
+        from app.services.taste import context_of as _ctx_of
+
+        _ctx = _ctx_of(_hour, _dow)
+    except Exception:
+        _ctx = "day_wd"
+    time_map = time_bonus_for(db, user_id, cand[:800], _hour)
+    try:
+        arm_artist, arm_genre = arm_boost_for(db, user_id, _ctx)
+    except Exception:
+        arm_artist, arm_genre = {}, {}
+    try:
+        mood_arm_map = mood_boost_for(db, user_id, _ctx)
+    except Exception:
+        mood_arm_map = {}
+    try:
+        assoc = session_assoc(db, user_id, _seeds)
+    except Exception:
+        assoc = {}
+    try:
+        _clap_ids = list(dict.fromkeys(
+            list(cand[:800]) + list(_seeds) + list(session_ids)))[:1500]
+        clap_map = _load_clap_map(db, _clap_ids)
+    except Exception:
+        clap_map = {}
+    settings_eff = dict(settings or {})
+    try:
+        if not (settings_eff.get("mood") or "").strip():
+            _am = infer_auto_mood(db, user_id, session_ids, _hour)
+            if _am:
+                settings_eff["mood"] = _am
+    except Exception:
+        pass
+    ranked = score_candidates(
+        db, user_id, cand[:800], _seeds, settings_eff, recent_events,
+        collab_scores, current_hour=_hour,
+        jitter_seed=f"{user_id}:{kind or 'pool'}:{_day}",
+        drift=drift, cluster_map=cluster_map or None,
+        seed_clusters=seed_clusters or None,
+        session_ids=session_ids or None, neg_ids=neg_ids or None,
+        last_played=last_played or None, fatigue=fatigue or None,
+        time_map=time_map or None, arm_artist=arm_artist or None,
+        arm_genre=arm_genre or None, assoc=assoc or None,
+        clap_map=clap_map or None, clap_weight=None,
+        mood_arm=mood_arm_map or None, cur_energy=cur_energy)
+    top = ranked[:n]
+    try:
+        from app.services import rec_feedback as _rfb
+
+        _rfb.mark_served(db, user_id, top, source=source or kind or "wave")
+    except Exception:
+        pass
+    return [str(r["track_id"]) for r in top if r.get("track_id")]
 
 
 def _recency_w(last) -> float:

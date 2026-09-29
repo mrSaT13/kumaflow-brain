@@ -2032,6 +2032,101 @@ def clap_embed_audio(*args, **kwargs):
         return {"status": "failure", "error": str(e)}
 
 
+def sonar_enroll(*args, **kwargs) -> dict:
+    """Backfill аудио-фингерпринтов («Сонар», opt-in тумблером).
+
+    Аудио — как в sonic-анализе: локальный файл, иначе Subsonic download.
+    Чанками с resume (пропускаем уже с печатями), отмена пользователем.
+    limit=N — взять N треков (прогонять постепенно на 55к библиотеке).
+    """
+    run_id = args[0] if args else None
+    limit = int(kwargs.get("limit") or 0)
+    force = bool(kwargs.get("force"))
+    try:
+        from pathlib import Path as _Path
+
+        from app.services import audio_analysis as aa
+        from app.services import sonar as _sonar
+        from app.services.media_server import get_media_server_config
+
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id) if run_id else None
+            cfg = get_media_server_config(db)
+            db.commit()
+            total = db.query(Track).count()
+            if run:
+                run.total_items = total
+                run.processed_items = 0
+            q = db.query(Track)
+            if not force:
+                _have_ids = _sonar.fingerprinted_ids(db)
+                if _have_ids:
+                    q = q.filter(~Track.id.in_(list(_have_ids)[:50000]))
+            todos = q.limit(limit).all() if limit else q.all()
+            try:
+                music_dir = (cfg.get("music_dir") or "").strip()
+            except Exception:
+                music_dir = ""
+            _append_log(run_id, "info",
+                        f"Sonar enroll: {len(todos)}/{total} без печатей"
+                        f"{' (force)' if force else ''}")
+            ok, fail, skipped = 0, 0, 0
+            for idx, t in enumerate(todos):
+                if _is_cancelled(run_id):
+                    break
+                tid, ext_id = str(t.id), (t.external_id or "")
+                tpath = getattr(t, "path", None)
+                try:
+                    _local = aa.resolve_local_file(tpath, music_dir)
+                    _tmp: _Path | None = None
+                    if _local is not None:
+                        src = _local
+                    elif ext_id and not str(ext_id).startswith("disk:"):
+                        src = aa.download_from_navidrome(ext_id, cfg)
+                        _tmp = _Path(src)
+                    else:
+                        skipped += 1
+                        continue
+                    try:
+                        hashes = _sonar.fingerprint_file(src)
+                    finally:
+                        if _tmp is not None:
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                    if not hashes:
+                        fail += 1
+                        continue
+                    with session_scope() as _db:
+                        _sonar.store(_db, tid, hashes)
+                    ok += 1
+                except Exception as e:  # noqa: BLE001 — один трек не валит пачку
+                    fail += 1
+                    logger.warning("sonar enroll skip {}: {}", tid, e)
+                if (idx + 1) % 10 == 0:
+                    with session_scope() as _db:
+                        r = _db.get(ScanRun, run_id) if run_id else None
+                        if r:
+                            r.processed_items = idx + 1
+                    _append_log(run_id, "info",
+                                f"Sonar {idx+1}/{len(todos)} ok:{ok} fail:{fail}")
+            if run_id:
+                with session_scope() as _db:
+                    r = _db.get(ScanRun, run_id) if run_id else None
+                    if r:
+                        r.processed_items = len(todos)
+        _append_log(run_id, "info", f"Sonar enroll готово ok:{ok} fail:{fail} skip:{skipped}")
+        _finish_run(run_id, "success")
+        return {"status": "success", "ok": ok, "failed": fail, "skipped": skipped}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("sonar_enroll failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
 def daily_per_user(*args, **kwargs):
     """Крон 03:00 per-user: генерирует KumaFlow Daily для каждого MediaUser (копия mobile daily)."""
     run_id = args[0] if args else None
@@ -2077,8 +2172,23 @@ def daily_per_user(*args, **kwargs):
                     p = Playlist(id=str(_uuid.uuid4()), server_id=u.server_id, owner_user_id=u.id, name=f"KumaFlow Daily · {today.isoformat()}", is_auto_generated=True, generated_for_date=datetime.combine(today, datetime.min.time()))
                     db.add(p)
                     db.flush()
-                    res = cold_start_playlist(str(u.server_id), n=30, user_id=str(u.id))
+                    res = cold_start_playlist(str(u.server_id), n=60, user_id=str(u.id))
                     tids = res.get("tracks") or []
+                    # Единый скоринг: recall — cold-start, ранжирование — ядро
+                    # волны (вкус, CLAP, руки, скип-риск, новизна). Без истории
+                    # ядро вырождается в novelty+джиттер — cold-start порядок
+                    # всё равно сохраняется как база пула.
+                    try:
+                        from app.services.wave import rerank_pool as _rerank
+
+                        _ranked = _rerank(db, str(u.id), tids[:120],
+                                          kind="daily", n=30, source="daily")
+                        if _ranked:
+                            tids = _ranked
+                        else:
+                            tids = tids[:30]
+                    except Exception:
+                        tids = tids[:30]
                     # волна
                     try:
                         tracks = [db.get(Track, tid) for tid in tids]

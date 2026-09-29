@@ -39,6 +39,7 @@ def build(db: Session = Depends(get_db)):
     return {"queued": True, "run_id": str(run.id), "job_id": job_id}
 
 
+@router.get("", include_in_schema=False)
 @router.get("/")
 def list_clusters(db: Session = Depends(get_db)):
     """Кластеры активного сервера: размер, жанры, примеры треков."""

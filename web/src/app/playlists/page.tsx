@@ -10,6 +10,7 @@ import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
 import type { PushResult } from "@/lib/api";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { useIsAdmin } from "@/lib/useIsAdmin";
 import { fmtDate } from "@/lib/format";
 
 /** Хвост тоста про авто-выгрузку в Navidrome. Пусто, если тумблер выключен. */
@@ -46,6 +47,8 @@ export default function PlaylistsPage() {
   const { data, mutate } = useSWR(["/api/playlists", showHidden], () => api.listPlaylists(showHidden), { refreshInterval: 4000 });
   const { users: usersList, userId: coldUser, setUserId: setColdUser } = useCurrentUser();
   const usersData = { users: usersList };
+  // POST /clusters/build — require_admin; генерации плейлистов открыты всем.
+  const { isAdmin } = useIsAdmin();
   // Не просто «занято», а ЧТО именно занято: иначе крутилка висит на одной
   // кнопке, а человек нажал другую и решает, что она не работает. Генерация
   // плейлиста занимает секунды-минуты (LLM, cold-start, выгрузка в Navidrome),
@@ -262,6 +265,7 @@ export default function PlaylistsPage() {
                 ? <><RefreshCw className="w-4 h-4 animate-spin" /> Считаю…</>
                 : <><Sparkles className="w-4 h-4" /> Тест cold-start</>}
             </Button>
+            {isAdmin && (
             <Button
               variant="ghost"
               onClick={async () => {
@@ -279,6 +283,7 @@ export default function PlaylistsPage() {
             >
               {busy === "clusters" ? "Запускаю…" : "Пересобрать кластеры"}
             </Button>
+            )}
           </div>
         </Card>
       </Section>
@@ -412,7 +417,7 @@ export default function PlaylistsPage() {
                   <button className="kuma-pill hover:text-text" onClick={() => exportOne(p.id, p.name)} disabled={busyAny}>
                     <Send className="w-3 h-3" /> {p.in_navidrome ? "обновить в Navidrome" : "в Navidrome"}
                   </button>
-                  {p.is_hidden ? (
+                  {isAdmin && (p.is_hidden ? (
                     <button className="kuma-pill hover:text-text" onClick={() => unhide(p.id)}>
                       <Eye className="w-3 h-3" /> показать
                     </button>
@@ -420,7 +425,7 @@ export default function PlaylistsPage() {
                     <button className="kuma-pill hover:text-text" onClick={() => hide(p.id)}>
                       <EyeOff className="w-3 h-3" /> скрыть
                     </button>
-                  )}
+                  ))}
                   <button className="kuma-pill hover:text-text" onClick={() => del(p.id)}>
                     <Trash2 className="w-3 h-3" /> удалить
                   </button>

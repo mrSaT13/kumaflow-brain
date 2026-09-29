@@ -336,6 +336,14 @@ export const api = {
   startClusters: () => http<{ queued: boolean; run_id: string }>(`/api/scan/clusters`, { method: "POST" }),
   startCollab: () => http<{ queued: boolean; run_id: string }>(`/api/scan/collab`, { method: "POST" }),
   startSmart: () => http<{ queued: boolean; run_id: string }>(`/api/scan/smart`, { method: "POST" }),
+  sonarStatus: () =>
+    http<{ ok: boolean; enabled: boolean; coverage: { tracks_total: number; fingerprinted: number; hashes_total: number; coverage_pct: number } }>(`/api/sonar/`),
+  sonarEnroll: (limit = 500, force = false) =>
+    http<{ queued: boolean; run_id: string }>(`/api/sonar/enroll?limit=${limit}${force ? "&force=true" : ""}`, { method: "POST" }),
+  sonarDuplicates: (min_shared = 25) =>
+    http<{ ok: boolean; groups: { track_a: string; track_b: string; shared: number }[] }>(`/api/sonar/duplicates?min_shared=${min_shared}`),
+  sonarEnrich: () =>
+    http<{ ok: boolean; tracks: number; pairs: number; genre: number; year: number; album_name: number }>(`/api/sonar/enrich`, { method: "POST" }),
   purgeRuns: (keep_last = 20) => http<{ ok: boolean; deleted_runs: number; deleted_logs: number }>(`/api/scan/runs?keep_last=${keep_last}`, { method: "DELETE" }),
   clearAllHistory: () => http<{ ok: boolean; cleared_history: number; cleared_events: number }>(`/api/users/history`, { method: "DELETE" }),
   clearUserHistory: (id: string) => http<{ ok: boolean }>(`/api/users/${id}/history`, { method: "DELETE" }),
@@ -609,12 +617,12 @@ export const api = {
   saveSecurity: (body: { lan_admin_enabled?: boolean }) =>
     http<{ ok: boolean; lan_admin_enabled: boolean }>(`/api/settings/security`, { method: "PUT", body: JSON.stringify(body) }),
   getAutomation: () =>
-    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean } }>(`/api/settings/automation`),
+    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean } }>(`/api/settings/automation`),
   getTimezone: () =>
     http<{ ok: boolean; timezone: string; from_db: boolean; env_default: string; options: string[] }>(`/api/settings/timezone`),
   saveTimezone: (timezone: string) =>
     http<{ ok: boolean; timezone?: string; error?: string }>(`/api/settings/timezone`, { method: "PUT", body: JSON.stringify({ timezone }) }),
-  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean }) =>
+  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean }) =>
     http<{ ok: boolean; flags: Record<string, unknown> }>(
       `/api/settings/automation`, { method: "PUT", body: JSON.stringify(flags) },
     ),

@@ -70,6 +70,7 @@ def cron_health(db: Session = Depends(get_db)):
 # В GET больше НЕ пишем в БД: чтение статуса не должно блокироваться на коммите
 # (а GET /api/cron/ веб опрашивает каждые 5 с). Если таблица пуста — это теперь
 # видно по флагу seeded=false, а не молчаливый ноль задач.
+@router.get("", include_in_schema=False)
 @router.get("/")
 def list_jobs(db: Session = Depends(get_db)):
     rows = db.query(CronJob).all()
@@ -95,6 +96,7 @@ def list_jobs(db: Session = Depends(get_db)):
     }
 
 
+@router.post("", include_in_schema=False, dependencies=[Depends(require_admin)])
 @router.post("/", dependencies=[Depends(require_admin)])
 def create_job(payload: dict, db: Session = Depends(get_db)):
     expr = payload.get("cron_expr") or "0 3 * * *"

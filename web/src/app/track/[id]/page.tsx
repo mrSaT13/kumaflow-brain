@@ -7,6 +7,7 @@ import { useState } from "react";
 import { FileText, Sparkles } from "lucide-react";
 import { Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import { api, type Track } from "@/lib/api";
+import { useIsAdmin } from "@/lib/useIsAdmin";
 import { fmtDuration } from "@/lib/format";
 import { moodLook } from "@/lib/moodStyle";
 
@@ -17,6 +18,8 @@ export default function TrackPage() {
   const { data: recs } = useSWR(data ? ["rec", id] : null, () => api.recommendByTrack(id));
   const [busy, setBusy] = useState<"sonic" | "lyrics" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // POST /tracks/{id}/analyze — require_admin; /lyrics — открыт всем.
+  const { isAdmin } = useIsAdmin();
 
   async function analyzeNow() {
     setBusy("sonic");
@@ -78,9 +81,11 @@ export default function TrackPage() {
               className="w-10 h-10 rounded-lg object-cover border border-border"
               onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
             />
+            {isAdmin && (
             <Button variant="ghost" onClick={analyzeNow} disabled={busy !== null}>
               <Sparkles className="w-4 h-4" /> {busy === "sonic" ? "Анализ…" : "Проанализировать трек"}
             </Button>
+            )}
             {!data.lyrics && (
               <Button variant="ghost" onClick={lyricsNow} disabled={busy !== null}>
                 <FileText className="w-4 h-4" /> {busy === "lyrics" ? "Ищу…" : "Загрузить текст"}
@@ -253,7 +258,6 @@ function Row({ k, v }: { k: string; v: unknown }) {
 
 function YandexCorrection({ id }: { id: string }) {
   const { data, mutate } = useSWR(["yandex-meta", id], () => api.yandexTrackMeta(id));
-  const [busy, setBusy] = useState(false);
   const corr = (data?.items ?? [])
     .map((it) => (it.data as Record<string, unknown>).corrected as Record<string, [unknown, unknown]> | undefined)
     .find(Boolean);
@@ -267,6 +271,17 @@ function YandexCorrection({ id }: { id: string }) {
           {f}: {String(oldV ?? "—")} → {String(newV ?? "—")}
         </span>
       ))}
+      <RevertButton id={id} onDone={mutate} />
+    </div>
+  );
+}
+
+function RevertButton({ id, onDone }: { id: string; onDone: () => void }) {
+  // POST /yandex/corrections/revert — require_admin.
+  const { isAdmin } = useIsAdmin();
+  const [busy, setBusy] = useState(false);
+  if (!isAdmin) return null;
+  return (
       <button
         className="kuma-pill text-xs"
         disabled={busy}
@@ -274,7 +289,7 @@ function YandexCorrection({ id }: { id: string }) {
           setBusy(true);
           try {
             await api.yandexRevertCorrection(id);
-            mutate();
+            onDone();
           } finally {
             setBusy(false);
           }
@@ -282,6 +297,5 @@ function YandexCorrection({ id }: { id: string }) {
       >
         {busy ? "…" : "Откатить"}
       </button>
-    </div>
   );
 }

@@ -25,6 +25,9 @@ DEFAULTS: dict[str, Any] = {
     # выключился бы (env-дефолт в config.py = False).
     "clap_enabled": True,
     "clap_audio_enabled": True,
+    # «Сонар» (фингерпринты): recognize для плееров + enroll/dedup.
+    # Opt-in админом: enroll качает аудио и считает пики — нагрузка на CPU/сеть.
+    "sonar_enabled": False,
 }
 
 # Кэш чтения флагов. is_available()/is_audio_available() дёргаются на КАЖДЫЙ
@@ -144,6 +147,13 @@ def analysis_ai_mood_enabled(db=None) -> bool:
         return bool(get_flags(db).get("analysis_ai_mood", True))
     except Exception:
         return True
+
+
+def sonar_enabled(db=None) -> bool:
+    try:
+        return bool(get_flags(db).get("sonar_enabled", False))
+    except Exception:
+        return False
 
 
 def set_flags(patch: dict[str, Any], db=None) -> dict[str, Any]:

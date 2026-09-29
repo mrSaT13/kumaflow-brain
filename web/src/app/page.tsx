@@ -6,6 +6,7 @@ import { Activity, Disc3, ListMusic, Sparkles, Users, Library, Scan } from "luci
 import { Badge, Card, PageHeader, Section, Stat, Button, CountUp } from "@/components/ui";
 import NowPlaying from "@/components/NowPlaying";
 import { api } from "@/lib/api";
+import { useIsAdmin } from "@/lib/useIsAdmin";
 import { fmtNumber, PHASE_LABELS, STATUS_LABELS, STATUS_TONE, fmtDate } from "@/lib/format";
 
 export default function HomePage() {
@@ -17,6 +18,7 @@ export default function HomePage() {
 
   const analyzed = overview?.analyzed_tracks ?? 0;
   const analyzedPct = overview?.tracks ? Math.round((analyzed / overview.tracks) * 100) : 0;
+  const { isAdmin } = useIsAdmin();
 
   return (
     <>
@@ -66,6 +68,8 @@ export default function HomePage() {
 
       <Section title="Быстрые действия">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {isAdmin && (
+            <>
           <Button onClick={() => api.startLibraryScan().then(() => location.reload())}>
             <Library className="w-4 h-4" /> Сканировать
           </Button>
@@ -75,6 +79,8 @@ export default function HomePage() {
           <Button variant="ghost" onClick={() => api.startLyrics()}>
             <Disc3 className="w-4 h-4" /> Тексты + AI
           </Button>
+            </>
+          )}
           <Button variant="ghost" onClick={() => api.generateDailyPlaylist(30)}>
             <ListMusic className="w-4 h-4" /> Создать плейлист
           </Button>

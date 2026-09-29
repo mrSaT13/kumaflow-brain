@@ -8,6 +8,7 @@ import { Badge, Button, Card, EmptyState, Input, PageHeader, Section } from "@/c
 import { useConfirm, PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
+import { useIsAdmin } from "@/lib/useIsAdmin";
 import { genreColor } from "@/lib/genreStyle";
 
 function TasteBadge({ id }: { id: string }) {
@@ -139,6 +140,9 @@ export default function UsersPage() {
   const [importBusy, setImportBusy] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [pwdOpen, setPwdOpen] = useState<{ id: string; name: string } | null>(null);
+  // POST /users/sync, POST/DELETE /users, PATCH роль — require_admin.
+  // /by-credentials и импорт вкусов по своему паролю открыты всем.
+  const { isAdmin: viewerIsAdmin } = useIsAdmin();
 
   function toggleSelect(id: string) {
     setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev.slice(0, 9), id]);
@@ -260,9 +264,11 @@ export default function UsersPage() {
         title="Пользователи"
         subtitle="Источник данных для коллаборативной фильтрации. Лайки/плейлисты тянутся из Navidrome под логином самого пользователя."
         actions={
+          viewerIsAdmin ? (
           <Button variant="ghost" onClick={sync} disabled={busy}>
             <RefreshCw className={`w-4 h-4 ${busy ? "animate-spin" : ""}`} /> Синхронизировать с Navidrome
           </Button>
+          ) : undefined
         }
       />
 
@@ -285,6 +291,7 @@ export default function UsersPage() {
         </Card>
       </Section>
 
+      {viewerIsAdmin && (
       <Section title="Добавить вручную (без импорта)">
         <Card>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -303,6 +310,7 @@ export default function UsersPage() {
           </div>
         </Card>
       </Section>
+      )}
 
       <Section title={`Всего: ${data?.users.length ?? 0}`}>
         {error ? (
@@ -340,10 +348,14 @@ export default function UsersPage() {
                     <td className="text-muted text-xs font-mono">{u.external_id}</td>
                     <td><TasteBadge id={u.id} /></td>
                     <td>
+                      {viewerIsAdmin ? (
                       <button className="kuma-pill hover:text-text" onClick={() => toggleAdmin(u.id, u.is_admin)}>
                         <Shield className="w-3 h-3" />
                         {u.is_admin ? "админ" : "обычный"}
                       </button>
+                      ) : (
+                        <span className="kuma-pill">{u.is_admin ? "админ" : "обычный"}</span>
+                      )}
                     </td>
                     <td className="text-right whitespace-nowrap">
                       <button
@@ -353,9 +365,11 @@ export default function UsersPage() {
                       >
                         <Heart className="w-3 h-3" /> {importBusy === u.id ? "импорт…" : "импорт"}
                       </button>{" "}
+                      {viewerIsAdmin && (
                       <button className="kuma-pill hover:text-text" onClick={() => del(u.id)}>
                         <Trash2 className="w-3 h-3" /> удалить
                       </button>
+                      )}
                     </td>
                   </tr>
                 ))}

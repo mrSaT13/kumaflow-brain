@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 FORGOTTEN_DAYS = 90
 
@@ -108,25 +108,18 @@ def discoveries(db, user_id: str, n: int = 30) -> list[str]:
     if not cand:
         return []
     seeds = _wave.select_seeds(db, user_id, limit=5)
-    try:
-        from app.services import collab as _cb
-        rec = _cb.recommend_for_user(db, user_id, n=200)
-        collab_scores = {str(it['track_id']): float(it.get('score', 0) or 0)
-                         for it in rec.get('items', [])}
-    except Exception:
-        collab_scores = {}
-    ranked = _wave.score_candidates(db, user_id, cand[:800], seeds,
-                                    settings={}, recent_events=None,
-                                    collab_scores=collab_scores,
-                                    jitter_seed=f"{user_id}:discoveries:{date.today().isoformat()}")
-    return [r['track_id'] for r in ranked[:n]]
+    # Единый скоринг: полный контекст ядра (дрейф, руки, CLAP, skip-модель,
+    # коллаборативка, авто-муд). Предфильтр выше (неслышанное, баны) сохранён.
+    return _wave.rerank_pool(db, user_id, cand[:800], seeds=seeds,
+                             kind="discoveries", n=n, source="smart")
 
 
 def forgotten(db, user_id: str, n: int = 30,
               days: int = FORGOTTEN_DAYS) -> list[str]:
-    """Лайки, не игравшие days+ дней — по скору вкуса."""
-    from app.db.models import Favorite, Track
-    from app.services import taste as _taste
+    """Лайки, не игравшие days+ дней — ранжирует общее ядро волны."""
+    from app.db.models import Favorite
+
+    from app.services import wave as _wave
 
     _, last = _play_sets(db, user_id)
     cutoff = datetime.utcnow() - timedelta(days=days)
@@ -140,47 +133,28 @@ def forgotten(db, user_id: str, n: int = 30,
             fav_ids, _ = _pl3.playable_ids(db, fav_ids)
         except Exception:  # noqa: BLE001
             pass
-    agg = _taste._user_track_aggregates(db, user_id)
-    scored = []
-    for tid in fav_ids:
-        lp = last.get(tid)
-        if lp is not None and lp >= cutoff:
-            continue
-        a = agg.get(tid, {})
-        try:
-            s = _taste.track_score(a) if a else 100.0
-        except Exception:
-            s = 100.0
-        scored.append((s, tid))
-    scored.sort(reverse=True)
-    return [tid for _, tid in scored[:n]]
+    pool = [tid for tid in fav_ids
+            if not (last.get(tid) is not None and last.get(tid) >= cutoff)]
+    if not pool:
+        return []
+    # Окно forgotten — предфильтр; порядок отдаёт ядро (вкус+новизна+скип).
+    return _wave.rerank_pool(db, user_id, pool, kind="forgotten",
+                             n=n, source="smart")
 
 
 def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
-    """Пул по sonic-фичам + досортировка скором вкуса.
+    """Пул по sonic-предикату (ночь/спорт) + ранжирование ядром волны.
 
-    Персонализация даже при пустой истории: подмешиваем веса жанров/артистов
-    из профиля (включая слепок с мобилы), а ничьи рвём детерминированным
-    per-user джиттером (иначе у всех юзеров без данных плейлисты одинаковые —
-    stable sort на равных скорах даёт один порядок).
+    Характер задаёт предикат пула; персонализация (вкус, новизна, скип-риск,
+    per-user джиттер) — из общего скоринга, а не из ручной досортировки.
     """
-    import random as _rnd
     from datetime import date as _date
 
     from app.db.models import Track, TrackFeatures
-    from app.services import taste as _taste
+
+    from app.services import wave as _wave
 
     dis, bans = _exclusions(db, user_id)
-    try:
-        _prof = _taste.user_profile(db, user_id, top_n=0)
-        _pref_g = {str(k).lower(): float(v) for k, v in
-                   (_prof.get('preferredGenres') or {}).items()}
-        _pref_a = {str(k): float(v) for k, v in
-                   (_prof.get('preferredArtists') or {}).items()}
-    except Exception:
-        _pref_g, _pref_a = {}, {}
-    # джиттер свой у каждого юзера и каждый день свой (иначе daily одинаковый вечно)
-    _rng = _rnd.Random(f"{user_id}:{predicate}:{_date.today().isoformat()}")
     feats = db.query(TrackFeatures).limit(5000).all()
     pool: list[str] = []
     for f in feats:
@@ -197,60 +171,36 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
             if en < 0.4 or any(k in moods for k in
                                ("calm", "chill", "спокой", "тих", "sleep", "сон",
                                 "ambient", "эмбиент", "нежн")):
-                pool.append((tid, en))
+                pool.append(tid)
         else:  # sport
             if bpm > 110 or en > 0.7:
-                pool.append((tid, bpm / 200.0 + en))
-    # баны + сортировка: ночь — спокойнее выше, спорт — бодрее выше
+                pool.append(tid)
     if bans and pool:
         from app.services.artist_names import is_banned as _is_banned
 
-        ids = [t for t, _ in pool]
+        ids = pool
         meta = {str(t.id): t for t in
                 db.query(Track).filter(Track.id.in_(ids[:2000])).all()}
-        pool = [(t, s) for t, s in pool
+        pool = [t for t in pool
                 if not (meta.get(t) and _is_banned(meta[t].artist_name, bans))]
-    pool.sort(key=lambda kv: kv[1], reverse=(predicate == "sport"))
-    if predicate == "night":
-        pool.sort(key=lambda kv: kv[1])  # спокойнее — выше
-    top = [t for t, _ in pool[:max(n * 5, 100)]]
-    if not top:
+    if not pool:
         return []
-    if top:
+    if pool:
         # Фичи есть и у локальных файлов (ради них диск и сканируется),
-        # но в плеер они не уедут — отсекаем до скоринга вкуса.
+        # но в плеер они не уедут — отсекаем до скоринга.
         try:
             from app.services import playable as _pl4
 
-            top, _ = _pl4.playable_ids(db, top)
+            pool, _ = _pl4.playable_ids(db, pool)
         except Exception:  # noqa: BLE001
             pass
-    if not top:
+    if not pool:
         return []
-    meta = {str(t.id): t for t in
-            db.query(Track).filter(Track.id.in_(top[:500])).all()} if top else {}
-    agg = _taste._user_track_aggregates(db, user_id)
-    scored = []
-    for tid in top:
-        a = agg.get(tid)
-        try:
-            s = _taste.track_score(a) if a else 0.0
-        except Exception:
-            s = 0.0
-        # вкус из профиля (работает и без истории — по синку с мобилы)
-        t = meta.get(tid)
-        if t is not None:
-            try:
-                if t.genre:
-                    s += min(max(_pref_g.get(str(t.genre).lower(), 0.0) / 10.0, 0.0), 1.0) * 20.0
-                if t.artist_name:
-                    s += min(max(_pref_a.get(str(t.artist_name), 0.0) / 10.0, 0.0), 1.0) * 20.0
-            except Exception:
-                pass
-        s += _rng.random() * 2.0  # per-user tiebreak: ничьи 0.0 рвутся по-разному
-        scored.append((s, tid))
-    scored.sort(reverse=True)
-    return [tid for _, tid in scored[:n]]
+    # Порядок — ядро волны; джиттер per-user-per-day внутри (у всех юзеров
+    # без данных плейлисты не совпадают).
+    return _wave.rerank_pool(db, user_id, pool[:800], kind=predicate,
+                             day=_date.today().isoformat(),
+                             n=n, source="smart")
 
 
 def night(db, user_id: str, n: int = 30) -> list[str]:

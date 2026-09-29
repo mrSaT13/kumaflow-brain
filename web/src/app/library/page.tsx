@@ -8,6 +8,7 @@ import { Button, EmptyState, Input, PageHeader, Section } from "@/components/ui"
 import { useConfirm } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api, type Track } from "@/lib/api";
+import { useIsAdmin } from "@/lib/useIsAdmin";
 import { warmCovers } from "@/lib/coverWarm";
 import { fmtDuration } from "@/lib/format";
 
@@ -70,6 +71,8 @@ export default function LibraryPage() {
 
   const isReal = Boolean(media?.url && media.url !== "http://localhost" && media.url !== "https://localhost" && media.url.trim() !== "");
   const [busy, setBusy] = useState(false);
+  // POST /scan/library и все dedup-мутации — require_admin, отчёт виден всем.
+  const { isAdmin } = useIsAdmin();
   const { data: current } = useSWR("/api/scan/runs/current", () => api.currentRun(), { refreshInterval: 2000 });
   const isRunning = current?.current?.status === "running" || current?.current?.status === "queued";
 
@@ -156,7 +159,7 @@ export default function LibraryPage() {
               <option value="disk">Файлы с диска</option>
               <option value="demo">Демо</option>
             </select>
-            {isReal ? (
+            {isAdmin && (isReal ? (
               <Button onClick={syncReal} disabled={busy || isRunning}>
                 <RefreshCw className={`w-4 h-4 ${busy || isRunning ? "animate-spin" : ""}`} />
                 {isRunning ? "Выполняется…" : busy ? "Синхронизация…" : "Синхронизировать"}
@@ -165,7 +168,7 @@ export default function LibraryPage() {
               <Button variant="ghost" onClick={seedAndScan} disabled={busy || isRunning}>
                 <Database className="w-4 h-4" /> {busy ? "Загрузка…" : "Загрузить демо"}
               </Button>
-            )}
+            ))}
           </>
         }
       />
@@ -319,6 +322,8 @@ export default function LibraryPage() {
 function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
   const [confirmNode, confirm] = useConfirm();
   const toast = useToast();
+  // Все мутации дедупа — require_admin, отчёт виден всем.
+  const { isAdmin } = useIsAdmin();
   const { data, mutate } = useSWR("/api/library/duplicates", () => api.duplicates());
   const { data: fp, mutate: mutateFp } = useSWR("/api/library/duplicates/fingerprint", () => api.fingerprintDuplicates(0.985));
   const { data: settings, mutate: mutateSettings } = useSWR("/api/library/dedup-settings", () => api.getDedupSettings());
@@ -438,6 +443,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
         ? `Перелив · слить ${src.local_with_navidrome_twin} · проверить ${src.needs_review} · сирот ${src.local_orphans_no_twin}`
         : `Дубликаты · групп ${data?.group_count ?? 0}, лишних треков ${data?.duplicate_tracks ?? 0}`}
       action={
+        isAdmin ? (
         <div className="flex items-center gap-2 text-xs">
           <label className="flex items-center gap-1.5 text-muted">
             <input type="checkbox" checked={settings?.auto_merge ?? false} onChange={(e) => toggleAuto(e.target.checked)} />
@@ -447,6 +453,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
             Сшить все точные
           </button>
         </div>
+        ) : undefined
       }
     >
       {/* Блок виден всегда, когда отчёт загружен — без условий на числа.
@@ -507,6 +514,8 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
             </div>
           )}
           <div className="flex items-center gap-2 flex-wrap">
+            {isAdmin && (
+              <>
             <button className="kuma-pill hover:text-text" onClick={previewFix} disabled={busy}>
               Показать план
             </button>
@@ -514,6 +523,8 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
               <button className="kuma-pill hover:text-text" onClick={applyFix} disabled={busy}>
                 Перелить {plan.tracks_to_merge ?? 0} треков
               </button>
+            )}
+              </>
             )}
           </div>
         </div>
@@ -535,6 +546,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
                 <span className="text-sm font-medium">{g.key}</span>
                 <span className="kuma-pill">{g.tracks.length} шт.</span>
                 <span className="flex-1" />
+                {isAdmin && (
                 <button
                   className="kuma-pill hover:text-text"
                   disabled={busy}
@@ -542,6 +554,7 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
                 >
                   Объединить в один
                 </button>
+                )}
               </div>
               <div className="mt-2 space-y-1">
                 {g.tracks.map((t) => (
@@ -567,9 +580,11 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
     <Section
       title={`Аудио-дубли · групп ${fp?.group_count ?? 0} (фингерпринт ≥0.985)`}
       action={
+        isAdmin ? (
         <button className="kuma-pill hover:text-text text-xs" onClick={autoFp} disabled={busy || fpGroups.length === 0}>
           Сшить аудио-дубли
         </button>
+        ) : undefined
       }
     >
       {fpGroups.length === 0 ? (
@@ -582,9 +597,11 @@ function DuplicatesSection({ refreshTracks }: { refreshTracks: () => void }) {
                 <span className="kuma-pill">схожесть {(g.score * 100).toFixed(1)}%</span>
                 <span className="kuma-pill">{g.tracks.length} шт.</span>
                 <span className="flex-1" />
+                {isAdmin && (
                 <button className="kuma-pill hover:text-text" disabled={busy} onClick={() => mergeGroup(g.keep_id, g.drop_ids)}>
                   Объединить в один
                 </button>
+                )}
               </div>
               <div className="mt-2 space-y-1">
                 {g.tracks.map((t) => (
