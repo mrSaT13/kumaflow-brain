@@ -419,12 +419,15 @@ class TasteProfile(Base):
     mobile_banned: Mapped[list] = mapped_column(JSONCol(), default=list, nullable=False)
     mobile_counts: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
     mobile_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    # Кто последним писал слепок вкусов: "mobile" | "desktop" (старые записи = мобила).
-    # desktop_synced_at — время последнего синка с десктопа (мобила — mobile_synced_at).
+    # Кто последним писал слепок вкусов: "mobile" | "desktop" | имя клиента
+    # (старые записи = мобила). desktop_synced_at — время последнего синка
+    # с десктопа (мобила — mobile_synced_at). sync_sources — {source: iso}
+    # для ВСЕХ клиентов (третий плеер уже не схлопывается в «мобилу»).
     # Колонки создаются самопочинкой в taste._ensure_sync_cols (миграций пока нет,
     # схема поднимается через create_all, который колонки не добавляет).
     mobile_sync_source: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     desktop_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    sync_sources: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )

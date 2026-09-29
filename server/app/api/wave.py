@@ -616,7 +616,7 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
                        'moods': [str(m).lower() for m in moods[:3]],
                        'energy': energy, 'tempo': tempo,
                        'like': True if tid in liked else (False if tid in disliked else None),
-                       'reason': 'очередь телефона'})
+                       'reason': 'очередь плеера'})
     # Handoff-поля из того же слепка (чтобы веб не дёргал /resume
     # отдельным поллингом и не видел другой снапшот, чем /live):
     # current_track_id — резолвленный uuid текущего, position/device/paused —

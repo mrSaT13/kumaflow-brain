@@ -167,6 +167,14 @@ export default function WavePage() {
     if (s && devNames[s]) return devNames[s];
     return raw || deviceSel || "плеер";
   }
+  // Причина «очередь плеера/телефона» (бэк) → с именем устройства, иначе
+  // очередь безымянная, хотя плеер известен (был хардкод «телефона»).
+  function queueReason(reason: string | null | undefined): string {
+    if (reason === "очередь плеера" || reason === "очередь телефона") {
+      return `очередь «${devLabel(liveMeta.device || deviceSel).slice(0, 24)}»`;
+    }
+    return reason || "—";
+  }
   useEffect(() => {
     try {
       const v = localStorage.getItem(`wave-device:${userId}`);
@@ -578,8 +586,8 @@ export default function WavePage() {
                   <div className="truncate font-semibold leading-tight group-hover:underline underline-offset-4">
                     {cur.artist_name ? `${cur.artist_name} — ` : ""}{cur.title}
                   </div>
-                  <div className="text-[11px] text-muted truncate" title={cur.reason}>
-                    {cur.reason || "—"} · скор {cur.score?.toFixed(2)}
+                  <div className="text-[11px] text-muted truncate" title={queueReason(cur.reason)}>
+                    {queueReason(cur.reason)} · скор {cur.score?.toFixed(2)}
                   </div>
                 </div>
               </button>
@@ -615,11 +623,11 @@ export default function WavePage() {
                     ? "держим вайб"
                     : `переход: ${cur.mood} → ${nxt.mood}`
                   : phoneMirror
-                    ? "очередь телефона — мозг не докручивает, пока не возьмёшь управление"
+                    ? `очередь «${devLabel(liveMeta.device || deviceSel).slice(0, 24)}» — мозг не докручивает, пока не возьмёшь управление`
                     : "мозг подбирает по аудио + вкусу + коллаборативке"}
               </span>
               {followPhone && phoneMirror && phoneAge != null && phoneAge > 60 && (
-                <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title="Телефон давно не публиковал очередь — текущий трек может уже смениться">
+                <span className="text-[11px] rounded-full border border-amber-300 px-2 py-0.5 text-amber-700 dark:text-amber-300" title="Плеер давно не публиковал очередь — текущий трек может уже смениться">
                   очередь {phoneAge} сек назад — возможно устарело
                 </span>
               )}
@@ -741,8 +749,8 @@ export default function WavePage() {
                           </Link>
                           {/* На чём выбор сделан: причина + скор + покомпонентный скоринг */}
                           <div className="flex items-center gap-2 min-w-0">
-                            <div className="text-[11px] text-muted truncate flex-1" title={t.reason}>
-                              {t.reason || "—"}
+                            <div className="text-[11px] text-muted truncate flex-1" title={queueReason(t.reason)}>
+                              {queueReason(t.reason)}
                             </div>
                             <div className="hidden sm:flex items-center gap-1.5 shrink-0" title={`Скор ${t.score?.toFixed(2)}`}>
                               <div className="w-10 h-1 rounded-full bg-border overflow-hidden">
@@ -772,7 +780,7 @@ export default function WavePage() {
                         {t.like === true && (
                           <span
                             className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-rose-500/15 text-rose-500 shrink-0"
-                            title="В избранном — лайк с телефона долетел"
+                            title="В избранном — лайк с плеера долетел"
                           >
                             <Heart className="w-3.5 h-3.5 fill-current" />
                           </span>

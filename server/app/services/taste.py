@@ -34,7 +34,9 @@ logger = get_logger("taste")
 ACTIONS = ("play", "complete", "skip", "replay", "seek_back", "abandon")
 
 # Источники полного синка вкусов (payload["source"]). Без поля = мобила
-# (старые сборки мобилы метку не шлют).
+# (старые сборки мобилы метку не шлют). Известные — mobile/desktop, остальные
+# клиенты шлют своё имя ([a-z0-9_-], до 16) — иначе схлопнутся в «мобилу»
+# и карточка автообновления их не покажет.
 SYNC_SOURCES = ("mobile", "desktop")
 
 _sync_cols_ok: bool | None = None
@@ -60,11 +62,19 @@ def _ensure_sync_cols(db) -> bool:
         ddl: dict[str, str] = {
             "mobile_sync_source": "VARCHAR(16) DEFAULT ''",
             "desktop_synced_at": "TIMESTAMP",
+            "sync_sources": "JSON",
         }
         added = False
         for name, col_ddl in ddl.items():
             if name not in cols:
-                db.execute(_txt(f"ALTER TABLE taste_profiles ADD COLUMN {name} {col_ddl}"))
+                try:
+                    db.execute(_txt(f"ALTER TABLE taste_profiles ADD COLUMN {name} {col_ddl}"))
+                except Exception:
+                    # SQLite не знает JSON-тип — TEXT тоже годится (JSONCol сериализует сам).
+                    if name == "sync_sources":
+                        db.execute(_txt(f"ALTER TABLE taste_profiles ADD COLUMN {name} TEXT"))
+                    else:
+                        raise
                 added = True
         if added:
             db.commit()
@@ -504,6 +514,24 @@ def track_score(a: dict) -> float:
     return round(s, 1)
 
 
+def _snap_sources(tp, mob_at: str | None, desk_at: str | None) -> list[dict]:
+    """[{source, synced_at}] новые свежие сверху. Фолбек — две колонки."""
+    out: dict[str, str] = {}
+    try:
+        for k, v in (dict(getattr(tp, "sync_sources", None) or {}).items()):
+            if k and v:
+                out[str(k)] = str(v)
+    except Exception:
+        pass
+    if mob_at and "mobile" not in out:
+        out["mobile"] = mob_at
+    if desk_at and "desktop" not in out:
+        out["desktop"] = desk_at
+    items = [{"source": k, "synced_at": v} for k, v in out.items()]
+    items.sort(key=lambda d: d["synced_at"], reverse=True)
+    return items
+
+
 def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
     """Производный профиль вкусов (аналог mobile MLProfile + паттерны).
 
@@ -644,6 +672,9 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
                 "mobile_synced_at": _mob_at,
                 "desktop_synced_at": _desk_at,
                 "last_source": _last_src or ("mobile" if _mob_at else ""),
+                # Все источники синка (для пилюль в карточке автообновления).
+                # Старые строки без sync_sources собираем из двух колонок.
+                "sync_sources": _snap_sources(_tp, _mob_at, _desk_at),
                 "counts": dict(_tp.mobile_counts or {}),
                 "genres_top": sorted((dict(_tp.mobile_genres or {})).items(),
                                      key=lambda kv: kv[1], reverse=True)[:10],
@@ -727,10 +758,14 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
     if not u:
         return {"ok": False, "error": "not found"}
     payload = payload or {}
-    # Источник синка: mobile | desktop. Без поля = mobile (старые сборки).
-    source = str(payload.get("source") or "mobile").strip().lower()[:16]
-    if source not in SYNC_SOURCES:
-        source = "mobile"
+    # Источник синка: mobile | desktop | своё имя клиента. Без поля = mobile
+    # (старые сборки). Своё имя нормализуем, мусор — в mobile (как раньше).
+    raw_source = str(payload.get("source") or "mobile").strip().lower()
+    if raw_source in SYNC_SOURCES:
+        source = raw_source
+    else:
+        cleaned = "".join(c for c in raw_source if c.isalnum() or c in ("-", "_"))[:16]
+        source = cleaned or "mobile"
     _ensure_sync_cols(db)
 
     # external_id -> track_id (один запрос)
@@ -837,6 +872,8 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
         # Штамп времени — по источнику: mobile_synced_at только для мобилы,
         # desktop_synced_at только для десктопа. mobile_sync_source = кто
         # последним писал слепок (старые записи без метки = мобила).
+        # Плюс sync_sources {source: iso} для ВСЕХ клиентов — карточка
+        # автообновления показывает каждый источник своей пилюлей.
         now = datetime.utcnow()
         if _ensure_sync_cols(db):
             tp.mobile_sync_source = source
@@ -844,6 +881,19 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
                 tp.desktop_synced_at = now
             else:
                 tp.mobile_synced_at = now
+            try:
+                _srcs = dict(getattr(tp, "sync_sources", None) or {})
+            except Exception:
+                _srcs = {}
+            _srcs[source] = now.isoformat()
+            # не расти бесконечно: держим 10 свежих
+            if len(_srcs) > 10:
+                _srcs = dict(sorted(_srcs.items(), key=lambda kv: kv[1],
+                                    reverse=True)[:10])
+            try:
+                tp.sync_sources = _srcs
+            except Exception:
+                pass
         else:
             # Колонок нет и добавить не смогли — пишем только в старое поле,
             # чтобы синк не падал целиком (источник тогда не различаем).

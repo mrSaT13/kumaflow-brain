@@ -205,17 +205,17 @@ export default function StatsPage() {
           </Section>
 
           <div className="h-4" />
-          <Section title="Работает ли уверенность ранжира">
+          <Section title="Работает ли ранжир (позиция в выдаче)">
             <Card>
               {data!.by_score.length === 0 ? (
                 <div className="text-sm text-muted">
-                  Пока нет строк с оценкой score — пополни волну, и здесь появится разбивка.
+                  Пока нет строк с позицией rank — пополни волну, и здесь появится разбивка.
                 </div>
               ) : (
                 <table className="kuma-table w-full text-xs">
                   <thead>
                     <tr>
-                      <th>Уверенность</th>
+                      <th>Позиция</th>
                       <th>Показов</th>
                       <th>Скип &lt; 30 с</th>
                       <th>Дослушали</th>
@@ -236,9 +236,10 @@ export default function StatsPage() {
                 </table>
               )}
               <div className="text-[11px] text-muted mt-2">
-                Смысл: если в колонке «скип» разница между «низкая» и «очень высокая» близка к нулю —
+                Смысл: топ-3 должен скипаться реже хвоста (11+). Если разницы нет —
                 ранжирующая часть скоринга в <code className="kuma-pill">wave.py</code> не работает,
-                и крутить её бессмысленно.
+                и крутить её бессмысленно. Раньше здесь были бакеты по score, но волна пишет
+                растянутый скор окна, а плейлисты — сырой: 1.0 одного окна ≠ 1.0 другого.
               </div>
             </Card>
           </Section>

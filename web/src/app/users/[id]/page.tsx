@@ -6,7 +6,6 @@ import { useParams } from "next/navigation";
 import { useState } from "react";
 import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
-import LiveWave from "@/components/LiveWave";
 import UserDevices from "@/components/UserDevices";
 import { PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
@@ -385,10 +384,8 @@ export default function UserProfilePage() {
         </Card>
       </Section>
 
-      <Section title="Живая волна · как у клиента">
-        <LiveWave userId={id} />
-      </Section>
-
+      {/* Живая волна тут бессмысленна: клиентская очередь смотрится
+          на странице «Моя волна», здесь она только путает. */}
       {isMine && (
         <Section title="Мои устройства">
           <UserDevices />
@@ -474,7 +471,19 @@ export default function UserProfilePage() {
               const m = (data.mobile ?? {}) as {
                 synced_at?: string | null; mobile_synced_at?: string | null;
                 desktop_synced_at?: string | null; last_source?: string | null;
+                sync_sources?: { source: string; synced_at: string }[];
               };
+              const SRC_RU: Record<string, string> = { mobile: "мобила", desktop: "десктоп" };
+              // Новый мозг отдаёт sync_sources (все клиенты); старый —
+              // только две колонки (фолбек ниже).
+              const list = (m.sync_sources ?? []).filter((s) => s?.synced_at);
+              if (list.length > 0) {
+                return (<>
+                  {list.map((s) => (
+                    <Badge key={s.source} tone="ok">{SRC_RU[s.source] ?? s.source}: {fmtDate(s.synced_at)}</Badge>
+                  ))}
+                </>);
+              }
               // Back-compat: старый мозг отдаёт только synced_at (= мобила).
               const mobAt = m.mobile_synced_at ?? m.synced_at;
               return (<>

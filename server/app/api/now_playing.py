@@ -369,10 +369,13 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
                             "album_name": t.album_name,
                             "username": brain_user.username,
                             "minutes_ago": 0,
-                            "player": "phone",
+                            # Живой слот, а не обязательно телефон: имя шлёт сам
+                            # плеер в publish (device) — иначе ПК-плеер вечно
+                            # подписывался «телефоном». Нет имени — слот id.
+                            "player": str(entry.get("device") or _slot or "плеер"),
                             "cover_art_id": cover,
                             "live_age_sec": int(age),
-                        }, "next": nxt, "source": "phone", "offset": offset}
+                        }, "next": nxt, "source": "live", "offset": offset}
         except Exception:
             pass
 

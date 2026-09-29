@@ -137,9 +137,9 @@ export default function NowPlaying({ userId: propUserId }: { userId?: string }) 
               <span className={`relative inline-flex rounded-full h-2 w-2 ${stale ? "bg-amber-500" : "bg-green-500"}`} />
             </span>
             Слушает сейчас{playing.username ? ` · ${playing.username}` : ""}
-            {playing.player === "phone" ? (
-              <span className="normal-case tracking-normal" title="Трек из живой очереди телефона, а не из Navidrome">
-                · телефон{(playing as { live_age_sec?: number }).live_age_sec != null ? ` · ${(playing as { live_age_sec?: number }).live_age_sec} сек назад` : ""}
+            {data.source === "live" || (playing as { live_age_sec?: number }).live_age_sec != null ? (
+              <span className="normal-case tracking-normal" title="Трек из живой очереди плеера, а не из Navidrome">
+                · {(playing.player && playing.player !== "phone" ? playing.player : "плеер")}{(playing as { live_age_sec?: number }).live_age_sec != null ? ` · ${(playing as { live_age_sec?: number }).live_age_sec} сек назад` : ""}
               </span>
             ) : typeof age === "number" && age >= 1 ? (
               <span className="normal-case tracking-normal">· {age} мин назад{stale ? " (пауза/залипло?)" : ""}</span>

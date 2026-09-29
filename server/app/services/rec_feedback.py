@@ -158,7 +158,14 @@ def mark_outcome(
     position_sec: int | None = None,
     duration_sec: int | None = None,
 ) -> bool:
-    """Проставить исход по последнему открытому показу трека."""
+    """Проставить исход по последнему открытому показу трека.
+
+    Нюанс с лайками: показ обычно закрывается раньше (play/complete),
+    а ♥/👎 прилетает позже — открытого показа уже нет, и «лайк с волны»
+    вечно показывал 0% при живых лайках. Поэтому like/dislike/favorite/ban
+    АПГРЕЙДЯТ уже закрытую строку (сильнейший сигнал побеждает), остальные
+    действия — только открытые, как раньше.
+    """
     from app.db.models import RecommendationFeedback as _RF
     from app.db.models import Track as _T
 
@@ -173,18 +180,41 @@ def mark_outcome(
             duration_sec = None
     outcome = classify_outcome(action, position_sec, duration_sec)
     fresh = _utcnow() - timedelta(hours=OPEN_PENDING_HOURS)
+    a = (action or "").strip().lower()
+    upgrade = a in ("like", "favorite", "dislike", "ban")
     try:
-        row = (
+        q = (
             db.query(_RF)
             .filter(
                 _RF.user_id == str(user_id),
                 _RF.track_id == tid,
-                _RF.outcome.is_(None),
                 _RF.served_at >= fresh,
             )
-            .order_by(_RF.served_at.desc())
-            .first()
         )
+        if not upgrade:
+            q = q.filter(_RF.outcome.is_(None))
+        else:
+            # сначала открытый, иначе последний закрытый (его апгрейдим)
+            rows = q.order_by(_RF.served_at.desc()).limit(5).all()
+            row = next((r for r in rows if r.outcome is None), None)
+            if row is None:
+                row = rows[0] if rows else None
+            if row is None:
+                return False
+            # уже тот же исход — нечего делать, но считаем успехом
+            if row.outcome == outcome:
+                row.position_sec = position_sec
+                row.duration_sec = duration_sec
+                row.decided_at = _utcnow()
+                db.commit()
+                return True
+            row.outcome = outcome
+            row.position_sec = position_sec
+            row.duration_sec = duration_sec
+            row.decided_at = _utcnow()
+            db.commit()
+            return True
+        row = q.order_by(_RF.served_at.desc()).first()
         if row is None:
             return False
         row.outcome = outcome
@@ -198,6 +228,13 @@ def mark_outcome(
             db.rollback()
         except Exception:
             pass
+        return False
+
+
+def _rank_ok(r, pred) -> bool:
+    try:
+        return bool(pred(r))
+    except (TypeError, ValueError):
         return False
 
 
@@ -255,14 +292,17 @@ def summary(db, user_id: str | None = None, days: int = 7, source: str | None = 
             b["completed"] += 1
         elif r.outcome == "liked":
             b["liked"] += 1
-    # Расклад по уверенности ранжира: показывает, работает ли score вообще.
+    # Расклад по позиции в выдаче: работает ли ранжир вообще.
+    # Было — бакеты по score: волна пишет SPREAD-скор (min-max окна),
+    # daily/smart/weekly — сырой, и 1.0 одного окна ≠ 1.0 другого.
+    # Плюс сырой total упирается в кламп 1.0. Позиция (rank) от окна
+    # не зависит: топ-3 должны скипаться реже хвоста, иначе ранжировать
+    # бессмысленно. Строки без rank (старые) — в отдельный бакет.
     by_score: list[dict[str, Any]] = []
-    for lo, hi, name in ((0.0, 0.3, "низкая"), (0.3, 0.6, "средняя"), (0.6, 0.8, "высокая"), (0.8, 1.01, "очень высокая")):
-        bucket = [
-            r
-            for r in rows
-            if r.score is not None and lo <= float(r.score) < hi and r.outcome
-        ]
+    for pred, name in ((lambda r: r.rank is not None and int(r.rank) < 3, "топ-3"),
+                       (lambda r: r.rank is not None and 3 <= int(r.rank) < 10, "4–10"),
+                       (lambda r: r.rank is not None and int(r.rank) >= 10, "11+")):
+        bucket = [r for r in rows if r.outcome and _rank_ok(r, pred)]
         if not bucket:
             continue
         es = sum(1 for r in bucket if r.outcome == "early_skip")
