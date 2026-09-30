@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Check, Sparkles, Wifi } from "lucide-react";
 import { Badge, Button, Card, Input, PageHeader, Section } from "@/components/ui";
 import Automation from "@/components/Automation";
+import RecTuning from "@/components/RecTuning";
 import ApiTokens from "@/components/ApiTokens";
 import YandexImport from "@/components/YandexImport";
 import { useToast, fmtErr } from "@/components/toasts";
@@ -298,7 +299,7 @@ export default function SettingsPage() {
     }
   }
 
-  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "tokens" | "auto" | "diag" | "yandex">("connections");
+  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "tokens" | "auto" | "wave" | "diag" | "yandex">("connections");
   const rt = (data?.runtime ?? {}) as Record<string, unknown>;
 
   return (
@@ -312,9 +313,9 @@ export default function SettingsPage() {
       {(!whoami || whoami.is_admin) && (
       <>
       <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
-        {(["connections", "yandex", "ai", "bridge", "tokens", "auto", "diag"] as const).map((t) => (
+        {(["connections", "yandex", "ai", "bridge", "tokens", "auto", "wave", "diag"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm border-b-2 -mb-px whitespace-nowrap ${tab === t ? "border-accent text-text" : "border-transparent text-muted hover:text-text"}`}>
-            {t === "connections" ? "Подключения" : t === "yandex" ? "Яндекс" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : t === "tokens" ? "Токены" : t === "auto" ? "Автоматизация" : "Диагностика"}
+            {t === "connections" ? "Подключения" : t === "yandex" ? "Яндекс" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : t === "tokens" ? "Токены" : t === "auto" ? "Автоматизация" : t === "wave" ? "Волна" : "Диагностика"}
           </button>
         ))}
       </div>
@@ -475,6 +476,11 @@ export default function SettingsPage() {
 
       {tab === "auto" && <Section title="Автоматизация">
         <Automation />
+      </Section>
+      }
+
+      {tab === "wave" && <Section title="Волна и рекомендации — per-user тюнинг">
+        <RecTuning />
       </Section>
       }
 

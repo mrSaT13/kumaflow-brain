@@ -286,7 +286,8 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
     if payload and payload.query and payload.query.strip():
         from app.services.playlist_ai import generate_from_prompt
 
-        res = generate_from_prompt(db, query=payload.query.strip(), desired=n)
+        res = generate_from_prompt(db, query=payload.query.strip(), desired=n,
+                                   user_id=resolved_user)
         # оркестрация волной
         try:
             from app.services.orchestrator import create_energy_wave
@@ -517,7 +518,20 @@ def ai_generate(payload: dict, request: Request, db: Session = Depends(get_db)):
     db.commit()
     from app.services.playlist_ai import generate_from_prompt
 
-    res = generate_from_prompt(db, query=q, desired=n)
+    # Личный artist_cap: резолвим uuid (overlay лежит по нему), иначе глобал.
+    _resolved_uid: str | None = None
+    if user_id:
+        try:
+            from app.db.models import MediaUser as _MU
+
+            _u = db.get(_MU, str(user_id))
+            if _u is None:
+                _u = db.query(_MU).filter(
+                    _MU.external_id == str(user_id)).first()
+            _resolved_uid = str(_u.id) if _u else None
+        except Exception:
+            _resolved_uid = None
+    res = generate_from_prompt(db, query=q, desired=n, user_id=_resolved_uid)
     # Шаблонные имя/пояснение по доминирующим признакам. Нужны как запасной
     # путь, когда ИИ не настроен или провалился (тогда res пустой), и как
     # страховка, если модель вернула пустое имя.

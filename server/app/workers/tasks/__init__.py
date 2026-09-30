@@ -2539,14 +2539,26 @@ def refresh_tastes(*args, **kwargs):
                 _finish_run(run_id, "success")
             return {"status": "success", "users": len(pairs), "ok": 0, "note": msg}
         ok = fail = 0
+        failed_users: list[tuple[str, str]] = []
         for idx, (uid, blob) in enumerate(pairs):
             if _is_cancelled(run_id):
                 break
             try:
                 password = _vault.decrypt_password(blob)
             except Exception as e:
+                uname_hint = ""
+                try:
+                    with session_scope() as _db:
+                        _u = _db.get(MediaUser, uid)
+                        if _u is not None:
+                            uname_hint = str(_u.external_id or _u.username or "")
+                except Exception:
+                    uname_hint = ""
+                label = uname_hint or f"uid {uid[:8]}"
                 if run_id:
-                    _append_log(run_id, "warn", f"Сейф {uid[:8]} не открылся ({e}) — пропустите/перезапомните пароль")
+                    _append_log(run_id, "warn", f"Сейф {label} не открылся ({e}) — перезапомните пароль в карточке пользователя")
+                if uname_hint:
+                    failed_users.append((uid, uname_hint))
                 fail += 1
                 continue
             with session_scope() as db:
@@ -2566,6 +2578,7 @@ def refresh_tastes(*args, **kwargs):
                                 f"{uname}: ★ всего {res.get('favorites_total')}, плейлистов {res.get('playlists')}")
             else:
                 fail += 1
+                failed_users.append((uid, uname))
                 if run_id:
                     _append_log(run_id, "warn", f"{uname}: {res.get('error')}")
             if run_id:
@@ -2581,9 +2594,19 @@ def refresh_tastes(*args, **kwargs):
             from app.services import notify as _notify
 
             with session_scope() as db:
+                body = summary
+                if failed_users:
+                    names = ", ".join(u for _, u in failed_users[:5])
+                    body = f"{summary}. Проверьте: {names}"
+                if len(failed_users) == 1:
+                    link = f"/users/{failed_users[0][0]}"
+                elif failed_users:
+                    link = "/users"
+                else:
+                    link = "/scans"
                 _notify.notify(db, "success" if fail == 0 else "warn",
                                "Ночное обновление вкусов",
-                               summary, link="/scans")
+                               body, link=link)
                 _notify.prune(db)
         except Exception:
             pass
@@ -2601,6 +2624,72 @@ def refresh_tastes(*args, **kwargs):
                                str(e)[:300], link="/scans")
         except Exception:
             pass
+        return {"status": "failure", "error": str(e)}
+
+
+def auto_tune(*args, **kwargs):
+    """Ночной авто-мозг R3: каждому юзеру отдельно — его сигналы -> его оверлей.
+
+    Глобал не трогаем. Группы с выключенным auto пропускаем молча.
+    """
+    run_id = args[0] if args else None
+    only_user = kwargs.get("user_id") or (args[1] if len(args) > 1 else None)
+    try:
+        from app.services import auto_tune as _at
+
+        with session_scope() as db:
+            if only_user:
+                from app.db.models import MediaUser as _MU
+
+                u = db.get(_MU, str(only_user))
+                if u is None:
+                    msg = f"Юзер {str(only_user)[:8]} не найден"
+                    if run_id:
+                        _append_log(run_id, "warn", msg)
+                        _finish_run(run_id, "success")
+                    return {"status": "success", "users": 0, "tuned": 0,
+                            "note": msg}
+                res = _at.tune_user(db, str(u.id))
+                summary = (f"Авто-мозг ({u.username}): "
+                           f"{'настроено' if res.get('tuned') else 'без изменений'}"
+                           f"{' — ' + res['skip'] if res.get('skip') else ''}"
+                           f"{' — ' + '; '.join(res.get('reasons') or []) if res.get('reasons') else ''}")
+                out = {"status": "success", "users": 1,
+                       "tuned": 1 if res.get("tuned") else 0,
+                       "results": [res]}
+            else:
+                out = {"status": "success", **_at.tune_all(db)}
+                summary = (f"Авто-мозг: настроено {out.get('tuned')} "
+                           f"из {out.get('users')} (пользователей)")
+        if run_id:
+            with session_scope() as db:
+                run = db.get(ScanRun, run_id)
+                if run:
+                    run.total_items = max(1, out.get("users", 0))
+                    run.processed_items = out.get("users", 0)
+            _append_log(run_id, "info", summary)
+            for r in (out.get("results") or [])[:20]:
+                if r.get("tuned"):
+                    _append_log(
+                        run_id, "info",
+                        f"{r.get('user_id', '')[:8]}: "
+                        f"{'; '.join(r.get('reasons') or [])}"[:300])
+            _finish_run(run_id, "success")
+        try:
+            from app.services import notify as _notify
+
+            with session_scope() as db:
+                _notify.notify(db, "success", "Авто-мозг волны",
+                               summary, link="/settings")
+                _notify.prune(db)
+        except Exception:
+            pass
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.exception("auto_tune failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
         return {"status": "failure", "error": str(e)}
 
 

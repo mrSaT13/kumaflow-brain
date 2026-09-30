@@ -94,6 +94,7 @@ export default function UserProfilePage() {
   const id = params.id;
   const { data, mutate, isLoading } = useSWR(["profile", id], () => api.userProfile(id));
   const { data: vault, mutate: mutateVault } = useSWR(["vault", id], () => api.vaultStatus(id));
+  const { data: vaultCheck, mutate: mutateVaultCheck } = useSWR(["vault-check", id], () => api.vaultCheck(id));
   const { data: collab } = useSWR(["collab", id], () => api.collabSimilar(id));
   const { data: collabRec } = useSWR(["collabRec", id], () => api.collabRecommend(id, 12));
   const { data: drift, mutate: mutateDrift } = useSWR(["drift", id], () => api.drift(id));
@@ -466,6 +467,8 @@ export default function UserProfilePage() {
               {vault && !vault.available && <Badge tone="warn">сейф пуст — нажми «Запомнить пароль», ключ создастся сам</Badge>}
               {vault?.available && !vault?.stored && vault?.key_source === "db" && <Badge tone="ok">ключ: авто</Badge>}
               {vault?.available && !vault?.stored && vault?.key_source === "env" && <Badge tone="ok">ключ: compose</Badge>}
+              {vault?.stored && vaultCheck?.auth_ok === true && <Badge tone="ok">сейф ок — Navidrome отвечает</Badge>}
+              {vault?.stored && vaultCheck?.auth_ok === false && <Badge tone="err">требует перезапомнить — {vaultCheck?.error ?? "Navidrome отклонил"}</Badge>}
             </span>
             {(() => {
               const m = (data.mobile ?? {}) as {
@@ -501,7 +504,7 @@ export default function UserProfilePage() {
                 Запомнить пароль
               </Button>
             ) : (
-              <Button variant="ghost" onClick={() => act(async () => { await api.vaultForget(id); mutateVault(); return { ok: true }; }, "Забыто — автообновление выключено")} disabled={busy}>
+              <Button variant="ghost" onClick={() => act(async () => { await api.vaultForget(id); mutateVault(); mutateVaultCheck(); return { ok: true }; }, "Забыто — автообновление выключено")} disabled={busy}>
                 Забыть пароль
               </Button>
             )}
@@ -514,6 +517,26 @@ export default function UserProfilePage() {
               disabled={busy || !vault?.stored}
             >
               <RefreshCw className="w-4 h-4" /> Обновить сейчас
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const r = await api.vaultCheck(id);
+                  mutateVaultCheck();
+                  if (r.auth_ok) toast("Сейф ок — Navidrome отвечает", "ok");
+                  else toast(`Проверка: ${r.error ?? "требует перезапомнить"}`, r.stored ? "err" : "info");
+                } catch (e: unknown) {
+                  toast(fmtErr(e), "err");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              disabled={busy || !vault?.stored}
+              title="Только ping в Navidrome по запомненному паролю, без импорта"
+            >
+              Проверить сейф
             </Button>
             <Button
               variant="ghost"
@@ -535,6 +558,7 @@ export default function UserProfilePage() {
           if (pwd) void act(async () => {
             const r = await api.vaultStore(id, pwd);
             mutateVault();
+            mutateVaultCheck();
             if (!r.ok) return r;
             return { ok: true };
           }, "Запомнено ✓ — вкусы будут обновляться ночью сами");

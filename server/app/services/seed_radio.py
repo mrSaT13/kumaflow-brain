@@ -147,14 +147,28 @@ def track_radio(user_id: str, track_ref: str, n: int = 30) -> dict:
             "seed_track_id": seed_id, "server_used": server_used}
 
 
-def _server_seed_tracks(db, seed_external_id: str) -> tuple[list[str], bool]:
+def _tuning_int(db, user_id: str | None, key: str, default: int,
+                lo: int, hi: int) -> int:
+    """Одно число из личного тюнинга. Ошибка/мусор -> дефолт."""
+    try:
+        from app.services import rec_tuning as _rt
+
+        v = (_rt.get_all(db, user_id).get("playlists") or {}).get(
+            key, default)
+        return max(lo, min(hi, int(float(v if v is not None else default))))
+    except Exception:
+        return default
+
+
+def _server_seed_tracks(db, seed_external_id: str,
+                        count: int = 20) -> tuple[list[str], bool]:
     """Треки Navidrome-похожих, спроецированные на наши id. (True — сервер участвовал.)"""
     try:
         from app.api.library import _server_similar_songs
     except Exception:
         return [], False
     try:
-        songs = _server_similar_songs(seed_external_id, count=20)
+        songs = _server_similar_songs(seed_external_id, count=count)
     except Exception:
         return [], False
     if not songs:
@@ -194,9 +208,11 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
 
     pool: list[str] = [str(t.id) for t in own]
     seen = set(pool)
-    similar = _similar_artist_names(db, artist_name)
+    _n_sim = _tuning_int(db, user_id, "radio_similar", 6, 1, 20)
+    _n_per = _tuning_int(db, user_id, "radio_per_similar", 15, 1, 100)
+    similar = _similar_artist_names(db, artist_name, limit=_n_sim)
     for aname in similar:
-        for t in _artist_top_tracks(db, aname, limit=15):
+        for t in _artist_top_tracks(db, aname, limit=_n_per):
             tid = str(t.id)
             if tid not in seen:
                 seen.add(tid)
@@ -210,7 +226,9 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
             seed_ext = ext
             break
     if seed_ext:
-        srv_ids, server_used = _server_seed_tracks(db, seed_ext)
+        _n_srv = _tuning_int(db, user_id, "radio_server", 20, 0, 100)
+        srv_ids, server_used = _server_seed_tracks(db, seed_ext,
+                                                  count=_n_srv)
         for tid in srv_ids:
             if tid not in seen:
                 seen.add(tid)

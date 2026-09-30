@@ -146,6 +146,10 @@ def _tick_once() -> None:
                         _gc()
                     except Exception:
                         pass
+                elif kind == "auto_tune":
+                    from app.workers import tasks as _t
+
+                    enqueue_light(_t.auto_tune, job_timeout=1800)
                 else:
                     continue
                 # Статусы видны в UI: без них «крон не работает» и «крон упал» выглядели одинаково.

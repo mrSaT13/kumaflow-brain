@@ -70,6 +70,92 @@
   переобучится и проиграет центроиду. Вернуться, когда будут тысячи сессий.
   До тех пор — взвешенный по recency центроид + Item-KNN.
 
+## Тюнинг волны + сейф вкусов (зафиксировано 30.09.2026)
+
+Контекст: `refresh_tastes` считает `пользователей = строки UserCredential`
+(opt-in сейф), а не всех `MediaUser`. Navidrome отдает `starred/плейлисты`
+только владельцу, поэтому мозг ходит под паролем самого юзера
+(`taste_import.import_user_tastes` + `SubsonicAuth`). Пароль мозг видит
+только в момент ввода — отсюда ручной `Запомнить пароль`.
+Ошибки ночного синка — это `auth fail` сейфа (ключ `env/db`, расшифровка,
+`external_id`/логин, недоступность сервера), смотреть
+`Задачи и логи -> refresh_tastes`. Слово `протух` = `auth fail`, а не expiry.
+
+Решения зафиксированы: авто per-user + глобальные лимиты; MVP авто только
+п.1 (повторы + novelty + forgotten_days); панель `Сейчас применено` только
+в `Настройках` (бейджа на `/wave` нет).
+
+- [x] **R1. Сейф без боли (P0).**
+  - [x] `R1.1 Автозахват с согласия.` `POST /api/settings/login` принимает
+    `remember`: при `true` пароль (уже проверенный Navidrome) шифруется в сейф
+    сразу при входе — второго ввода нет. Best-effort: сейф не валит вход,
+    ответ несет `vault_stored`. Без галочки — как раньше, только проверка.
+    Чекбокс на экране входа (`LoginGate`, default on) + уже было в
+    `users/page.tsx:139` для `by-credentials`.
+  - [x] `R1.2 Статус auth fail.` `GET /api/users/{id}/vault-check`:
+    легкий `ping` в Navidrome по расшифрованному паролю без полного импорта.
+    Ответ `{stored, auth_ok, key_source, error?}`. Бейдж в карточке юзера:
+    `ок / не запомнен / требует перезапомнить (401/decrypt fail)` + кнопка
+    `Проверить сейф`.
+  - [x] `R1.3 Понятные логи.` В `refresh_tastes` (`workers/tasks/__init__.py:2504`)
+    пишет `username` вместо огрызка `uid[:8]`, в нотификацию `warn` кладет
+    имена упавших + ссылку (`/users/{id}` при одной ошибке, `/users` при
+    нескольких, `/scans` при успехе).
+- [ ] **R2. Тюнинг волны в админке (P1, вкладка `Настройки`).**
+  - [x] `R2.2-ядро: API + врезка в wave.py (без UI).`
+    `GET/PUT /api/settings/rec-tuning` (admin; `?user_id` / `{user_id}` —
+    личный оверлей; `reset` — сброс scope; мусор отбрасывается, известное
+    клампится). `wave.py` читает личный эффект: `_weights`, `behaviorBonus`
+    (окно+таблица), diversity (артист/жанр/муд), fatigue, recency, novelty,
+    jitter/skip/clap/key/cluster/lyrics/time/arm/assoc/srv/mood-arm/neg,
+    `session_drift` (пороги/сдвиги/бан жанра, `user_id` опционально),
+    `select_seeds` (доли), `time_bonus_for` (потолок). Всё через фолбеки:
+    пустая/битая БД = константы как раньше. Тесты: `test_rec_tuning.py`
+    (дефолты/оверлей/валидация/дрейф) + весь `tests/` зелёный (90).
+    Остаток врезки — готов: `smart.py` (forgotten/night/sport/score_window),
+    `playlist_ai.py` (artist_cap, `user_id` опционально + резолв в API),
+    `seed_radio.py` (radio_similar/per_similar/server), `adaptive_count`
+    и smooth/key-раскладка (капы/шаги/проходы). Всё per-user через эффект.
+  - [x] `R2.2-UI + R2.3: вкладка «Настройки → Волна».`
+    Селектор scope (глобал/юзер), 4 секции (~60 ручек), бейдж источника
+    (личное/глобал/дефолт), dirty-only сохранение (нетронутое наследует),
+    сброс scope, пресеты (новинки/консервативно/без повторов),
+    per-group авто-тумблеры (глобальные): вкл = ручки секции серые.
+    Тесты: `test_rec_tuning.py` (5 шт) + весь `tests/` зелёный (91).
+  - [x] `R2.1 Хранилище `AppSetting(rec_tuning)` + `services/rec_tuning.py`
+    по образцу `automation.py` (TTL-кэш, `get_all/get_group/is_auto/set_flags`,
+    валидация/кламп, неизвестные ключи отбрасываются). Дефолты 1в1 = текущие
+    константы (`wave.py`/`smart.py`/`playlist_ai.py`), скоринг пока читает
+    константы — врезка отдельным шагом. Группы: 1) повторы и разнообразие
+    (`artist/genre/mood_penalty`, `fatigue_days + thresholds + penalty`,
+    `recency_windows_h + factors`, `novelty_extra`, `artist_cap`); 2) характер
+    (`weights_cold/warm`, порог `N=50`, `jitter=0.12`, `skip_weight=0.25`,
+    `clap_weight=0.08`, `key/cluster/lyrics/time/arm/assoc/srv`); 3) скипы
+    (`drift_thresholds 3/5/7`, `energy/tempo shifts`, `temp_ban=3`,
+    `behaviorBonus`, окно `=10`); 4) плейлисты (`forgotten_days=90`,
+    `night_energy<0.4`, `sport_bpm>110/energy>0.7`, `pool/score window`,
+    `adaptive caps 4/5/6`, `smooth max_step/passes`, `seed ratios`).
+  - [ ] `R2.2 UI `Настройки -> Волна и рекомендации`: 4 секции + пресеты
+    `По умолчанию / Больше новинок / Консервативно / Без повторов`.
+    `GET/PUT /api/settings/rec-tuning` только admin, валидация диапазонов,
+    кнопка `Сброс к дефолту`.
+  - [ ] `R2.3 Серые слайдеры.` Per-group `auto: bool`. `auto on => inputs
+    disabled` (вкл на 1,2,3 — серые 1,2,3; вкл на 4 — все серое). Ручное
+    движение слайдера = `auto off` по группе автоматом.
+- [x] **R3. Авто-мозг MVP (P2, только repeats + forgotten_days).**
+  - Scope per-user + глобальные лимиты: `services/auto_tune.py` (`tune_user` /
+    `tune_all`) — сигналы юзера (`rec_feedback` 7д: скипы/дослушивания/лайки,
+    причины, топ-3 vs хвост) -> шаги его оверлея. Глобал не трогается никогда.
+    Шаги ±5-10% с клампом схемой, холодный старт (<50 решений) молчит,
+    выключенная группа молчит, один юзер не валит остальных (try/except).
+    История per-user `rec_tuning_auto_log:<id>` (20 записей).
+  - Крон `auto_tune` ежедневно 05:20 + задача `tasks.auto_tune` (run/логи/
+    нотификация, ручной запуск кнопкой «сейчас», `user_id` опционально).
+  - R3.1 Панель «Сейчас применено» только в `Настройки → Волна` (per-user
+    scope): сигналы, причины, before→after, skip-причины. Бейджа на `/wave` нет.
+  - Тесты `test_auto_tune.py`: скипальщик и любитель расходятся, холодный
+    молчит, auto-off = тишина, глобал цел. Весь `tests/` зелёный (93).
+
 ## Сделано ранее
 
 - [x] CLAP-аудио в скоринге волны (вес `0.08`, фолбек на librosa).

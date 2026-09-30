@@ -522,6 +522,67 @@ def vault_status(user_id: str, db: Session = Depends(get_db)):
             "key_source": _vault.key_source()}
 
 
+@router.get("/{user_id}/vault-check")
+def vault_check(user_id: str, db: Session = Depends(get_db)):
+    """Read-only проверка сейфа: расшифровка + ping в Navidrome без импорта.
+
+    Ответ {stored, auth_ok, key_source, error?}. Пароль никуда не пишется
+    и не возвращается — только факт `ping ok/fail`. Ошибка честно различает
+    `decrypt fail` (перезапомнить пароль) и `auth fail` Navidrome (401/ping).
+    """
+    from app.db.models import UserCredential as _UC
+    from app.services import vault as _vault
+
+    u = _require_user(db, user_id)
+    key_source = _vault.key_source()
+    row = db.query(_UC).filter_by(user_id=u.id).first()
+    if row is None:
+        return {"stored": False, "auth_ok": None, "key_source": key_source,
+                "error": "Пароль не запомнен"}
+    try:
+        password = _vault.decrypt_password(row.enc_password)
+    except Exception as e:  # noqa: BLE001 — ключ битый/сменился
+        return {"stored": True, "auth_ok": False, "key_source": key_source,
+                "error": f"Сейф не открылся — перезапомните пароль ({str(e)[:160]})"}
+    from app.services.media_server import get_media_server_config
+
+    url = ""
+    try:
+        cfg = get_media_server_config(db)
+        url = (cfg.get("url") if cfg else "") or ""
+    except Exception:
+        url = ""
+    if not url:
+        try:
+            from app.db.models import MediaServer as _MS
+
+            srv = db.get(_MS, str(u.server_id))
+            url = str(srv.url or "") if srv is not None else ""
+        except Exception:
+            url = ""
+    if not url:
+        return {"stored": True, "auth_ok": None, "key_source": key_source,
+                "error": "Медиа-сервер не настроен"}
+    import asyncio as _asyncio
+
+    from app.services.navidrome.client import SubsonicAuth, SubsonicClient
+
+    async def _ping() -> bool:
+        async with SubsonicClient(url, SubsonicAuth(user=u.external_id, password=password),
+                                  timeout=15.0) as client:
+            return await client.ping()
+
+    try:
+        ok = bool(_asyncio.run(_ping()))
+    except Exception as e:  # noqa: BLE001
+        return {"stored": True, "auth_ok": False, "key_source": key_source,
+                "error": f"Navidrome недоступен: {str(e)[:200]}"}
+    if not ok:
+        return {"stored": True, "auth_ok": False, "key_source": key_source,
+                "error": "Navidrome отклонил логин/пароль — перезапомните пароль"}
+    return {"stored": True, "auth_ok": True, "key_source": key_source}
+
+
 @router.post("/{user_id}/vault")
 def vault_store(user_id: str, payload: VaultIn, db: Session = Depends(get_db)):
     """Запомнить пароль (opt-in автообновление). Ключ создаётся сам при первом нажатии."""

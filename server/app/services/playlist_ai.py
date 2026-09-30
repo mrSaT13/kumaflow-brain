@@ -29,7 +29,20 @@ def _token_score(q: str, t: Track) -> float:
     return s
 
 
-def _clap_candidates(db: Session, query: str, limit: int = 150) -> list[Track] | None:
+def _tuning_cap(db: Session, user_id: str | None = None) -> int:
+    """Личный лимит треков одного артиста (дефолт 2). Ошибка -> 2."""
+    try:
+        from app.services import rec_tuning as _rt
+
+        v = (_rt.get_all(db, user_id).get("repeats") or {}).get(
+            "artist_cap", 2)
+        return max(1, min(20, int(float(v))))
+    except Exception:
+        return 2
+
+
+def _clap_candidates(db: Session, query: str, limit: int = 150,
+                     user_id: str | None = None) -> list[Track] | None:
     """Отбор кандидатов по смыслу запроса через CLAP-эмбеддинг.
 
     Зачем это вместо отправки 2000 треков в LLM. Старый путь брал pool из
@@ -62,14 +75,15 @@ def _clap_candidates(db: Session, query: str, limit: int = 150) -> list[Track] |
         # score здесь — косинус к вектору запроса, то есть уже «смысловая близость».
         out: list[Track] = []
         seen: dict[str, int] = {}
+        cap = _tuning_cap(db, user_id)
         for h in hits:
             t = db.get(Track, str(h.get("track_id") or ""))
             if t is None:
                 continue
             artist = t.artist_name or "unknown"
             # Тот же diversity-cap, что и в эвристическом пути: не больше
-            # двух треков одного артиста, иначе микс вырождается в одного исполнителя.
-            if seen.get(artist, 0) >= 2:
+            # cap треков одного артиста, иначе микс вырождается в одного исполнителя.
+            if seen.get(artist, 0) >= cap:
                 continue
             seen[artist] = seen.get(artist, 0) + 1
             out.append(t)
@@ -81,7 +95,9 @@ def _clap_candidates(db: Session, query: str, limit: int = 150) -> list[Track] |
         return None
 
 
-def _build_candidates(db: Session, query: str, desired: int = 30, limit: int = 280) -> list[Track]:
+def _build_candidates(db: Session, query: str, desired: int = 30,
+                      limit: int = 280,
+                      user_id: str | None = None) -> list[Track]:
     from app.services.vibe import analyze_track, detect_mood, vibe_similarity
 
     # pool: все треки (в prod 700 stratified — упрощаем)
@@ -133,11 +149,12 @@ def _build_candidates(db: Session, query: str, desired: int = 30, limit: int = 2
         scored.append((s, t))
     scored.sort(key=lambda kv: kv[0], reverse=True)
     # diversity cap 60% артистов + jitter
+    cap = _tuning_cap(db, user_id)
     seen: dict[str, int] = {}
     out: list[Track] = []
     for sc, t in scored:
         cnt = seen.get(t.artist_name or "unknown", 0)
-        if cnt >= 2:
+        if cnt >= cap:
             continue
         jitter = random.uniform(0.8, 1.0)
         # смешаем скор с jitter ordering — сортировка уже есть, просто фильтр
@@ -207,7 +224,8 @@ def _parse_llm_json(raw: str, candidates: list[Track], desired: int) -> dict[str
     return {"name": name, "comment": comment, "ids": uniq[:desired]}
 
 
-def _fallback_result(query: str, candidates: list[Track], desired: int, reason: str = "") -> dict[str, Any]:
+def _fallback_result(query: str, candidates: list[Track], desired: int,
+                     reason: str = "", cap: int = 2) -> dict[str, Any]:
     # energy sort + diversity
     from app.db.database import session_scope
     from app.db.models import TrackFeatures
@@ -222,14 +240,15 @@ def _fallback_result(query: str, candidates: list[Track], desired: int, reason: 
         candidates_sorted = sorted(candidates, key=lambda t: (t.play_count or 0), reverse=True)
     except Exception:
         candidates_sorted = candidates
-    # diversity 2 подряд
+    # diversity cap подряд
+    cap = max(1, min(20, int(cap)))
     out: list[str] = []
     last_artist = None
     repeat = 0
     for t in candidates_sorted:
         if t.artist_name == last_artist:
             repeat += 1
-            if repeat >= 2:
+            if repeat >= cap:
                 continue
         else:
             repeat = 0
@@ -240,17 +259,21 @@ def _fallback_result(query: str, candidates: list[Track], desired: int, reason: 
     return {"name": f"Микс: {query[:24]}", "comment": f"ИИ недоступен: {reason}. Показан локальный набор." if reason else "Локальный набор", "ids": out, "from_fallback": True}
 
 
-def generate_from_prompt(db: Session, query: str, desired: int = 30, hint_mood: str | None = None) -> dict[str, Any]:
+def generate_from_prompt(db: Session, query: str, desired: int = 30,
+                         hint_mood: str | None = None,
+                         user_id: str | None = None) -> dict[str, Any]:
     """Копия mobile generateFromPrompt — кандидаты on-device + LLM на сервере (ai.py)."""
     if hint_mood:
         query = f"{query} {hint_mood}".strip()
+    cap = _tuning_cap(db, user_id)
     # Сначала пробуем смысловой отбор через CLAP: он и есть «поиск по смыслу»,
     # и на нём запрос уже отфильтрован. Эвристика — запасной путь.
-    candidates = _clap_candidates(db, query, limit=150)
+    candidates = _clap_candidates(db, query, limit=150, user_id=user_id)
     if candidates:
         logger.info("playlist_ai: {} кандидатов отобрано CLAP по смыслу запроса", len(candidates))
     else:
-        candidates = _build_candidates(db, query, desired, limit=280)
+        candidates = _build_candidates(db, query, desired, limit=280,
+                                       user_id=user_id)
     if not candidates:
         return {"name": "Пусто", "comment": "Библиотека пуста", "ids": [], "songs": [], "from_fallback": True, "raw": ""}
     prompt = _build_prompt(query, desired, candidates)
@@ -268,7 +291,8 @@ def generate_from_prompt(db: Session, query: str, desired: int = 30, hint_mood: 
             raise RuntimeError("AI not configured")
     except Exception as e:
         logger.warning("playlist_ai llm failed: {}", e)
-        fb = _fallback_result(query, candidates, desired, reason=str(e))
+        fb = _fallback_result(query, candidates, desired, reason=str(e),
+                              cap=cap)
         # резолв songs
         songs = [db.get(Track, sid) for sid in fb["ids"]]
         songs = [s for s in songs if s]
@@ -290,7 +314,8 @@ def generate_from_prompt(db: Session, query: str, desired: int = 30, hint_mood: 
         if ids:
             parsed = {"name": "KumaFlow Mix", "comment": "", "ids": ids}
         else:
-            fb = _fallback_result(query, candidates, desired, reason="parse failed")
+            fb = _fallback_result(query, candidates, desired,
+                              reason="parse failed", cap=cap)
             songs = [db.get(Track, sid) for sid in fb["ids"]]
             songs = [s for s in songs if s]
             return {"name": fb["name"], "comment": fb["comment"], "ids": fb["ids"], "songs": songs, "from_fallback": True, "raw": raw}

@@ -21,6 +21,7 @@ DEFAULTS: list[tuple[str, str, str]] = [
     ("Taste snapshots", "snapshots", "0 7 * * 0"),
     ("Weekly discovery", "weekly", "0 6 * * 1"),
     ("Cover GC 7d", "covers_gc", "0 5 * * 0"),
+    ("Auto-tune волны", "auto_tune", "20 5 * * *"),
 ]
 
 # Допустимые виды выражения для 5-полей crontab: минута час день месяц день-недели.

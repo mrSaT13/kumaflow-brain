@@ -15,6 +15,32 @@ from datetime import datetime, timedelta
 
 FORGOTTEN_DAYS = 90
 
+
+def _tun_all(db, user_id: str | None = None) -> dict:
+    """Эффективный rec_tuning для юзера. Ошибка -> {} (дальше дефолты)."""
+    try:
+        from app.services import rec_tuning as _rt
+
+        return _rt.get_all(db, user_id) or {}
+    except Exception:
+        return {}
+
+
+def _tun_float(tun: dict, key: str, default: float) -> float:
+    try:
+        v = (tun.get("playlists") or {}).get(key, default)
+        return float(default if v is None else v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _tun_int(tun: dict, key: str, default: int) -> int:
+    try:
+        v = (tun.get("playlists") or {}).get(key, default)
+        return int(float(default if v is None else v))
+    except (TypeError, ValueError):
+        return int(default)
+
 KINDS: dict[str, str] = {
     "discoveries": "Открытия недели",
     "forgotten": "Забытые любимые",
@@ -110,19 +136,27 @@ def discoveries(db, user_id: str, n: int = 30) -> list[str]:
     seeds = _wave.select_seeds(db, user_id, limit=5)
     # Единый скоринг: полный контекст ядра (дрейф, руки, CLAP, skip-модель,
     # коллаборативка, авто-муд). Предфильтр выше (неслышанное, баны) сохранён.
-    return _wave.rerank_pool(db, user_id, cand[:800], seeds=seeds,
+    tun = _tun_all(db, user_id)
+    _sw = _tun_int(tun, "score_window", 800)
+    return _wave.rerank_pool(db, user_id, cand[:max(50, _sw)], seeds=seeds,
                              kind="discoveries", n=n, source="smart")
 
 
 def forgotten(db, user_id: str, n: int = 30,
-              days: int = FORGOTTEN_DAYS) -> list[str]:
+              days: int | None = None) -> list[str]:
     """Лайки, не игравшие days+ дней — ранжирует общее ядро волны."""
     from app.db.models import Favorite
 
     from app.services import wave as _wave
 
+    if days is None:
+        try:
+            days = _tun_int(_tun_all(db, user_id), "forgotten_days",
+                            FORGOTTEN_DAYS)
+        except Exception:
+            days = FORGOTTEN_DAYS
     _, last = _play_sets(db, user_id)
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(days)))
     fav_ids = [str(r.track_id) for r in
                db.query(Favorite).filter_by(user_id=user_id).all()]
     if fav_ids:
@@ -155,6 +189,10 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
     from app.services import wave as _wave
 
     dis, bans = _exclusions(db, user_id)
+    tun = _tun_all(db, user_id)
+    _night_e = _tun_float(tun, "night_energy_max", 0.4)
+    _sport_bpm = _tun_float(tun, "sport_bpm_min", 110)
+    _sport_e = _tun_float(tun, "sport_energy_min", 0.7)
     feats = db.query(TrackFeatures).limit(5000).all()
     pool: list[str] = []
     for f in feats:
@@ -168,12 +206,12 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
             continue
         moods = [str(m).lower() for m in (f.mood_labels or [])]
         if predicate == "night":
-            if en < 0.4 or any(k in moods for k in
-                               ("calm", "chill", "спокой", "тих", "sleep", "сон",
-                                "ambient", "эмбиент", "нежн")):
+            if en < _night_e or any(k in moods for k in
+                                ("calm", "chill", "спокой", "тих", "sleep", "сон",
+                                 "ambient", "эмбиент", "нежн")):
                 pool.append(tid)
         else:  # sport
-            if bpm > 110 or en > 0.7:
+            if bpm > _sport_bpm or en > _sport_e:
                 pool.append(tid)
     if bans and pool:
         from app.services.artist_names import is_banned as _is_banned
@@ -198,7 +236,8 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
         return []
     # Порядок — ядро волны; джиттер per-user-per-day внутри (у всех юзеров
     # без данных плейлисты не совпадают).
-    return _wave.rerank_pool(db, user_id, pool[:800], kind=predicate,
+    _sw = _tun_int(tun, "score_window", 800)
+    return _wave.rerank_pool(db, user_id, pool[:max(50, _sw)], kind=predicate,
                              day=_date.today().isoformat(),
                              n=n, source="smart")
 

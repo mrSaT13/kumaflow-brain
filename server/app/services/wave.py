@@ -17,12 +17,70 @@ from datetime import datetime
 from typing import Any
 
 
-def _weights(total_likes: int) -> dict[str, float]:
-    if total_likes < 50:
-        return {'audio': 0.20, 'genre': 0.30, 'artist': 0.10,
-                'behavior': 0.10, 'collab': 0.25, 'novelty': 0.05}
-    return {'audio': 0.40, 'genre': 0.20, 'artist': 0.10,
+def _tun_all(db, user_id: str | None = None) -> dict:
+    """Эффективный rec_tuning для юзера (дефолты <- глобал <- per-user).
+
+    Один PK-запрос. Любая ошибка (нет таблицы, битая строка) -> {}:
+    дальше везде дефолты-константы, поведение 1в1 как раньше.
+    """
+    try:
+        from app.services import rec_tuning as _rt
+
+        return _rt.get_all(db, user_id) or {}
+    except Exception:
+        return {}
+
+
+def _tun(tun: dict, group: str, key: str, default):
+    try:
+        v = (tun.get(group) or {}).get(key, default)
+        return default if v is None else v
+    except Exception:
+        return default
+
+
+def _tun_float(tun: dict, group: str, key: str, default: float) -> float:
+    try:
+        return float(_tun(tun, group, key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _tun_int(tun: dict, group: str, key: str, default: int) -> int:
+    try:
+        return int(float(_tun(tun, group, key, default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _tun_list(tun: dict, group: str, key: str,
+              default: list, n: int) -> list:
+    """Список нужной длины, иначе дефолт (защита от битой строки в БД)."""
+    try:
+        v = (tun.get(group) or {}).get(key)
+        if isinstance(v, (list, tuple)) and len(v) >= n:
+            return [float(x) for x in list(v)[:n]]
+    except Exception:
+        pass
+    return [float(x) for x in list(default)[:n]]
+
+
+def _weights(total_likes: int, tun: dict | None = None) -> dict[str, float]:
+    cold = {'audio': 0.20, 'genre': 0.30, 'artist': 0.10,
+            'behavior': 0.10, 'collab': 0.25, 'novelty': 0.05}
+    warm = {'audio': 0.40, 'genre': 0.20, 'artist': 0.10,
             'behavior': 0.20, 'collab': 0.05, 'novelty': 0.05}
+    tun = tun or {}
+    th = _tun_int(tun, 'character', 'likes_threshold', 50)
+    name = 'weights_cold' if total_likes < th else 'weights_warm'
+    pick = cold if total_likes < th else warm
+    try:
+        stored = (tun.get('character') or {}).get(name)
+        if isinstance(stored, dict) and all(k in stored for k in pick):
+            return {k: float(stored[k]) for k in pick}
+    except Exception:
+        pass
+    return dict(pick)
 
 
 # Пресеты «Моя волна» (клиент шлёт русские пилюли или англ. коды).
@@ -186,14 +244,13 @@ def select_seeds(db, user_id: str, characteristic: str | None = None,
     top = prof.get('top_tracks') or []
     if not top:
         return []
-    if characteristic == 'favorite':
-        top_ratio, recent_ratio = 0.7, 0.2
-    elif characteristic == 'unfamiliar':
-        top_ratio, recent_ratio = 0.3, 0.2
-    elif characteristic == 'popular':
-        top_ratio, recent_ratio = 0.6, 0.3
-    else:
-        top_ratio, recent_ratio = 0.5, 0.25
+    tun = _tun_all(db, user_id)
+    _suffix = {'favorite': 'favorite', 'unfamiliar': 'unfamiliar',
+               'popular': 'popular'}.get(characteristic or '', 'default')
+    _dflt = {'favorite': (0.7, 0.2), 'unfamiliar': (0.3, 0.2),
+             'popular': (0.6, 0.3)}.get(characteristic or '', (0.5, 0.25))
+    top_ratio = _tun_float(tun, 'playlists', f'seed_top_{_suffix}', _dflt[0])
+    recent_ratio = _tun_float(tun, 'playlists', f'seed_recent_{_suffix}', _dflt[1])
     top_n = round(limit * top_ratio)
     rec_n = round(limit * recent_ratio)
     out = [t['track_id'] for t in top[:top_n]]
@@ -211,7 +268,8 @@ def select_seeds(db, user_id: str, characteristic: str | None = None,
     return out[:limit]
 
 
-def session_drift(db, recent_events: list[dict] | None) -> dict:
+def session_drift(db, recent_events: list[dict] | None,
+                  user_id: str | None = None) -> dict:
     """Порт мобильного MoodDriftDetector: сессия, а не вечность.
 
     recent_events — в хронологическом порядке (как шлёт клиент).
@@ -221,6 +279,13 @@ def session_drift(db, recent_events: list[dict] | None) -> dict:
     Постоянные счётчики (3 скипа ever -> автодизлайк) не трогаем.
     """
     events = [e for e in (recent_events or []) if isinstance(e, dict)]
+    # Пороги дрейфа из личного тюнинга (дефолт 3/5/7, энергия 0.1/0.2/0.3,
+    # темп 10/20/30). Битые значения -> дефолт, сортировка на всякий случай.
+    tun = _tun_all(db, user_id)
+    _dc = [int(x) for x in _tun_list(tun, 'skips', 'drift_counts', [3, 5, 7], 3)]
+    _de = _tun_list(tun, 'skips', 'drift_energy', [0.1, 0.2, 0.3], 3)
+    _dt = _tun_list(tun, 'skips', 'drift_tempo', [10, 20, 30], 3)
+    _dc = sorted(_dc)
     # Хвостовые скипы подряд (позитив обнуляет серию — как logPositiveInteraction).
     trailing = 0
     for e in reversed(events):
@@ -228,12 +293,12 @@ def session_drift(db, recent_events: list[dict] | None) -> dict:
             trailing += 1
         else:
             break
-    if trailing >= 7:
-        severity, energy_shift, tempo_shift = "strong", -0.3, -30
-    elif trailing >= 5:
-        severity, energy_shift, tempo_shift = "moderate", -0.2, -20
-    elif trailing >= 3:
-        severity, energy_shift, tempo_shift = "mild", -0.1, -10
+    if trailing >= _dc[2]:
+        severity, energy_shift, tempo_shift = "strong", -_de[2], -_dt[2]
+    elif trailing >= _dc[1]:
+        severity, energy_shift, tempo_shift = "moderate", -_de[1], -_dt[1]
+    elif trailing >= _dc[0]:
+        severity, energy_shift, tempo_shift = "mild", -_de[0], -_dt[0]
     else:
         severity, energy_shift, tempo_shift = None, 0.0, 0
     # Зеркало: хвост позитива подряд (like/replay/complete/seek_back) —
@@ -246,12 +311,12 @@ def session_drift(db, recent_events: list[dict] | None) -> dict:
             warm_streak += 1
         else:
             break
-    if warm_streak >= 7:
-        warmth, energy_shift, tempo_shift = "strong", 0.3, 30
-    elif warm_streak >= 5:
-        warmth, energy_shift, tempo_shift = "moderate", 0.2, 20
-    elif warm_streak >= 3:
-        warmth, energy_shift, tempo_shift = "mild", 0.1, 10
+    if warm_streak >= _dc[2]:
+        warmth, energy_shift, tempo_shift = "strong", _de[2], _dt[2]
+    elif warm_streak >= _dc[1]:
+        warmth, energy_shift, tempo_shift = "moderate", _de[1], _dt[1]
+    elif warm_streak >= _dc[0]:
+        warmth, energy_shift, tempo_shift = "mild", _de[0], _dt[0]
     else:
         warmth, warm_streak = None, 0
 
@@ -278,7 +343,8 @@ def session_drift(db, recent_events: list[dict] | None) -> dict:
                         genre_hits[str(t.genre).lower()] += 1
             except Exception:
                 pass
-    temp_banned = sorted([g for g, n in genre_hits.items() if n >= 3])
+    _ban_n = _tun_int(tun, 'skips', 'genre_ban_skips', 3)
+    temp_banned = sorted([g for g, n in genre_hits.items() if n >= _ban_n])
     return {"severity": severity, "energy_shift": energy_shift,
             "tempo_shift": tempo_shift, "consecutive_skips": trailing,
             "warmth": warmth, "positive_streak": warm_streak,
@@ -293,11 +359,12 @@ def _mood_of(feat) -> str | None:
         return None
 
 
-def _clap_weight() -> float:
+def _clap_weight(tun: dict | None = None) -> float:
     """Вес CLAP-косинуса в волне. 0 = выключено → поведение 1в1 как раньше.
 
     Без анализа/эмбеддингов вклад и так 0 (карта пустая), но флаг позволяет
-    откатить фичу из веба без деплоя. Дефолт 0.08: заметно, но не ломает баланс.
+    откатить фичу из веба без деплоя. Дефолт из личного тюнинга (0.08):
+    заметно, но не ломает баланс.
     """
     try:
         from app.services.automation import clap_audio_enabled as _flag
@@ -306,7 +373,7 @@ def _clap_weight() -> float:
             return 0.0
     except Exception:
         pass
-    return 0.08
+    return _tun_float(tun or {}, 'character', 'clap_weight', 0.08)
 
 
 def _load_clap_map(db, ids: list[str] | None,
@@ -548,6 +615,7 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     from app.services.ml import _cosine, _feature_vector
 
     settings = settings or {}
+    tun = _tun_all(db, user_id)
     _rng = random.Random(jitter_seed) if jitter_seed else random
     activity_raw = (settings.get('activity') or '').strip()
     activity = activity_raw.lower() or None
@@ -586,7 +654,7 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
 
     prof = _taste.user_profile(db, user_id, top_n=0)
     likes_total = int((prof.get('counts') or {}).get('likes', 0) or 0)
-    w = _weights(likes_total)
+    w = _weights(likes_total, tun)
     pref_g = {str(k).lower(): float(v) for k, v in
               (prof.get('preferredGenres') or {}).items()}
     pref_a = {str(k): float(v) for k, v in
@@ -642,8 +710,15 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         neg_centroid = None
     # CLAP-центроиды (семантика аудио, не только librosa-тембр).
     # Нет эмбеддингов/анализа → None → вклад 0, волна как раньше.
-    _cw = float(clap_weight) if clap_weight is not None else _clap_weight()
-    _cw = min(max(_cw, 0.0), 0.3)
+    _cw_max = _tun_float(tun, 'character', 'clap_max', 0.3)
+    if clap_weight is not None:
+        try:
+            _cw = float(clap_weight)
+        except (TypeError, ValueError):
+            _cw = _clap_weight(tun)
+    else:
+        _cw = _clap_weight(tun)
+    _cw = min(max(_cw, 0.0), max(_cw_max, 0.0))
     clap_map = clap_map or {}
     clap_centroid = None
     clap_sess = None
@@ -661,9 +736,21 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     else:
         _cw = 0.0
 
-    # behaviorBonus по свежим событиям (last 10 как в мобиле)
+    # behaviorBonus по свежим событиям (окно и таблица — из личного тюнинга,
+    # дефолт: окно 10 как в мобиле).
+    _b_win = _tun_int(tun, 'skips', 'behavior_window', 10)
+    _b_like = _tun_float(tun, 'skips', 'bonus_like', 0.2)
+    _b_replay = _tun_float(tun, 'skips', 'bonus_replay', 0.25)
+    _b_complete = _tun_float(tun, 'skips', 'bonus_complete', 0.2)
+    _b_play = _tun_float(tun, 'skips', 'bonus_play_long', 0.1)
+    _play_long = _tun_int(tun, 'skips', 'play_long_sec', 180)
+    _p_abandon = _tun_float(tun, 'skips', 'penalty_abandon', -0.15)
+    _p_early = _tun_float(tun, 'skips', 'penalty_skip_early', -0.3)
+    _early_sec = _tun_int(tun, 'skips', 'skip_early_sec', 30)
+    _p_late = _tun_float(tun, 'skips', 'penalty_skip_late', -0.1)
+    _late_sec = _tun_int(tun, 'skips', 'skip_late_sec', 120)
     bonus: dict[str, float] = Counter()
-    for e in (recent_events or [])[:10]:
+    for e in (recent_events or [])[:max(1, _b_win)]:
         if not isinstance(e, dict):
             continue
         tid = str(e.get('track_id') or '')
@@ -674,23 +761,52 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         except (TypeError, ValueError):
             pos = 999
         if a == 'like':
-            bonus[tid] += 0.2
+            bonus[tid] += _b_like
         elif a in ('seek_back', 'replay'):
-            bonus[tid] += 0.25
+            bonus[tid] += _b_replay
         elif a == 'complete':
-            bonus[tid] += 0.2
-        elif a == 'play' and pos >= 180:
-            bonus[tid] += 0.1
+            bonus[tid] += _b_complete
+        elif a == 'play' and pos >= _play_long:
+            bonus[tid] += _b_play
         elif a == 'abandon':
-            bonus[tid] -= 0.15
-        elif a == 'skip' and pos < 30:
-            bonus[tid] -= 0.3
-        elif a == 'skip' and pos >= 120:
-            bonus[tid] -= 0.1
+            bonus[tid] += _p_abandon
+        elif a == 'skip' and pos < _early_sec:
+            bonus[tid] += _p_early
+        elif a == 'skip' and pos >= _late_sec:
+            bonus[tid] += _p_late
 
     used_artists: dict[str, int] = {}
     used_genres: dict[str, int] = {}
     used_moods: dict[str, int] = {}
+    # Личный тюнинг, один раз на вызов (не на трек): штрафы повторов,
+    # усталость, recency, веса total. Битые значения -> дефолты выше.
+    _ap = _tun_list(tun, 'repeats', 'artist_penalty', [0.05, 0.10, 0.15], 3)
+    _gp = _tun_list(tun, 'repeats', 'genre_penalty', [0.03, 0.07, 0.12], 3)
+    _mp = _tun_list(tun, 'repeats', 'mood_penalty', [0.03, 0.06, 0.10], 3)
+    _ft = [int(x) for x in
+           _tun_list(tun, 'repeats', 'fatigue_thresholds', [3, 6, 10], 3)]
+    _fpw = _tun_list(tun, 'repeats', 'fatigue_penalty',
+                     [0.05, 0.10, 0.15], 3)
+    _rw = _tun_list(tun, 'repeats', 'recency_windows_h', [3, 24, 168], 3)
+    _rf = _tun_list(tun, 'repeats', 'recency_factors', [0.3, 0.6, 0.85], 3)
+    _nov_extra = _tun_float(tun, 'repeats', 'novelty_extra', 0.08)
+    _jitter = _tun_float(tun, 'character', 'jitter', 0.12)
+    _skip_w = _tun_float(tun, 'character', 'skip_weight', 0.25)
+    _key_w = _tun_float(tun, 'character', 'key_weight', 0.06)
+    _cluster_w = _tun_float(tun, 'character', 'cluster_weight', 0.06)
+    _lyr_w = _tun_float(tun, 'character', 'lyrics_weight', 0.05)
+    _assoc_w = _tun_float(tun, 'character', 'assoc_weight', 0.08)
+    _srv_star = _tun_float(tun, 'character', 'srv_starred', 0.05)
+    _srv_rate = _tun_float(tun, 'character', 'srv_rating', 0.10)
+    _neg_w = _tun_float(tun, 'character', 'neg_weight', 0.15)
+    _arm_min = _tun_float(tun, 'character', 'arm_min', -0.16)
+    _arm_max = _tun_float(tun, 'character', 'arm_max', 0.16)
+    if _arm_min > _arm_max:
+        _arm_min, _arm_max = -0.16, 0.16
+    _marm_min = _tun_float(tun, 'character', 'mood_arm_min', -0.08)
+    _marm_max = _tun_float(tun, 'character', 'mood_arm_max', 0.12)
+    if _marm_min > _marm_max:
+        _marm_min, _marm_max = -0.08, 0.12
     out: list[dict] = []
     tracks = {str(t.id): t for t in
               db.query(Track).filter(Track.id.in_(candidate_ids)).all()} \
@@ -721,7 +837,7 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             try:
                 v = _feature_vector(None, f)
                 if v is not None:
-                    neg_pen = max(0.0, float(_cosine(v, neg_centroid))) * 0.15
+                    neg_pen = max(0.0, float(_cosine(v, neg_centroid))) * _neg_w
             except Exception:
                 neg_pen = 0.0
         genre_s = 0.0
@@ -746,12 +862,12 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         if last_played and tid in last_played:
             try:
                 _age_h = (datetime.utcnow() - last_played[tid]).total_seconds() / 3600.0
-                if _age_h < 3:
-                    novelty *= 0.3
-                elif _age_h < 24:
-                    novelty *= 0.6
-                elif _age_h < 24 * 7:
-                    novelty *= 0.85
+                if _age_h < _rw[0]:
+                    novelty *= _rf[0]
+                elif _age_h < _rw[1]:
+                    novelty *= _rf[1]
+                elif _age_h < _rw[2]:
+                    novelty *= _rf[2]
             except Exception:
                 pass
         collab = min(max(float((collab_scores or {}).get(tid, 0.0)), 0.0), 1.0)
@@ -769,24 +885,24 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                 arm_b += float(arm_artist.get(t.artist_name, 0.0))
             if arm_genre and t.genre:
                 arm_b += float(arm_genre.get(str(t.genre).lower(), 0.0))
-            arm_b = min(max(arm_b, -0.16), 0.16)
+            arm_b = min(max(arm_b, _arm_min), _arm_max)
         except (TypeError, ValueError):
             arm_b = 0.0
         # Ассоциация по сессиям (порт mobile item_similarity).
         assoc_b = 0.0
         if assoc:
             try:
-                assoc_b = min(max(float(assoc.get(tid, 0.0)), 0.0), 1.0) * 0.08
+                assoc_b = min(max(float(assoc.get(tid, 0.0)), 0.0), 1.0) * _assoc_w
             except (TypeError, ValueError):
                 assoc_b = 0.0
         # Рейтинг/звёздочка из Navidrome (порт mobile serverScore).
         srv_bonus = 0.0
         try:
             if getattr(t, "starred", False):
-                srv_bonus += 0.05
+                srv_bonus += _srv_star
             _rt = getattr(t, "rating", None)
             if _rt:
-                srv_bonus += min(max(float(_rt) / 5.0, 0.0), 1.0) * 0.10
+                srv_bonus += min(max(float(_rt) / 5.0, 0.0), 1.0) * _srv_rate
         except (TypeError, ValueError):
             pass
         # Тональность: совместимость с текущим треком (плавный переход).
@@ -905,24 +1021,24 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         pen = 0.0
         if t.artist_name and t.artist_name in used_artists:
             c = used_artists[t.artist_name]
-            pen += 0.05 if c == 1 else (0.10 if c == 2 else 0.15)
+            pen += _ap[0] if c == 1 else (_ap[1] if c == 2 else _ap[2])
         if t.genre and t.genre in used_genres:
             c = used_genres[t.genre]
-            pen += 0.03 if c == 1 else (0.07 if c == 2 else 0.12)
+            pen += _gp[0] if c == 1 else (_gp[1] if c == 2 else _gp[2])
         # Разнообразие настроений: не класть одно и то же настроение пачкой.
         _cm = _mood_of(f)
         if _cm and _cm in used_moods:
             c = used_moods[_cm]
-            pen += 0.03 if c == 1 else (0.06 if c == 2 else 0.10)
+            pen += _mp[0] if c == 1 else (_mp[1] if c == 2 else _mp[2])
         # Усталость артиста за неделю (по истории): загонянное остужаем.
         if fatigue and t.artist_name and t.artist_name in fatigue:
             _fp = int(fatigue[t.artist_name] or 0)
-            if _fp > 10:
-                pen += 0.15
-            elif _fp >= 6:
-                pen += 0.10
-            elif _fp >= 3:
-                pen += 0.05
+            if _fp > _ft[2]:
+                pen += _fpw[2]
+            elif _fp >= _ft[1]:
+                pen += _fpw[1]
+            elif _fp >= _ft[0]:
+                pen += _fpw[0]
 
         # CLAP-семантика: косинус к центроиду сидов + сессия (как audio).
         # Нет эмбеддинга у трека/сидов → 0, волна 1в1 как раньше.
@@ -943,7 +1059,7 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         mood_b = 0.0
         try:
             if mood_arm and _cm:
-                mood_b = min(max(float(mood_arm.get(_cm, 0.0)), -0.08), 0.12)
+                mood_b = min(max(float(mood_arm.get(_cm, 0.0)), _marm_min), _marm_max)
         except (TypeError, ValueError):
             mood_b = 0.0
         # Предикт скипа <30с: обученная модель, иначе эвристика.
@@ -952,11 +1068,11 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         total = (w['audio'] * audio + w['genre'] * genre_s +
                  w['artist'] * artist_s + w['behavior'] * behavior +
                  w['collab'] * collab + w['novelty'] * novelty +
-                 0.08 * novelty + ctx + bonus.get(tid, 0.0) -
+                 _nov_extra * novelty + ctx + bonus.get(tid, 0.0) -
                  pen - neg_pen + srv_bonus + time_b + arm_b + assoc_b +
-                 _cw * clap_s + mood_b - 0.25 * skip_p +
-                 _rng.random() * 0.12 +
-                 0.06 * key_c + 0.06 * cluster_c + 0.05 * lyr_c)
+                 _cw * clap_s + mood_b - _skip_w * skip_p +
+                 _rng.random() * _jitter +
+                 _key_w * key_c + _cluster_w * cluster_c + _lyr_w * lyr_c)
         total = min(max(total, 0.0), 1.0)
         if collab >= 0.7:
             reason = 'Loved by friends'
@@ -1076,7 +1192,7 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
     except Exception:
         recent_events = []
     try:
-        drift = session_drift(db, recent_events)
+        drift = session_drift(db, recent_events, user_id)
     except Exception:
         drift = {}
     # коллаборативка
@@ -1266,10 +1382,11 @@ def _recency_w(last) -> float:
 
 def time_bonus_for(db, user_id: str, track_ids: list[str], hour: int) -> dict[str, float]:
     """«Часто в этот час» (порт mobile): сумма по h-1/h/h+1
-    10*(1+plays/5)*recency, clamp 0..50, /50. Возвращает 0..0.2 на трек."""
+    10*(1+plays/5)*recency, clamp 0..50, /50. Возвращает 0..time_max на трек."""
     out: dict[str, float] = {}
     if not track_ids:
         return out
+    _tmax = _tun_float(_tun_all(db, user_id), 'character', 'time_max', 0.2)
     try:
         from app.db.models import TrackTimeStat as _TTS
 
@@ -1287,7 +1404,7 @@ def time_bonus_for(db, user_id: str, track_ids: list[str], hour: int) -> dict[st
             except Exception:
                 pass
         for tid, v in rows.items():
-            out[tid] = min(max(v, 0.0), 50.0) / 50.0 * 0.2
+            out[tid] = min(max(v, 0.0), 50.0) / 50.0 * max(_tmax, 0.0)
     except Exception:
         pass
     return out
@@ -1440,7 +1557,8 @@ def session_assoc(db, user_id: str, seed_ids: list[str],
 
 
 def adaptive_count(requested: int, drift: dict | None,
-                   morphing: bool = False) -> tuple[int, str | None]:
+                   morphing: bool = False,
+                   tun: dict | None = None) -> tuple[int, str | None]:
     """Адаптивная пачка: маленькая при смене настроения, большая в стабильном.
 
     Большая пачка (=10) при смене вкуса — это 30-40 минут старого вайба,
@@ -1448,31 +1566,39 @@ def adaptive_count(requested: int, drift: dict | None,
     муд режем пачку (пол 4 — очередь не голодает, refill и так при остатке
     <=3). В стабильном вайбе и на разогреве — полная пачка.
     Возвращает (effective, reason|None). reason None = выдали сколько просили.
+    Капы — из личного тюнинга, дефолт strong 4 / moderate 5 / mild-morph 6.
     """
+    tun = tun or {}
+    _cap_s = _tun_int(tun, 'playlists', 'adaptive_strong', 4)
+    _cap_m = _tun_int(tun, 'playlists', 'adaptive_moderate', 5)
+    _cap_mild = _tun_int(tun, 'playlists', 'adaptive_mild', 6)
+    _cap_morph = _tun_int(tun, 'playlists', 'adaptive_morphing', 6)
+    _floor = _tun_int(tun, 'playlists', 'adaptive_floor', 4)
     try:
         n = max(1, min(100, int(requested or 20)))
     except (TypeError, ValueError):
         n = 20
-    if n <= 4:
+    if n <= _floor:
         return n, None
     cap, bits = n, []
     sev = (drift or {}).get("severity")
     if sev == "strong":
-        cap, bits = min(cap, 4), bits + ["скипы ×7: разворот"]
+        cap, bits = min(cap, _cap_s), bits + ["скипы ×7: разворот"]
     elif sev == "moderate":
-        cap, bits = min(cap, 5), bits + ["скипы ×5: быстрая пачка"]
+        cap, bits = min(cap, _cap_m), bits + ["скипы ×5: быстрая пачка"]
     elif sev == "mild":
-        cap, bits = min(cap, 6), bits + ["скипы ×3: пачка меньше"]
+        cap, bits = min(cap, _cap_mild), bits + ["скипы ×3: пачка меньше"]
     if morphing:
-        cap, bits = min(cap, 6), bits + ["переход настроения"]
-    eff = max(min(cap, n), min(4, n))
+        cap, bits = min(cap, _cap_morph), bits + ["переход настроения"]
+    eff = max(min(cap, n), min(_floor, n))
     if eff >= n:
         return n, None
     return eff, " + ".join(bits) or None
 
 
 def _smooth_energy_pass(items: list[dict], max_step: float = 0.18,
-                        start_energy: float | None = None) -> list[dict]:
+                        start_energy: float | None = None,
+                        tun: dict | None = None) -> list[dict]:
     """Плавная раскладка по энергии + отчёт в лог.
 
     Раньше здесь стоял create_energy_wave в голом try/except pass — то есть
@@ -1487,6 +1613,10 @@ def _smooth_energy_pass(items: list[dict], max_step: float = 0.18,
         return items
     try:
         from app.services.orchestrator import smooth_energy_order as _seo
+
+        tun = tun or {}
+        max_step = _tun_float(tun, 'playlists', 'smooth_max_step', max_step)
+        _passes = _tun_int(tun, 'playlists', 'smooth_passes', 8)
 
         def _en_list(seq: list[dict]) -> list[float]:
             out = []
@@ -1510,7 +1640,8 @@ def _smooth_energy_pass(items: list[dict], max_step: float = 0.18,
         before_r = _ragged(_en_list(items))
         by_id = {str(r.get("track_id") or ""): r for r in items}
         wrapped = [dict(r, id=str(r.get("track_id") or "")) for r in items]
-        ordered = _seo(wrapped, None, max_step=max_step, start_energy=start_energy)
+        ordered = _seo(wrapped, None, max_step=max_step,
+                       passes=_passes, start_energy=start_energy)
         new = [by_id.get(str(w.get("id"))) for w in ordered]
         new = [r for r in new if r is not None]
         if len(new) != len(items):
@@ -1532,14 +1663,18 @@ def _smooth_energy_pass(items: list[dict], max_step: float = 0.18,
         return items
 
 
-def _smooth_keys_order(items: list[dict]) -> list[dict]:
+def _smooth_keys_order(items: list[dict],
+                       tun: dict | None = None) -> list[dict]:
     """Key-сглаживание соседей: пузырьковые свопы, улучшающие суммарную
     совместимость тональностей (квинтовый круг). Своп разрешён, только если
-    не рвёт энергетическую дугу (|Δenergy| < 0.15). Порядок множества не
-    меняет — только локальный порядок соседей."""
+    не рвёт энергетическую дугу (|Δenergy| < key_energy_max, дефолт 0.15).
+    Порядок множества не меняет — только локальный порядок соседей."""
     items = list(items)
     if len(items) < 2:
         return items
+    tun = tun or {}
+    _e_max = _tun_float(tun, 'playlists', 'key_energy_max', 0.15)
+    _passes = _tun_int(tun, 'playlists', 'key_passes', 3)
     try:
         from app.services.orchestrator import key_compatibility as _kcs
     except Exception:
@@ -1562,10 +1697,10 @@ def _smooth_keys_order(items: list[dict]) -> list[dict]:
                 s += 0.5
         return s
 
-    for _ in range(3):
+    for _ in range(max(0, _passes)):
         improved = False
         for i in range(len(items) - 1):
-            if abs(_en(items[i]) - _en(items[i + 1])) >= 0.15:
+            if abs(_en(items[i]) - _en(items[i + 1])) >= _e_max:
                 continue
             cur = _tot(items)
             items[i], items[i + 1] = items[i + 1], items[i]
@@ -1594,7 +1729,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
     # Сессионный дрейф (порт MoodDriftDetector): скипы подряд остужают волну,
     # скипнутое исключаем из кандидатов — только на этот запрос, в БД не пишем.
-    drift = session_drift(db, recent_events)
+    drift = session_drift(db, recent_events, user_id)
 
     _raw_queue = list(queue or []) + list(exclude_ids or [])
     played = set(_resolve_ids(db, _raw_queue))
@@ -2080,8 +2215,9 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # novelty-членом, дубли очереди на всякий случай режем ещё раз
     ranked = [r for r in ranked if r['track_id'] not in played]
     # Адаптивная пачка: при смене настроения — меньше, чтобы новый вайб
-    # было слышно через 4-5 треков, а не через 10.
-    eff_count, adapt_reason = adaptive_count(count, drift, morphing)
+    # было слышно через 4-5 треков, а не через 10. Капы — личные.
+    eff_count, adapt_reason = adaptive_count(count, drift, morphing,
+                                            _tun_all(db, user_id))
     top = ranked[:eff_count]
     # Финальная страховка на ответе: id + баны артистов + «та же песня».
     # Ловит всё, что просочилось через срез пула (cand[:800]/топ).
@@ -2166,23 +2302,26 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         # середина — лучшее остальное. Плавный уход в выбранный муд.
         g_start = [r for r in top if (r.get("mood") or None) == start_mood]
         g_target = [r for r in top if (r.get("mood") or None) == target_mood]
-        head = _smooth_keys_order(g_start[:3])
-        tail = _smooth_keys_order(g_target[:4])
+        _mtun = _tun_all(db, user_id)
+        head = _smooth_keys_order(g_start[:3], _mtun)
+        tail = _smooth_keys_order(g_target[:4], _mtun)
         used = {str(r.get("track_id")) for r in head + tail}
         mid_n = max(0, len(top) - len(head) - len(tail))
         mid = _smooth_keys_order(
-            [r for r in top if str(r.get("track_id")) not in used][:mid_n])
+            [r for r in top if str(r.get("track_id")) not in used][:mid_n],
+            _mtun)
         top = head + mid + tail
         morph = {"from": start_mood, "to": target_mood}
         # Раньше здесь энергетическая дуга не применялась вовсе: ветка morph
         # шла вместо неё, то есть при ВЫБРАННОМ настроении (главный сценарий)
         # переходов по энергии не было. Теперь дуга есть в обеих ветках.
-        top = _smooth_energy_pass(top, start_energy=_cur_en)
+        top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
     elif len(top) > 3:
         # Без целевого настроения — раскладываем оркестратором: плавные
         # переходы по энергии, затем key-сглаживание.
-        top = _smooth_energy_pass(top, start_energy=_cur_en)
-        top = _smooth_keys_order(top)
+        _mtun = _tun_all(db, user_id)
+        top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
+        top = _smooth_keys_order(top, _mtun)
     # Мостик: первый трек выдачи — плавное продолжение текущего.
     # Если переход резкий — подтягиваем лучший мостик из топ-10 окна.
     if cur_ids and top and _cf is not None:

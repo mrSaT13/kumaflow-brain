@@ -224,4 +224,12 @@ def run_now(job_id: str, db: Session = Depends(get_db)):
         j.last_run_at = datetime.utcnow()
         db.commit()
         return {"queued": True, "cleared": True}
+    if kind == "auto_tune":
+        from app.services.queue import enqueue_light
+        from app.workers.tasks import auto_tune
+
+        job = enqueue_light(auto_tune, job_timeout=1800)
+        j.last_run_at = datetime.utcnow()
+        db.commit()
+        return {"queued": True, "job_id": job}
     return {"queued": False, "error": f"неизвестный тип задачи: {kind!r}"}

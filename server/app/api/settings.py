@@ -333,6 +333,76 @@ def save_automation(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True, "flags": flags}
 
 
+@router.get("/rec-tuning")
+def get_rec_tuning(user_id: str | None = None, db: Session = Depends(get_db)):
+    """Тюнинг рекомендаций: дефолты (=константы кода), сырое из БД, итог.
+
+    Без user_id — глобал. С user_id — эффект именно этого слушателя
+    (дефолты <- глобал <- per-user overlay): то, что реально применит
+    волна. Пока скоринг читает константы, итог === дефолты.
+    Неизвестных ключей в БД быть не должно (set_flags их отбрасывает),
+    но итог всё равно строится только из известной схемы — мусор из БД
+    скоринг не уронит.
+    """
+    from app.services import rec_tuning as _rt
+
+    stored: dict = {}
+    user_stored: dict | None = None
+    auto_log: list | None = None
+    try:
+        from app.db.models import AppSetting
+
+        row = db.get(AppSetting, _rt.KEY)
+        if row is not None and isinstance(row.value, dict):
+            stored = row.value
+        uk = _rt._user_key(user_id)
+        if uk:
+            urow = db.get(AppSetting, uk)
+            user_stored = urow.value if urow is not None and isinstance(urow.value, dict) else {}
+            try:
+                from app.services import auto_tune as _at
+
+                auto_log = _at.get_log(db, str(user_id))
+            except Exception:
+                auto_log = []
+    except Exception:
+        stored = {}
+    return {"ok": True, "defaults": _rt.DEFAULTS, "user_id": user_id,
+            "stored": stored, "user_stored": user_stored,
+            "auto_log": auto_log,
+            "effective": _rt.get_all(db, user_id)}
+
+
+@router.put("/rec-tuning")
+def save_rec_tuning(payload: dict, db: Session = Depends(get_db)):
+    """Сохранить тюнинг рекомендаций: {user_id?, group: {key: value}}.
+
+    Без user_id — пишет глобал (рамки для всех). С user_id — личный
+    оверлей слушателя (проверяем, что юзер существует). Неизвестные
+    группы/ключи молча отбрасываются, известные — клампятся
+    в допустимые диапазоны (см. services/rec_tuning.py).
+    `{"reset": true}` — сброс scope к дефолтам (строка в БД удаляется).
+    """
+    from app.services import rec_tuning as _rt
+
+    body = dict(payload or {})
+    user_id = body.pop("user_id", None) or None
+    if user_id is not None:
+        from app.db.models import MediaUser
+
+        if db.get(MediaUser, str(user_id)) is None:
+            from fastapi import HTTPException as _HE
+
+            raise _HE(404, "user not found")
+        user_id = str(user_id)
+    if body.get("reset") is True:
+        effective = _rt.reset_flags(db, user_id)
+        return {"ok": True, "reset": True, "user_id": user_id,
+                "effective": effective}
+    effective = _rt.set_flags(body, db, user_id)
+    return {"ok": True, "user_id": user_id, "effective": effective}
+
+
 @router.get("/security")
 def get_security(db: Session = Depends(get_db)):
     """Флаги безопасности. Ключевой — «доверять локальной сети»."""
@@ -526,7 +596,10 @@ async def _navidrome_check(url: str, username: str, password: str) -> dict:
 async def login(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Вход по логину/паролю Navidrome — в обмен выдаём API-токен.
 
-    Пароль используется один раз для проверки и НЕ хранится.
+    Пароль используется один раз для проверки и НЕ хранится — кроме opt-in
+    `remember=true` (чекбокс на экране входа): тогда шифруем его в сейф
+    (`UserCredential`, ключ `TASTE_VAULT_KEY`/авто-ключ) для ночного
+    автообновления вкусов. Без согласия — как раньше, только проверка.
     Админы Navidrome получают admin-токен, остальные — мобильный набор
     (волна + синк + обложки + плейлисты), привязанный к их юзеру.
 
@@ -543,6 +616,7 @@ async def login(payload: dict, request: Request, db: Session = Depends(get_db)):
     username = str((payload or {}).get("username") or "").strip()
     password = str((payload or {}).get("password") or "")
     device = str((payload or {}).get("device") or "web").strip()[:64] or "web"
+    remember = bool((payload or {}).get("remember", False))
     if not username or not password:
         return {"ok": False, "error": "Укажите логин и пароль"}
     try:
@@ -571,8 +645,31 @@ async def login(payload: dict, request: Request, db: Session = Depends(get_db)):
         db.refresh(u)
     scopes = ["admin"] if is_admin else list(_tokens.PRESETS["mobile"]["scopes"])
     created = _tokens.create_token(db, str(u.id), f"{device} · {username}"[:128], scopes)
+    vault_stored: bool | str = False
+    if remember:
+        # Пароль уже проверен выше (Navidrome ответил ok) — безопасно шифровать.
+        # Best-effort: сейф не должен валить вход.
+        from app.db.models import UserCredential as _UC
+        from app.services import vault as _vault
+
+        try:
+            _vault.ensure_vault_key()
+            blob = _vault.encrypt_password(password)
+            row = db.query(_UC).filter_by(user_id=str(u.id)).first()
+            if row is None:
+                db.add(_UC(user_id=str(u.id), enc_password=blob))
+            else:
+                row.enc_password = blob
+            db.commit()
+            vault_stored = True
+        except Exception as e:  # noqa: BLE001
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            vault_stored = f"не запомнился: {str(e)[:160]}"
     return {"ok": True, "token": created["token"], "user": {"id": str(u.id), "username": u.username},
-            "is_admin": is_admin, "scopes": created["scopes"]}
+            "is_admin": is_admin, "scopes": created["scopes"], "vault_stored": vault_stored}
 
 
 @router.get("/whoami")

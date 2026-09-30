@@ -481,6 +481,8 @@ export const api = {
   unbanArtist: (userId: string, artist_name: string) =>
     http<{ ok: boolean }>(`/api/users/${userId}/unban-artist`, { method: "POST", body: JSON.stringify({ artist_name }) }),
   vaultStatus: (id: string) => http<{ stored: boolean; available: boolean; key_source?: string }>(`/api/users/${id}/vault`),
+  vaultCheck: (id: string) =>
+    http<{ stored: boolean; auth_ok: boolean | null; key_source?: string; error?: string }>(`/api/users/${id}/vault-check`),
   vaultStore: (id: string, password: string) =>
     http<{ ok: boolean; stored?: boolean; key_created?: boolean; error?: string }>(`/api/users/${id}/vault`, { method: "POST", body: JSON.stringify({ password }) }),
   vaultForget: (id: string) => http<{ ok: boolean }>(`/api/users/${id}/vault`, { method: "DELETE" }),
@@ -620,6 +622,19 @@ export const api = {
     http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean } }>(`/api/settings/automation`),
   getTimezone: () =>
     http<{ ok: boolean; timezone: string; from_db: boolean; env_default: string; options: string[] }>(`/api/settings/timezone`),
+  getRecTuning: (user_id?: string) =>
+    http<{
+      ok: boolean; user_id?: string | null;
+      defaults: Record<string, Record<string, unknown>>;
+      stored: Record<string, Record<string, unknown>>;
+      user_stored: Record<string, Record<string, unknown>> | null;
+      auto_log: { at?: string; tuned?: boolean; skip?: string; reasons?: string[]; changes?: Record<string, Record<string, [unknown, unknown]>>; signals?: Record<string, unknown> }[] | null;
+      effective: Record<string, Record<string, unknown>>;
+    }>(`/api/settings/rec-tuning${user_id ? `?user_id=${encodeURIComponent(user_id)}` : ""}`),
+  saveRecTuning: (body: Record<string, unknown>) =>
+    http<{ ok: boolean; reset?: boolean; user_id?: string | null; effective: Record<string, Record<string, unknown>> }>(
+      `/api/settings/rec-tuning`, { method: "PUT", body: JSON.stringify(body) },
+    ),
   saveTimezone: (timezone: string) =>
     http<{ ok: boolean; timezone?: string; error?: string }>(`/api/settings/timezone`, { method: "PUT", body: JSON.stringify({ timezone }) }),
   saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean }) =>
@@ -790,10 +805,10 @@ export const api = {
   deleteToken: (id: string) =>
     http<{ ok: boolean }>(`/api/settings/tokens/${id}`, { method: "DELETE" }),
 
-  login: (body: { username: string; password: string; device?: string }) =>
+  login: (body: { username: string; password: string; device?: string; remember?: boolean }) =>
     http<{
       ok: boolean; token?: string; user?: { id: string; username: string };
-      is_admin?: boolean; scopes?: string[]; error?: string;
+      is_admin?: boolean; scopes?: string[]; vault_stored?: boolean | string; error?: string;
     }>(`/api/settings/login`, { method: "POST", body: JSON.stringify(body) }),
   whoami: () =>
     http<{

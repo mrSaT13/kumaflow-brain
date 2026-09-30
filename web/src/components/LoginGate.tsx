@@ -21,6 +21,7 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
   const [mode, setMode] = useState<"navidrome" | "token">("navidrome");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -44,13 +45,17 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
     setBusy(true);
     setErr(null);
     try {
-      const r = await api.login({ username: username.trim(), password, device: "web" });
+      const r = await api.login({ username: username.trim(), password, device: "web", remember });
       if (!r.ok || !r.token) {
         setErr(r.error ?? "Не получилось войти");
         return;
       }
       setBrowserToken(r.token);
-      toast(`Привет, ${r.user?.username ?? username}! Токен сохранён в этот браузер.`, "ok");
+      if (remember && r.vault_stored !== true) {
+        toast(`Привет, ${r.user?.username ?? username}! Токен сохранён в этот браузер. Вкусы ночью сами не обновятся: ${typeof r.vault_stored === "string" ? r.vault_stored : "сейф недоступен"}`, "info");
+      } else {
+        toast(`Привет, ${r.user?.username ?? username}! Токен сохранён в этот браузер${remember ? " + вкусы будут обновляться ночью сами" : ""}.`, "ok");
+      }
       mutate();
     } catch (e: unknown) {
       setErr(fmtErr(e));
@@ -115,11 +120,25 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
               />
             </label>
             {err && <div className="text-xs text-red-500">{err}</div>}
+            <label className="flex items-start gap-2 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(e) => setRemember(e.target.checked)}
+                className="w-4 h-4 accent-black dark:accent-white shrink-0 mt-0.5"
+              />
+              <span>
+                <span className="font-medium">Запомнить пароль для автовкусов</span>
+                <span className="text-muted block">
+                  Ночью вкусы подтянутся сами (шифром в сейф). Без галочки пароль используется один раз и не хранится.
+                </span>
+              </span>
+            </label>
             <Button onClick={doLogin} disabled={busy || !username.trim() || !password} className="w-full">
               <LogIn className="w-4 h-4" /> {busy ? "Проверяю…" : "Войти"}
             </Button>
             <div className="text-[11px] text-muted">
-              Пароль используется один раз для проверки и не хранится. Админы Navidrome получают полный доступ, остальные — свой.
+              Админы Navidrome получают полный доступ, остальные — свой.
             </div>
           </div>
         ) : (
