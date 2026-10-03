@@ -248,6 +248,7 @@ export const api = {
       "/api/library/servers",
     ),
   genres: () => http<{ genres: string[] }>("/api/library/genres"),
+  moods: () => http<{ moods: { name: string; count: number }[] }>("/api/library/moods"),
   libraryHealth: () =>
     http<{
       ok: boolean; total: number; low_bitrate: number; no_cover: number;
@@ -619,7 +620,7 @@ export const api = {
   saveSecurity: (body: { lan_admin_enabled?: boolean }) =>
     http<{ ok: boolean; lan_admin_enabled: boolean }>(`/api/settings/security`, { method: "PUT", body: JSON.stringify(body) }),
   getAutomation: () =>
-    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean } }>(`/api/settings/automation`),
+    http<{ ok: boolean; flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean; wave_skip_non_music?: boolean } }>(`/api/settings/automation`),
   getTimezone: () =>
     http<{ ok: boolean; timezone: string; from_db: boolean; env_default: string; options: string[] }>(`/api/settings/timezone`),
   getRecTuning: (user_id?: string) =>
@@ -637,7 +638,7 @@ export const api = {
     ),
   saveTimezone: (timezone: string) =>
     http<{ ok: boolean; timezone?: string; error?: string }>(`/api/settings/timezone`, { method: "PUT", body: JSON.stringify({ timezone }) }),
-  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean }) =>
+  saveAutomation: (flags: { analysis_fetch_lyrics?: boolean; analysis_ai_mood?: boolean; playlists_push_navidrome?: boolean; clap_enabled?: boolean; clap_audio_enabled?: boolean; sonar_enabled?: boolean; wave_skip_non_music?: boolean }) =>
     http<{ ok: boolean; flags: Record<string, unknown> }>(
       `/api/settings/automation`, { method: "PUT", body: JSON.stringify(flags) },
     ),

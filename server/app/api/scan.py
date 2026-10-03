@@ -113,8 +113,14 @@ def start_library_scan(db: Session = Depends(get_db)):
 def start_analysis(force: bool = False, limit: int = 0, db: Session = Depends(get_db)):
     """Реальный sonic-анализ. force=1 — пересчитать всё, limit=N — взять N треков."""
     total = db.query(models.Track).count()
+    try:
+        from app.core.config import get_settings as _gs
+
+        _jt = int(_gs().analysis_job_timeout_sec or 600)
+    except Exception:
+        _jt = 600
     run = _start_run("analysis", sonic_analysis, db, total=total,
-                     job_kwargs={"force": force, "limit": limit}, job_timeout=7200)
+                     job_kwargs={"force": force, "limit": limit}, job_timeout=_jt)
     return {"queued": True, "run_id": str(run.id)}
 
 

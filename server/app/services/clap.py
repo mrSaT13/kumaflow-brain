@@ -227,8 +227,10 @@ def get_audio_embedding(path: str | Path, dim: int = 512) -> list[float] | None:
         import librosa  # type: ignore
 
         # Легкий вход: моно 22050, первые 10с (не весь трек — быстро и хватает
-        # для тембра/грува; librosa и так уже грузила 90с в analyze_file).
-        y, _ = librosa.load(str(p), sr=22050, mono=True, duration=10.0)
+        # для тембра/грува). Загрузка — общим путём без audioread-ворнингов.
+        from app.services.audio_analysis import load_audio_mono as _load
+
+        y, _ = _load(str(p), sr=22050, offset=0.0, duration=10.0)
         if y is None or len(y) < 22050:
             return None
         # log-mel 64 полосы. Раскладку подгоняем под вход модели:

@@ -10,13 +10,15 @@
 Если librosa нет — задача падает с понятной ошибкой, а НЕ пишет
 случайные числа в базу.
 
-Что считается (всё из реального сигнала, моно 22050 Гц, первые
-ANALYSIS_SAMPLE_SECONDS секунд):
-  tempo_bpm, key_name/scale (шаблоны Крамхансл–Шмуклера по средней хроме),
-  energy (RMS), loudness_db, spectral_centroid/rolloff, zero_crossing_rate,
-  mfcc_summary (средние 13 MFCC), chroma_summary (средние 12 классов),
-  danceability / valence / arousal — прозрачные эвристики от измеренных
-  величин (формулы ниже), mood_vector + mood_labels — топ-3 правила.
+Что считается (всё из реального сигнала, моно 22050 Гц, суммарно
+ANALYSIS_SAMPLE_SECONDS секунд, но тремя кусками — начало/середина/конец,
+а не только вступление):
+  tempo_bpm (медиана по кускам), key_name/scale (шаблоны Крамхансл–Шмуклера
+  по усреднённой хроме), energy (RMS), loudness_db, spectral_centroid/rolloff,
+  zero_crossing_rate, mfcc_summary (средние 13 MFCC), chroma_summary
+  (средние 12 классов), danceability / valence / arousal — прозрачные
+  эвристики от измеренных величин (формулы ниже), mood_vector + mood_labels —
+  топ-3 правила.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import hashlib
 import os
 import secrets
 import tempfile
+import warnings as _warnings
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -34,7 +37,14 @@ from app.core.logging import get_logger
 
 logger = get_logger("audio_analysis")
 
-ANALYZER_VERSION = "librosa-0.10"
+# Пояс безопасности: librosa 0.10 дёргает deprecated audioread-бэкенд
+# (FutureWarning: PySoundFile failed / Audioread support is deprecated).
+# Мы в audioread больше не ходим (свой путь soundfile -> ffmpeg ниже),
+# фильтры — на случай чужих вызовов librosa.load (sonar-legacy, clap).
+_warnings.filterwarnings("ignore", message=".*PySoundFile failed.*")
+_warnings.filterwarnings("ignore", message=".*audioread.*", category=FutureWarning)
+
+ANALYZER_VERSION = "librosa-0.10-3x30"
 
 AUDIO_SUFFIXES = {".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".wav", ".wma", ".aac"}
 
@@ -135,6 +145,190 @@ def download_from_navidrome(external_id: str, cfg: dict[str, Any]) -> Path:
         raise
 
 
+# ---------- загрузка аудио без audioread ----------
+
+def get_audio_duration(path: str | Path) -> float | None:
+    """Длительность трека без librosa.get_duration (тот дёргает audioread).
+
+    soundfile.info -> ffprobe -> парс stderr ffmpeg. None — не удалось.
+    """
+    p = str(path)
+    try:
+        import soundfile as _sf
+
+        _info = _sf.info(p)
+        if _info.frames and _info.samplerate:
+            return float(_info.frames) / float(_info.samplerate)
+    except Exception:
+        pass
+    import re as _re
+    import shutil as _sh
+    import subprocess as _sp
+
+    if _sh.which("ffprobe"):
+        try:
+            _pr = _sp.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", p],
+                stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=30)
+            _val = (_pr.stdout or b"").decode("utf-8", "ignore").strip()
+            if _val:
+                return float(_val)
+        except Exception:
+            pass
+    if _sh.which("ffmpeg"):
+        try:
+            _pr = _sp.run(["ffmpeg", "-i", p],
+                          stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=30)
+            _err = (_pr.stderr or b"").decode("utf-8", "ignore")
+            _m = _re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", _err)
+            if _m:
+                return (int(_m.group(1)) * 3600 + int(_m.group(2)) * 60
+                        + float(_m.group(3)))
+        except Exception:
+            pass
+    return None
+
+
+def load_audio_mono(
+    path: str | Path,
+    *,
+    sr: int = 22050,
+    offset: float = 0.0,
+    duration: float | None = None,
+) -> tuple[Any, int]:
+    """Декодировать срез аудио в моно с ресемплом. Без audioread и ворнингов.
+
+    Путь 1: soundfile напрямую (wav/flac/ogg/большинство mp3, seek по кадрам).
+    Путь 2: ffmpeg декодирует только нужный срез (``-ss/-t``) во временный
+    wav в памяти -> soundfile. Покрывает всё, что раньше тащил audioread
+    (m4a/aac, wma, кривые mp3), но быстрее: целый файл не гоняется.
+    """
+    import numpy as _np
+
+    p = str(path)
+    if not os.path.isfile(p):
+        raise RuntimeError(f"Файл не найден: {p}")
+    last_err: Exception | None = None
+    try:
+        import soundfile as _sf
+
+        _info = _sf.info(p)
+        _native = int(_info.samplerate) or int(sr)
+        _start = int(float(offset or 0.0) * _native) if offset else 0
+        _stop = (_start + int(float(duration) * _native)
+                 if duration else None)
+        y, _fsr = _sf.read(p, start=_start, stop=_stop, always_2d=False)
+        y = _np.asarray(y, dtype=float)
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        if int(_fsr) != int(sr):
+            _lib, _ = _require_librosa()
+            y = _lib.resample(y, orig_sr=int(_fsr), target_sr=int(sr))
+        return _np.ascontiguousarray(y, dtype=float), int(sr)
+    except Exception as e:
+        last_err = e
+    import shutil as _sh
+    import subprocess as _sp
+
+    _ff = _sh.which("ffmpeg")
+    if not _ff:
+        raise RuntimeError(
+            f"Не удалось декодировать аудио ({last_err}); ffmpeg не найден"
+        ) from last_err
+    _cmd = [_ff, "-v", "error"]
+    if offset and float(offset) > 0:
+        _cmd += ["-ss", f"{float(offset):.3f}"]
+    _cmd += ["-i", p]
+    if duration:
+        _cmd += ["-t", f"{float(duration):.3f}"]
+    _cmd += ["-ac", "1", "-ar", str(int(sr)), "-f", "wav", "pipe:1"]
+    try:
+        _proc = _sp.run(_cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=180)
+    except Exception as e:
+        raise RuntimeError(f"ffmpeg не смог декодировать: {e}") from e
+    if _proc.returncode != 0 or not _proc.stdout:
+        _tail = (_proc.stderr or b"")[-200:]
+        raise RuntimeError(f"Не удалось декодировать аудио ({_tail!r})")
+    import io as _io
+
+    import soundfile as _sf2
+
+    y, _fsr = _sf2.read(_io.BytesIO(_proc.stdout), always_2d=False)
+    y = _np.asarray(y, dtype=float).ravel()
+    return _np.ascontiguousarray(y, dtype=float), int(sr)
+
+
+def _segment_plan(duration_full: Any, sample_seconds: int) -> list[tuple[float, float]]:
+    """Куски анализа: 3 × (sample/3) на 15/45/75% длительности.
+
+    Короткие треки или неизвестная длительность — один кусок с начала
+    (старое поведение). Суммарно столько же аудио, сколько раньше.
+    """
+    seg = max(10, int(sample_seconds or 90) // 3)
+    try:
+        dur = float(duration_full) if duration_full else 0.0
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur <= 0 or dur <= seg * 2.5:
+        single = min(dur, float(sample_seconds or 90)) if dur > 0 else float(sample_seconds or 90)
+        return [(0.0, single)]
+    plan = []
+    for frac in (0.15, 0.45, 0.75):
+        off = min(max(frac * dur - seg / 2.0, 0.0), max(dur - seg, 0.0))
+        plan.append((off, float(seg)))
+    return plan
+
+
+def _describe_segment(y, sr: int, librosa, np) -> dict[str, Any]:
+    """Сырые измерения одного куска (агрегация — отдельно в _aggregate)."""
+    tempo_arr, _beats = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = float(np.atleast_1d(tempo_arr)[0])
+
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    chroma_mean = [float(v) for v in np.mean(chroma, axis=1)]
+
+    cent = librosa.feature.spectral_centroid(y=y, sr=sr)
+    roll = librosa.feature.spectral_rolloff(y=y, sr=sr)
+    zcr = librosa.feature.zero_crossing_rate(y)
+    rms = librosa.feature.rms(y=y)
+    onset = librosa.onset.onset_strength(y=y, sr=sr)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    return {
+        "tempo": tempo,
+        "chroma_mean": chroma_mean,
+        "mfcc_mean": [float(v) for v in np.mean(mfcc, axis=1)],
+        "centroid": float(np.mean(cent)),
+        "rolloff": float(np.mean(roll)),
+        "zcr_m": float(np.mean(zcr)),
+        "rms_m": float(np.mean(rms)),
+        "onset_m": float(np.mean(onset)),
+    }
+
+
+def _aggregate(raws: list[dict[str, Any]], np) -> dict[str, Any]:
+    """Куски -> один трек: tempo медианой (устойчив к брейкдауну),
+    остальное средним; key/mood считаются уже от агрегатов."""
+    tempos = sorted(float(r["tempo"]) for r in raws)
+    tempo = tempos[len(tempos) // 2]
+    n_chroma = len(raws[0]["chroma_mean"])
+    n_mfcc = len(raws[0]["mfcc_mean"])
+    chroma_mean = [float(np.mean([r["chroma_mean"][i] for r in raws]))
+                   for i in range(n_chroma)]
+    mfcc_mean = [float(np.mean([r["mfcc_mean"][i] for r in raws]))
+                 for i in range(n_mfcc)]
+    return {
+        "tempo": tempo,
+        "chroma_mean": chroma_mean,
+        "mfcc_mean": mfcc_mean,
+        "centroid": float(np.mean([r["centroid"] for r in raws])),
+        "rolloff": float(np.mean([r["rolloff"] for r in raws])),
+        "zcr_m": float(np.mean([r["zcr_m"] for r in raws])),
+        "rms_m": float(np.mean([r["rms_m"] for r in raws])),
+        "onset_m": float(np.mean([r["onset_m"] for r in raws])),
+    }
+
+
 # ---------- чистые эвристики (тестируются без librosa) ----------
 
 def estimate_key(chroma_mean: list[float]) -> tuple[str, str]:
@@ -195,7 +389,11 @@ def analyze_file(
     sample_seconds: int = 90,
     track_duration_sec: int | None = None,
 ) -> dict[str, Any]:
-    """Проанализировать аудиофайл. Всё ниже — измерения реального сигнала."""
+    """Проанализировать аудиофайл. Всё ниже — измерения реального сигнала.
+
+    Три куска (начало/середина/конец, суммарно sample_seconds) вместо одного
+    вступления: оценка устойчива к длинным интро и скитам.
+    """
     librosa, np = _require_librosa()
     path = str(path)
     if not os.path.isfile(path):
@@ -203,34 +401,50 @@ def analyze_file(
 
     duration_full = track_duration_sec or None
     try:
-        duration_full = float(librosa.get_duration(path=path))
+        _gd = get_audio_duration(path)
+        if _gd:
+            duration_full = _gd
     except Exception:
         pass
 
-    y, sr = librosa.load(path, sr=22050, mono=True, duration=sample_seconds)
-    if y is None or len(y) < sr:
+    # Жёсткий фильтр длинных треков: миксы/сборники/подкасты (Peyton Parrish —
+    # Animals 57с анализа, а 2-часовые висят до упора). До декодирования, чтобы
+    # не жечь CPU. Пометка skip_long_track видна в логах задачи.
+    try:
+        from app.core.config import get_settings as _gs
+
+        _max_dur = int(_gs().analysis_max_duration_sec or 600)
+    except Exception:
+        _max_dur = 600
+    if duration_full and _max_dur > 0 and float(duration_full) > _max_dur:
+        raise RuntimeError(
+            f"skip_long_track: длительность {int(round(float(duration_full)))}с "
+            f"> лимита {_max_dur}с — пропуск без анализа")
+
+    plan = _segment_plan(duration_full, sample_seconds)
+    raws = []
+    for _off, _len in plan:
+        try:
+            y, sr = load_audio_mono(path, sr=22050, offset=_off, duration=_len)
+        except Exception:
+            continue
+        if y is None or len(y) < sr:
+            continue
+        raws.append(_describe_segment(y, sr, librosa, np))
+    if not raws:
         raise RuntimeError("Не удалось декодировать аудио (меньше 1 секунды)")
 
-    tempo_arr, _beats = librosa.beat.beat_track(y=y, sr=sr)
-    tempo = float(np.atleast_1d(tempo_arr)[0])
-
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-    chroma_mean = [float(v) for v in np.mean(chroma, axis=1)]
+    agg = _aggregate(raws, np)
+    tempo = agg["tempo"]
+    chroma_mean = agg["chroma_mean"]
+    mfcc_mean = agg["mfcc_mean"]
     key_name, scale = estimate_key(chroma_mean)
 
-    cent = librosa.feature.spectral_centroid(y=y, sr=sr)
-    roll = librosa.feature.spectral_rolloff(y=y, sr=sr)
-    zcr = librosa.feature.zero_crossing_rate(y)
-    rms = librosa.feature.rms(y=y)
-    onset = librosa.onset.onset_strength(y=y, sr=sr)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-
-    centroid = float(np.mean(cent))
-    rolloff = float(np.mean(roll))
-    zcr_m = float(np.mean(zcr))
-    rms_m = float(np.mean(rms))
-    onset_m = float(np.mean(onset))
-    mfcc_mean = [float(v) for v in np.mean(mfcc, axis=1)]
+    centroid = agg["centroid"]
+    rolloff = agg["rolloff"]
+    zcr_m = agg["zcr_m"]
+    rms_m = agg["rms_m"]
+    onset_m = agg["onset_m"]
 
     # Производные величины (формулы зафиксированы — см. docstring модуля).
     energy = _clamp((rms_m - 0.02) / 0.25)

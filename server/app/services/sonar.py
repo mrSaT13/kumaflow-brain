@@ -4,9 +4,10 @@
 хэши (f1|f2|dt) с оффсетом -> матчинг гистограммой дельт оффсетов.
 
 DSP — чистый numpy (STFT руками), без scipy/librosa в ядре: тесты идут
-везде. Загрузка файла: librosa (mp3/m4a/...) с фолбэком на soundfile
-(wav/flac). Аудио берётся как в sonic-анализе: локальный файл либо
-Subsonic ``download`` (см. enroll в workers/tasks).
+везде. Загрузка файла: общий load_audio_mono из sonic-анализа
+(soundfile -> ffmpeg, без audioread-ворнингов). Аудио берётся как
+в sonic-анализе: локальный файл либо Subsonic ``download`` (см. enroll
+в workers/tasks).
 
 Признаки/пороги — константами ниже. Хранилище — ``audio_fingerprints``:
 ~500 хэшей на трек при ENROLL_SECONDS=90.
@@ -144,7 +145,17 @@ def fingerprint_samples(y, sr: int = SR,
 
 
 def load_mono(path, sr: int = SR, duration: float | None = None):
-    """Декодировать аудио в моно. librosa (всё) -> soundfile (wav/flac)."""
+    """Декодировать аудио в моно. Без audioread: soundfile -> ffmpeg."""
+    try:
+        from app.services.audio_analysis import load_audio_mono as _load
+
+        y, _sr = _load(str(path), sr=sr, offset=0.0, duration=duration)
+        import numpy as _np
+
+        return _np.asarray(y, dtype=float), int(_sr)
+    except Exception:
+        pass
+    # legacy-фолбэк (как раньше): librosa, затем soundfile целиком
     try:
         import librosa as _lib
         y, _ = _lib.load(str(path), sr=sr, mono=True,

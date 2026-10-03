@@ -28,6 +28,9 @@ DEFAULTS: dict[str, Any] = {
     # «Сонар» (фингерпринты): recognize для плееров + enroll/dedup.
     # Opt-in админом: enroll качает аудио и считает пики — нагрузка на CPU/сеть.
     "sonar_enabled": False,
+    # Фильтр немузыкальных треков в волне (скиты/интерлюдии/интро-аутро).
+    # Тумблер в вебе (Автоматизация). Выкл — волна как раньше, со скитами.
+    "wave_skip_non_music": True,
 }
 
 # Кэш чтения флагов. is_available()/is_audio_available() дёргаются на КАЖДЫЙ
@@ -154,6 +157,13 @@ def sonar_enabled(db=None) -> bool:
         return bool(get_flags(db).get("sonar_enabled", False))
     except Exception:
         return False
+
+
+def wave_skip_non_music_enabled(db=None) -> bool:
+    try:
+        return bool(get_flags(db).get("wave_skip_non_music", True))
+    except Exception:
+        return True
 
 
 def set_flags(patch: dict[str, Any], db=None) -> dict[str, Any]:

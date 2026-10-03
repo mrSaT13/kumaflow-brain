@@ -80,7 +80,7 @@ export default function Automation() {
   const { data: auto, mutate: mutateAuto } = useSWR("/api/settings/automation", () => api.getAutomation(), { refreshInterval: 10000 });
   const clapN = Object.values(clap?.embeddings ?? {}).reduce((s, n) => s + (n || 0), 0);
 
-  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood" | "playlists_push_navidrome" | "clap_enabled" | "clap_audio_enabled" | "sonar_enabled") {
+  async function toggleLyrics(key: "analysis_fetch_lyrics" | "analysis_ai_mood" | "playlists_push_navidrome" | "clap_enabled" | "clap_audio_enabled" | "sonar_enabled" | "wave_skip_non_music") {
     const cur = key === "analysis_fetch_lyrics"
       ? (auto?.flags?.analysis_fetch_lyrics ?? true)
       : key === "analysis_ai_mood"
@@ -91,7 +91,9 @@ export default function Automation() {
             ? (auto?.flags?.clap_audio_enabled ?? true)
             : key === "sonar_enabled"
               ? (auto?.flags?.sonar_enabled ?? false)
-              : (auto?.flags?.playlists_push_navidrome ?? false);
+              : key === "wave_skip_non_music"
+                ? (auto?.flags?.wave_skip_non_music ?? true)
+                : (auto?.flags?.playlists_push_navidrome ?? false);
     const label = key === "analysis_fetch_lyrics"
       ? "Тексты"
       : key === "analysis_ai_mood"
@@ -102,7 +104,9 @@ export default function Automation() {
             ? "CLAP-аудио-гибрид"
             : key === "sonar_enabled"
               ? "Сонар"
-              : "Авто-пуш плейлистов";
+              : key === "wave_skip_non_music"
+                ? "Фильтр скитов"
+                : "Авто-пуш плейлистов";
     setBusy(true);
     try {
       await api.saveAutomation({ [key]: !cur });
@@ -249,6 +253,22 @@ export default function Automation() {
           <span className="font-medium text-sm">Сонар — что сейчас играет</span>
           <span className="text-xs text-muted block">
             Локальные аудио-отпечатки библиотеки. Плеер присылает запись кнопкой — мозг отвечает треком (external_id). Без внешних API. Enroll качает аудио — на 55к идти чанками.
+          </span>
+        </span>
+      </label>
+      <div className="h-3" />
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={auto?.flags?.wave_skip_non_music ?? true}
+          disabled={busy || !isAdmin}
+          onChange={() => toggleLyrics("wave_skip_non_music")}
+          className="w-4 h-4 accent-black dark:accent-white shrink-0"
+        />
+        <span>
+          <span className="font-medium text-sm">Волна без скитов</span>
+          <span className="text-xs text-muted block">
+            Режет из «Моей волны» разговорные треки: (skit), interlude, intro/outro и треки с такими названиями целиком. Выкл — волна как раньше, со скитами.
           </span>
         </span>
       </label>

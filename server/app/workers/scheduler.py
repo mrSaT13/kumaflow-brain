@@ -288,10 +288,41 @@ def _watchdog_analysis(db, now) -> None:
     db.add(ScanRun(id=new_id, server_id=latest.server_id, phase="analysis",
                    status="running", total_items=remaining, processed_items=0,
                    started_at=now))
-    db.add(_SL(id=str(_uuid.uuid4()), run_id=new_id, level="info",
-               message=f"Сторож перезапустил анализ: осталось {remaining} (прошлый run {str(latest.id)[:8]})"))
-    db.flush()
-    enqueue(_t.sonic_analysis, new_id, job_timeout=7200)
+    try:
+        db.flush()
+    except Exception as e:
+        logger.warning("analysis watchdog: не удалось создать run, пропускаю тик: {}", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return
+    try:
+        # Лог сторожа — необязателен: если run_id к моменту вставки уже исчез
+        # (перезапуск/purge/гонка), FK IntegrityError глушим — run уже создан,
+        # транзакцию не ломаем, пишем в stdout.
+        with db.begin_nested():
+            db.add(_SL(id=str(_uuid.uuid4()), run_id=new_id, level="info",
+                       message=f"Сторож перезапустил анализ: осталось {remaining} (прошлый run {str(latest.id)[:8]})"))
+            db.flush()
+    except Exception as e:
+        try:
+            from sqlalchemy.exc import IntegrityError as _IE
+
+            if isinstance(e, _IE):
+                logger.warning("analysis watchdog: лог пропущен (run {} уже нет), остаток {} перезапущен",
+                               str(new_id)[:8], remaining)
+            else:
+                logger.warning("analysis watchdog: лог не записан: {}", e)
+        except Exception:
+            pass
+    try:
+        from app.core.config import get_settings as _gs
+
+        _jt = int(_gs().analysis_job_timeout_sec or 600)
+    except Exception:
+        _jt = 600
+    enqueue(_t.sonic_analysis, new_id, job_timeout=_jt)
     logger.info("analysis watchdog: перезапустил остаток {} (прошлый {})", remaining, str(latest.id)[:8])
 
 

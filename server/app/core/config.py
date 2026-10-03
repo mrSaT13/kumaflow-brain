@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "KumaFlow Brain"
-    app_version: str = "0.2.6"
+    app_version: str = "0.2.7"
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
     # Часовой пояс «домашнего» времени: границы суток для daily-плейлистов,
@@ -102,6 +102,8 @@ class Settings(BaseSettings):
     analysis_sample_seconds: int = 90
     analysis_max_tracks_per_run: int = 0  # 0 = все непроанализированные за один прогон
     analysis_per_track_timeout_sec: int = 300  # дедлайн на один трек (скачка+librosa); превышение = skip
+    analysis_max_duration_sec: int = 600  # треки длиннее — пропуск без анализа (skip_long_track): миксы/сборники жгут CPU
+    analysis_job_timeout_sec: int = 600  # RQ job_timeout sonic-пачки (было 7200: зависшие треки держали воркер часами)
     analysis_auto_continue: bool = True  # сам ставить следующий чанк в очередь, пока есть остаток
 
     mutagen_writeback: bool = False  # если True — пишет mood/genre/key/bpm в теги файлов (только локальные)

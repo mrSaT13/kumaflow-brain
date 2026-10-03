@@ -36,15 +36,28 @@ def _append_log(run_id: str, level: str, message: str) -> None:
         log = {"info": logger.info, "warn": logger.warning, "error": logger.error}.get(level, logger.info)
         log("{} (без ScanRun)", message)
         return
-    with session_scope() as db:
-        db.add(
-            ScanLog(
-                id=str(uuid.uuid4()),
-                run_id=run_id,
-                level=level,
-                message=message,
+    try:
+        with session_scope() as db:
+            db.add(
+                ScanLog(
+                    id=str(uuid.uuid4()),
+                    run_id=run_id,
+                    level=level,
+                    message=message,
+                )
             )
-        )
+    except Exception as e:
+        # Сторож/перезапуск/purge: run_id уже нет в scan_runs (FK) —
+        # лог игнорируем, пишем в stdout, транзакцию/задачу не роняем.
+        try:
+            from sqlalchemy.exc import IntegrityError as _IE
+
+            if isinstance(e, _IE):
+                logger.warning("scan log пропущен (run {} уже нет): {}", str(run_id)[:8], message)
+                return
+        except Exception:
+            pass
+        logger.warning("scan log не записан (run {}): {}: {}", str(run_id)[:8], message, e)
 
 
 def _finish_run(run_id: str, status: str = "success", error: str | None = None) -> None:
@@ -52,17 +65,25 @@ def _finish_run(run_id: str, status: str = "success", error: str | None = None) 
     # ключом нельзя, поэтому просто выходим, как это уже сделано в _append_log.
     if not run_id:
         return
-    with session_scope() as db:
-        run = db.get(ScanRun, run_id)
-        if not run:
-            return
-        # Не перезаписываем отмену пользователем
-        if run.status == "failure" and (run.error or "") == "Отменено пользователем":
-            return
-        run.status = status
-        run.finished_at = datetime.utcnow()
-        if error:
-            run.error = error
+    try:
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id)
+            if not run:
+                return
+            # Не перезаписываем терминальное состояние, выставленное извне:
+            # «Отменено пользователем» (cancel_run), «Прервано перезапуском
+            # backend» (lifespan при рестарте контейнера), «Сторож: ...»
+            # (watchdog перезапустил остаток). Иначе рестарт показывает ошибку
+            # в UI, а фоновый воркер продолжает и молча переворачивает failure
+            # обратно в success.
+            if run.status in ("success", "failure"):
+                return
+            run.status = status
+            run.finished_at = datetime.utcnow()
+            if error:
+                run.error = error
+    except Exception as e:
+        logger.warning("finish run {} не записан: {}", str(run_id)[:8], e)
 
 
 def _write_mood_tags(path: Path, feats: dict, backup: bool = False) -> None:
@@ -132,17 +153,39 @@ def _write_mood_tags(path: Path, feats: dict, backup: bool = False) -> None:
 
 
 def _is_cancelled(run_id: str | None) -> bool:
-    """Кооперативная отмена: пользователь нажал «Отменить» (статус failure)."""
+    """Кооперативная остановка: статус failure, выставленный извне.
+
+    Раньше проверяли только «Отменено пользователем», поэтому после рестарта
+    backend (lifespan ставит «Прервано перезапуском backend») и после
+    срабатывания сторожа старый воркер продолжал работать поверх помеченного
+    failure run и в конце переворачивал его обратно в success. Теперь любое
+    внешнее failure — сигнал встать на ближайшем чекпоинте.
+    """
     if not run_id:
         return False
     try:
         with session_scope() as db:
             run = db.get(ScanRun, run_id)
             if not run:
-                return False
-            return run.status == "failure" and (run.error or "") == "Отменено пользователем"
+                # run удалён purge-чисткой — работать дальше не над чем
+                return True
+            return run.status == "failure"
     except Exception:
         return False
+
+
+def _cancel_reason(run_id: str | None) -> str:
+    """Текст причины внешней остановки для логов/ответа RQ (БД не трогаем)."""
+    if not run_id:
+        return "Отменено пользователем"
+    try:
+        with session_scope() as db:
+            run = db.get(ScanRun, run_id)
+            if not run:
+                return "Задача удалена (purge), остановка"
+            return (run.error or "").strip() or "Отменено пользователем"
+    except Exception:
+        return "Отменено пользователем"
 
 
 def noop(*args, **kwargs):
@@ -867,10 +910,13 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
         default_limit = int(settings.analysis_max_tracks_per_run or 0)
         music_dir = settings.music_dir or os.getenv("MUSIC_DIR", "")
         per_track_timeout = int(getattr(settings, "analysis_per_track_timeout_sec", 300) or 300)
+        max_duration = int(getattr(settings, "analysis_max_duration_sec", 600) or 600)
+        job_timeout = int(getattr(settings, "analysis_job_timeout_sec", 600) or 600)
         auto_continue = bool(getattr(settings, "analysis_auto_continue", True))
     except Exception:
         sample_seconds, default_limit, music_dir = 90, 0, os.getenv("MUSIC_DIR", "")
         per_track_timeout, auto_continue = 300, True
+        max_duration, job_timeout = 600, 600
     try:
         from app.services import automation as _auto_flags_svc
 
@@ -886,8 +932,9 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
         do_all = False  # явный limit — только N штук
     else:
         # 0/None: берём из настроек; 0 там значит «вся библиотека», пачками по 100.
-        # Пачка 100 (не 200): job надёжно укладывается в RQ job_timeout=7200
-        # даже с зависшими треками, а остаток добирает автопродолжение/сторож.
+        # Пачка 100: job ограничен analysis_job_timeout_sec=600 — зависшие треки
+        # режутся per-track таймаутом и skip_long_track, остаток добирают
+        # автопродолжение/сторож.
         if default_limit and int(default_limit) > 0:
             chunk_size = int(default_limit)
         else:
@@ -909,7 +956,7 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
     _append_log(
         run_id, "info",
         f"Sonic-анализ запущен (движок {aa.ANALYZER_VERSION}, "
-        f"фрагмент {sample_seconds}с{', force' if force else ''})",
+        f"3 куска по {sample_seconds // 3}с{', force' if force else ''})",
     )
     try:
         # общий счётчик для всего прогона
@@ -958,8 +1005,9 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
 
             for tid, ext_id, tpath, suffix, dur, title, artist, size_b, bitrate in todo_data:
                 if _is_cancelled(run_id):
-                    _append_log(run_id, "warn", f"Остановлено пользователем на {total_processed}/{total_pending_initial}")
-                    return {"status": "failure", "error": "Отменено пользователем", "ok": ok, "failed": fail}
+                    _reason = _cancel_reason(run_id)
+                    _append_log(run_id, "warn", f"Остановлено ({_reason}) на {total_processed}/{total_pending_initial}")
+                    return {"status": "failure", "error": _reason, "ok": ok, "failed": fail}
                 tmp_to_clean: Path | None = None
                 try:
                     # Видно в docker logs даже если трек зависнет (в БД пишем только итог/ошибки, чтобы не спамить 150k строк)
@@ -981,6 +1029,12 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                                 if _est > _lim * 2:
                                     raise RuntimeError(
                                         f"Оценка размера ~{_est // 1048576} МБ > лимита — пропуск без скачивания")
+                            # Жёсткий фильтр длинных треков — до скачивания/декодирования:
+                            # миксы/сборники >10 мин жгут CPU (висели до 7200с).
+                            if dur and max_duration > 0 and int(dur) > max_duration:
+                                raise RuntimeError(
+                                    f"skip_long_track: длительность {int(dur)}с "
+                                    f"> лимита {max_duration}с — пропуск без анализа")
                         except RuntimeError:
                             raise
                         except Exception:
@@ -1154,7 +1208,7 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                         db.add(ScanRun(id=_new_id, server_id=_srv_id, phase="analysis",
                                        status="running", total_items=remaining, processed_items=0,
                                        started_at=datetime.utcnow()))
-                _job = _enq(sonic_analysis, _new_id, job_timeout=7200, force=force, limit=chunk_size)
+                _job = _enq(sonic_analysis, _new_id, job_timeout=job_timeout, force=force, limit=chunk_size)
                 with session_scope() as db:
                     _nr = db.get(ScanRun, _new_id)
                     if _nr is not None:
@@ -1188,7 +1242,7 @@ def sonic_analysis(run_id: str, *args, **kwargs) -> dict:
                         db.add(ScanRun(id=_new_id, server_id=_srv_id, phase="analysis",
                                        status="running", total_items=0, processed_items=0,
                                        started_at=datetime.utcnow()))
-                _job = _enq2(sonic_analysis, _new_id, job_timeout=7200, force=force, limit=chunk_size)
+                _job = _enq2(sonic_analysis, _new_id, job_timeout=job_timeout, force=force, limit=chunk_size)
                 _append_log(_new_id, "info", f"Перезапуск после таймаута (прошлый run {run_id[:8]}, job {_job})")
         except Exception as _ce2:  # noqa: BLE001
             logger.warning("analysis resume-after-timeout failed: {}", _ce2)

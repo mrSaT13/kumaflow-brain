@@ -51,6 +51,7 @@ def list_tracks(
     artist: str | None = None,
     source: str | None = None,
     server_id: str | None = None,
+    mood: str | None = None,
     limit: int = Query(100, le=500),
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -76,6 +77,27 @@ def list_tracks(
         query = query.filter(Track.genre == genre)
     if artist:
         query = query.filter(Track.artist_name == artist)
+    if mood:
+        # Настроение из TrackFeatures.mood_labels (JSON-колонка, кросс-БД:
+        # sqlite локально / postgres в проде). Матчим элемент в кавычках,
+        # чтобы «тёмный» не ловил «тёмный-2»; регистр гасим с обеих сторон.
+        # Нюанс: sqlite сериализует JSON через ensure_ascii (кириллица лежит
+        # как \uXXXX), а postgres отдаёт литералы — ищем обе формы.
+        import json as _json
+
+        from sqlalchemy import cast, func, or_
+        from sqlalchemy.types import String as _Str
+
+        _m = str(mood).strip().lower()
+        # LIKE-инъекция/кавычки из запроса — режем, иначе ломается фильтр
+        _m = "".join(c for c in _m if c not in ("\"", "%", "_", "\\"))[:64]
+        if not _m:
+            raise HTTPException(400, "invalid mood")
+        _esc = _json.dumps(_m, ensure_ascii=True)[1:-1]
+        _col = func.lower(cast(TrackFeatures.mood_labels, _Str))
+        query = query.join(TrackFeatures, TrackFeatures.track_id == Track.id).filter(
+            or_(_col.like(f'%"{_m}"%'), _col.like(f'%"{_esc}"%'))
+        )
     total = query.count()
     rows = query.order_by(Track.title.asc()).offset(offset).limit(limit).all()
     return {"items": [_track_to_dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}

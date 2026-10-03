@@ -168,6 +168,48 @@ def list_genres(source: str | None = None, db: Session = Depends(get_db)):
     return {"genres": sorted([r[0] for r in rows if r[0]])}
 
 
+_moods_cache: dict = {"at": 0.0, "moods": []}
+
+
+@router.get("/moods")
+def list_moods(db: Session = Depends(get_db)):
+    """Все настроения библиотеки + counts (для фильтра).
+
+    Источник — TrackFeatures.mood_labels (акустика + AI). Список обновляется
+    сам по мере анализа: TTL-кэш 120с, SWR на фронте дотягивает остальное.
+    """
+    import time as _t
+
+    now = _t.time()
+    try:
+        if now - float(_moods_cache.get("at") or 0.0) < 120.0 and _moods_cache.get("moods"):
+            return {"moods": _moods_cache["moods"]}
+    except Exception:
+        pass
+    from collections import Counter
+
+    from app.db.models import TrackFeatures
+
+    c: Counter = Counter()
+    try:
+        for (labels,) in db.query(TrackFeatures.mood_labels).yield_per(5000):
+            if not labels:
+                continue
+            try:
+                for m in (labels or [])[:3]:
+                    s = str(m or "").strip().lower()
+                    if s:
+                        c[s] += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    moods = [{"name": m, "count": n} for m, n in c.most_common()]
+    _moods_cache["at"] = now
+    _moods_cache["moods"] = moods
+    return {"moods": moods}
+
+
 def _artist_cover_map(db: Session, names: list[str]) -> dict[str, str]:
     """Для каждого имени артиста — id трека для обложки.
 

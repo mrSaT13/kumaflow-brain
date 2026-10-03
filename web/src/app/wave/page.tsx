@@ -653,8 +653,8 @@ export default function WavePage() {
                 <input type="checkbox" checked={followPhone} onChange={(e) => setFollowPhone(e.target.checked)} />
                 Плееры{phoneAge != null && phoneAge <= 300 ? ` · ${phoneAge} сек назад` : ""}
               </label>
-              {devices.length > 1 && (
-                <span className="flex items-center gap-1.5 flex-wrap" title="Каждый плеер — свой слот очереди. Авто = самый свежий. Клик — закрепить плеер">
+              {devices.length > 0 && (
+                <span className="flex items-center gap-1.5 flex-wrap" title="Каждый плеер — свой слот очереди. Авто = самый свежий слот (все устройства учтены). Клик — закрепить плеер">
                   <button
                     onClick={() => pinDevice(null)}
                     className={`kuma-pill transition-colors ${deviceSel == null ? "!bg-text !text-bg font-semibold" : "hover:text-text"}`}

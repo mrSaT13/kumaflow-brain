@@ -36,6 +36,7 @@ export default function LibraryPage() {
   const [q, setQ] = useState("");
   const [qDebounced, setQDebounced] = useState("");
   const [genre, setGenre] = useState<string>("");
+  const [mood, setMood] = useState<string>("");
   const [source, setSource] = useState<string>("");
   const [page, setPage] = useState(0);
 
@@ -49,15 +50,16 @@ export default function LibraryPage() {
 
   useEffect(() => {
     setPage(0);
-  }, [genre, source]);
+  }, [genre, mood, source]);
 
   const offset = page * PAGE_SIZE;
   const { data, isLoading, mutate } = useSWR(
-    ["tracks", qDebounced, genre, source, page],
+    ["tracks", qDebounced, genre, mood, source, page],
     () =>
       api.listTracks({
         q: qDebounced || undefined,
         genre: genre || undefined,
+        mood: mood || undefined,
         source: source || undefined,
         limit: PAGE_SIZE,
         offset,
@@ -65,6 +67,9 @@ export default function LibraryPage() {
     { keepPreviousData: true },
   );
   const { data: genresData } = useSWR("/api/library/genres", () => api.genres());
+  // Список настроений обновляется сам: TTL-кэш 120с на бэке + поллинг тут —
+  // новые настроения после скана появятся без перезагрузки страницы.
+  const { data: moodsData } = useSWR("/api/library/moods", () => api.moods(), { refreshInterval: 60000 });
   const { data: media } = useSWR("/api/settings/media-server", () => api.getMediaServer());
   const { data: overview } = useSWR("/api/library/overview", () => api.overview());
   const { data: health } = useSWR("/api/library/health", () => api.libraryHealth());
@@ -145,6 +150,19 @@ export default function LibraryPage() {
               {(genresData?.genres ?? []).map((g) => (
                 <option key={g} value={g}>
                   {g}
+                </option>
+              ))}
+            </select>
+            <select
+              className="kuma-input kuma-input-inline w-40"
+              value={mood}
+              onChange={(e) => setMood(e.target.value)}
+              title="Настроение из sonic-анализа — список пополняется по мере анализа"
+            >
+              <option value="">Все настроения</option>
+              {(moodsData?.moods ?? []).map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name} · {m.count}
                 </option>
               ))}
             </select>

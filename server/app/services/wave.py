@@ -142,6 +142,33 @@ def _has_cyrillic(*parts: object) -> bool:
     return False
 
 
+# Немузыкальные треки: скиты/интерлюдии/интро-аутро — разговорные вставки
+# альбомов, которые в волне раздражают. Тумблер — Автоматизация →
+# wave_skip_non_music (дефолт True). Проверка только по названию:
+# маркер в скобках («Song (skit)») или название целиком («Skit 3»).
+NON_MUSIC_MARKERS = ("skit", "skits", "interlude", "interludes", "intro",
+                     "outro", "prelude", "prologue", "epilogue")
+
+
+def _is_non_music_track(title: Any) -> bool:
+    """True — разговорный трек (скит/интерлюдия), в волну не берём."""
+    import re as _re
+
+    t = (title or "").strip()
+    if not t:
+        return False
+    try:
+        _m = _re.search(r"[\(\[]([^\)\]]+)[\)\]]", t)
+        if _m and _re.search(r"\b(" + "|".join(NON_MUSIC_MARKERS) + r")\b",
+                             _m.group(1).lower()):
+            return True
+        _head = _re.sub(r"[\(\[].*[\)\]]", "", t).strip().lower()
+        _head = _re.sub(r"[#№]?\s*\d+\s*$", "", _head).strip()
+        return _head in NON_MUSIC_MARKERS
+    except Exception:
+        return False
+
+
 def _meta_ru_ids(db, ids: list) -> set:
     """Кириллический fast-path: треки БЕЗ текстов (нет в Lyrics), но с
     кириллицей в метаданных (артист/название/альбом) считаем русскоязычными.
@@ -1920,6 +1947,26 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             cand = deduped
     except Exception:
         pass
+    # Немузыкальные треки (скиты/интерлюдии): разговорные вставки в волну
+    # не берём — раздражают. Тумблер: Автоматизация → wave_skip_non_music.
+    try:
+        from app.services import automation as _auto
+
+        _skip_nm = bool(_auto.get_flags(db).get("wave_skip_non_music", True))
+    except Exception:
+        _skip_nm = True
+    if _skip_nm and cand:
+        _before_nm = len(cand)
+        cand = [c for c in cand
+                if not (meta.get(c) and _is_non_music_track(meta[c].title))]
+        if len(cand) != _before_nm:
+            try:
+                from app.core.logging import get_logger as _gl
+
+                _gl("wave").info("wave non-music filter: {} -> {} (skit/interlude/intro)",
+                                 _before_nm, len(cand))
+            except Exception:
+                pass
     # Временный бан жанра из дрейфа (3+ скипа жанра за сессию): только запрос.
     _tmp_genres = set(drift.get("temp_banned_genres") or [])
     if _tmp_genres and cand:
