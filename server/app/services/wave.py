@@ -94,14 +94,58 @@ MOOD_PRESETS: dict[str, dict] = {
     'chill': {'moods': {'calm', 'relaxed'}, 'energy_max': 0.5},
 }
 # Занятие: мягкие бонусы (не жёсткие фильтры — очередь не должна пустеть).
+# Ключи-коды — контракт с плеером (GET /api/wave/options отдаёт каталог).
+# Русские пилюли старых клиентов — алиасы (ACTIVITY_ALIASES).
 ACTIVITY_PRESETS: dict[str, dict] = {
-    'просыпаюсь': {'energy_min': 0.5, 'tempo_min': 100, 'valence_min': 0.4},
-    'в дороге': {'energy_min': 0.6, 'tempo_min': 110},
-    'работаю': {'energy_max': 0.6, 'tempo_max': 120},
-    'work': {'energy_min': 0.3, 'energy_max': 0.6},
-    'workout': {'tempo_min': 110, 'energy_min': 0.6},
+    'wakeup': {'energy_min': 0.5, 'tempo_min': 100, 'valence_min': 0.4},
+    'commute': {'energy_min': 0.6, 'tempo_min': 110},
+    'work': {'energy_min': 0.3, 'energy_max': 0.6, 'tempo_max': 120},
+    'workout': {'energy_min': 0.6, 'tempo_min': 110},
     'sleep': {'energy_max': 0.35},
+    'study': {'energy_min': 0.3, 'energy_max': 0.6, 'tempo_max': 120},
+    'party': {'energy_min': 0.7, 'tempo_min': 115, 'dance_min': 0.5},
+    'walk': {'energy_min': 0.4, 'energy_max': 0.7, 'valence_min': 0.4},
+    'rest': {'energy_max': 0.5},
 }
+ACTIVITY_ALIASES: dict[str, str] = {
+    'просыпаюсь': 'wakeup',
+    'в дороге': 'commute',
+    'работаю': 'work',
+    'тренируюсь': 'workout',
+    'тренировка': 'workout',
+    'засыпаю': 'sleep',
+}
+# Каталог для плеера (код — то, что плеер шлёт обратно в settings.activity).
+ACTIVITY_CATALOG: list[dict] = [
+    {'code': 'wakeup', 'label': 'Просыпаюсь', 'hint': 'бодро, но мягко'},
+    {'code': 'commute', 'label': 'В дороге', 'hint': 'энергия и темп'},
+    {'code': 'work', 'label': 'Работаю', 'hint': 'ровный фон'},
+    {'code': 'study', 'label': 'Учёба / фокус', 'hint': 'не отвлекает'},
+    {'code': 'workout', 'label': 'Тренировка', 'hint': 'темп и драйв'},
+    {'code': 'walk', 'label': 'Прогулка', 'hint': 'светлое, в движении'},
+    {'code': 'party', 'label': 'Вечеринка', 'hint': 'максимум движа'},
+    {'code': 'rest', 'label': 'Отдых', 'hint': 'спокойное'},
+    {'code': 'sleep', 'label': 'Засыпаю', 'hint': 'тихо и медленно'},
+]
+CHARACTERISTIC_CATALOG: list[dict] = [
+    {'code': 'favorite', 'label': 'Любимое', 'hint': 'проверенное'},
+    {'code': 'unfamiliar', 'label': 'Незнакомое', 'hint': 'открытия'},
+    {'code': 'popular', 'label': 'Популярное', 'hint': 'у всех на слуху'},
+]
+LANGUAGE_CATALOG: list[dict] = [
+    {'code': 'ru', 'label': 'Русский'},
+    {'code': 'foreign', 'label': 'Иностранный'},
+    {'code': 'instrumental', 'label': 'Без слов'},
+]
+
+
+def _norm_activity(v: str | None) -> str | None:
+    """Код занятия: алиасы старых пилюль -> канон. Неизвестное — как есть
+    (пресета нет = без бонусов, очередь не пустеет)."""
+    s = (v or '').strip().lower()
+    if not s:
+        return None
+    return ACTIVITY_ALIASES.get(s, s)
 
 
 def _norm_mood(v: str | None) -> str | None:
@@ -644,8 +688,6 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     settings = settings or {}
     tun = _tun_all(db, user_id)
     _rng = random.Random(jitter_seed) if jitter_seed else random
-    activity_raw = (settings.get('activity') or '').strip()
-    activity = activity_raw.lower() or None
     mood = _norm_mood(settings.get('mood'))
     try:
         from app.core.time import local_hour as _local_hour
@@ -670,8 +712,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         _skip_pipe = None
     # Пресеты: русские пилюли клиента -> диапазоны фичей для ctx-бонусов.
     _mood_preset = MOOD_PRESETS.get((settings.get('mood') or '').strip().lower(), {})
-    _act_preset = ACTIVITY_PRESETS.get(activity_raw.strip().lower(),
-                                       ACTIVITY_PRESETS.get(activity or '', {}))
+    _act_code = _norm_activity(settings.get('activity'))
+    _act_preset = ACTIVITY_PRESETS.get(_act_code or '', {})
     if mood and not _mood_preset:
         # англ. mood без пресета — ищем по ключам без учёта регистра
         for k, v in MOOD_PRESETS.items():
@@ -981,12 +1023,12 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                 da = float(f.danceability if f.danceability is not None else 0.5)
             except (TypeError, ValueError):
                 da = 0.5
-            # legacy активности (совместимость)
-            if activity == 'work' and 0.3 <= en <= 0.6:
+            # legacy активности (совместимость): те же коды, что в пресетах
+            if _act_code == 'work' and 0.3 <= en <= 0.6:
                 ctx += 0.1
-            if activity == 'workout' and bpm > 110:
+            if _act_code == 'workout' and bpm > 110:
                 ctx += 0.15
-            if activity == 'sleep' and en < 0.3:
+            if _act_code == 'sleep' and en < 0.3:
                 ctx += 0.1
             if mood and _mood_of(f) == mood:
                 ctx += 0.1

@@ -232,6 +232,29 @@ def wave_continue(payload: dict, request: Request, db: Session = Depends(get_db)
         raise HTTPException(500, f'wave failed: {str(e)[:300]}')
 
 
+@router.get('/options')
+def wave_options(db: Session = Depends(get_db)):
+    """Каталог опций волны для плеера (канон — сервер, а не зашитые списки).
+
+    {activities[{code,label,hint}], characteristics, languages,
+     moods[{name,count}]}. Настроения — живые (из sonic-анализа, пополняются
+    по мере скана). Плеер кеширует; без мозга — свой зашитый список (офлайн).
+    """
+    from app.services import wave as _wave
+
+    try:
+        from app.api.library import list_moods as _moods
+
+        moods = _moods(db).get("moods", [])
+    except Exception:
+        moods = []
+    return {"ok": True,
+            "activities": list(_wave.ACTIVITY_CATALOG),
+            "characteristics": list(_wave.CHARACTERISTIC_CATALOG),
+            "languages": list(_wave.LANGUAGE_CATALOG),
+            "moods": moods}
+
+
 @router.get('/seeds')
 def wave_seeds(user_id: str, request: Request, characteristic: str | None = None,
                limit: int = 5, db: Session = Depends(get_db)):
