@@ -501,18 +501,23 @@ def unban_artist(user_id: str, payload: BanIn, db: Session = Depends(get_db)):
     if not name and not aid:
         raise HTTPException(400, "artist_name required")
     try:
+        from sqlalchemy import or_ as _or
         q = db.query(_AB).filter(_AB.user_id == u.id)
         if name and aid:
-            from sqlalchemy import or_ as _or
-            q.filter(_or_(_AB.artist_name == name,
-                          _AB.artist_external_id == aid)).delete(
-                synchronize_session=False)
+            rows = q.filter(_or_(_AB.artist_name == name,
+                                 _AB.artist_external_id == aid)).all()
         elif name:
-            q.filter(_AB.artist_name == name).delete(
-                synchronize_session=False)
+            rows = q.filter(_AB.artist_name == name).all()
         else:
-            q.filter(_AB.artist_external_id == aid).delete(
-                synchronize_session=False)
+            rows = q.filter(_AB.artist_external_id == aid).all()
+        if rows:
+            from app.services import taste as _taste
+            for r in rows:
+                _taste._write_tombstone(
+                    db, str(u.id), "ban",
+                    str(r.artist_name or ""),
+                    str(r.artist_external_id or ""))
+                db.delete(r)
         db.commit()
     except Exception:
         db.rollback()
@@ -551,12 +556,17 @@ def sync_from_mobile(user_id: str, payload: dict, db: Session = Depends(get_db))
 
 
 @router.get("/{user_id}/sync-to-mobile")
-def sync_to_mobile(user_id: str, db: Session = Depends(get_db)):
-    """Слепок сервера для мобилы: лайки/дизлайки/баны (external ids), веса, статы."""
+def sync_to_mobile(user_id: str, since: str | None = None,
+                   db: Session = Depends(get_db)):
+    """Слепок сервера для мобилы: лайки/дизлайки/баны (external ids), веса, статы.
+
+    since — курсор прошлого pull (server_now из прошлого ответа):
+    отдаёт removed (разбаны/анлайки новее курсора). Без курсора — как раньше.
+    """
     from app.services import taste as _taste
 
     _require_user(db, user_id)
-    return _taste.sync_to_mobile(db, user_id)
+    return _taste.sync_to_mobile(db, user_id, since=since)
 
 
 @router.get("/{user_id}/vault")

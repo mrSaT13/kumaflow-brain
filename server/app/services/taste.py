@@ -243,6 +243,25 @@ def _artist_of(db, track_id: str) -> str | None:
     return (t.artist_name or "").strip() or None if t else None
 
 
+def _write_tombstone(db, user_id: str, kind: str, key: str,
+                     aux: str | None = None) -> None:
+    """Надгробие удаления (разбан/анлайк/снятие дизлайка).
+
+    Пишем всегда новым рядом (монотонный id = порядок для LWW),
+    коммитит вызывающий. Пустые ключи не пишем.
+    """
+    try:
+        from app.db.models import TasteTombstone as _TT
+
+        k = str(key or "").strip()
+        if not k:
+            return
+        db.add(_TT(user_id=user_id, kind=str(kind),
+                   key=k[:512], aux=(str(aux or "").strip()[:512] or None)))
+    except Exception:
+        pass
+
+
 def artist_dislike_count(db, user_id: str, artist_name: str) -> int:
     """Сколько дизлайков у треков артиста (порт artistDislikeCounts)."""
     if not artist_name:
@@ -306,17 +325,27 @@ def record_rate(db, user_id: str, track_id: str, like: bool | None) -> dict:
     if not t:
         return {"ok": False, "error": "track not found"}
     auto_banned = None
+    _ext = str(t.external_id or "")
     if like is True:
-        db.query(TrackDislike).filter_by(user_id=user_id, track_id=track_id).delete()
+        if db.query(TrackDislike).filter_by(
+                user_id=user_id, track_id=track_id).delete():
+            _write_tombstone(db, user_id, "dislike", _ext or track_id, track_id)
         if db.query(Favorite).filter_by(user_id=user_id, track_id=track_id).first() is None:
             db.add(Favorite(user_id=user_id, track_id=track_id))
     elif like is False:
+        if db.query(Favorite).filter_by(
+                user_id=user_id, track_id=track_id).delete():
+            _write_tombstone(db, user_id, "like", _ext or track_id, track_id)
         _add_dislike(db, user_id, track_id, "manual")
         if _maybe_autoban(db, user_id, (t.artist_name or "").strip() or None):
             auto_banned = (t.artist_name or "").strip()
     else:
-        db.query(Favorite).filter_by(user_id=user_id, track_id=track_id).delete()
-        db.query(TrackDislike).filter_by(user_id=user_id, track_id=track_id).delete()
+        if db.query(Favorite).filter_by(
+                user_id=user_id, track_id=track_id).delete():
+            _write_tombstone(db, user_id, "like", _ext or track_id, track_id)
+        if db.query(TrackDislike).filter_by(
+                user_id=user_id, track_id=track_id).delete():
+            _write_tombstone(db, user_id, "dislike", _ext or track_id, track_id)
     db.commit()
     # Метрики рекомендаций: лайк с волны — самый ценный сигнал, что предложение
     # попало в точку. Без учёта «лайков с волны» в статистике не осталось бы
@@ -847,7 +876,10 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
             tid = ext_map.get(str(ext))
             if tid and tid not in pend_fav and db.query(_Fav).filter_by(
                     user_id=user_id, track_id=tid).first() is None:
-                db.query(_TD).filter_by(user_id=user_id, track_id=tid).delete()
+                if db.query(_TD).filter_by(
+                        user_id=user_id, track_id=tid).delete():
+                    _write_tombstone(db, user_id, "dislike",
+                                     str(ext), tid)
                 pend_dis.discard(tid)
                 db.add(_Fav(user_id=user_id, track_id=tid))
                 pend_fav.add(tid)
@@ -856,7 +888,10 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
             tid = ext_map.get(str(ext))
             if tid and tid not in pend_dis and db.query(_TD).filter_by(
                     user_id=user_id, track_id=tid).first() is None:
-                db.query(_Fav).filter_by(user_id=user_id, track_id=tid).delete()
+                if db.query(_Fav).filter_by(
+                        user_id=user_id, track_id=tid).delete():
+                    _write_tombstone(db, user_id, "like",
+                                     str(ext), tid)
                 pend_fav.discard(tid)
                 db.add(_TD(user_id=user_id, track_id=tid, source="mobile"))
                 pend_dis.add(tid)
@@ -984,17 +1019,69 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
             "auto_bans": ev_res.get("auto_bans", [])}
 
 
-def sync_to_mobile(db, user_id: str) -> dict:
-    """Слепок сервера в форме для мобилы: external ids, веса, статы по трекам."""
+def _parse_since(s: str | None):
+    """Курсор pull: ISO-строка серверного времени. Мусор → None (=без удалений).
+
+    Консервативно: непонятный курсор даёт только added (как раньше),
+    удалений не отдаём — лучше пропустить чистку, чем снести живое.
+    """
+    from datetime import datetime, timezone
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except Exception:
+        return None
+
+
+def sync_to_mobile(db, user_id: str, since: str | None = None) -> dict:
+    """Слепок сервера в форме для мобилы: external ids, веса, статы по трекам.
+
+    since — курсор прошлого pull (server_now из прошлого ответа).
+    Отдаёт removed: надгробия новее курсора (разбаны/анлайки), лимит 5000.
+    Без курсора — только added, как раньше (свежему клиенту чистить нечего).
+    Заодно подчищает надгробия старше 30 дней и отдаёт server_now —
+    клиент хранит его как курсор (часы клиентов врут, серверные — нет,
+    но порядок конфликтов всё равно по монотонному id, а не по времени).
+    """
+    from datetime import datetime, timedelta
+
     from app.db.models import ArtistBan as _AB
     from app.db.models import Favorite as _Fav
     from app.db.models import MediaUser as _MU
+    from app.db.models import TasteTombstone as _TT
     from app.db.models import TrackDislike as _TD
     from app.db.models import TrackStat as _TS
 
     u = db.get(_MU, user_id)
     if not u:
         return {"ok": False, "error": "not found"}
+    now = datetime.utcnow()
+    try:
+        db.query(_TT).filter(
+            _TT.user_id == user_id,
+            _TT.deleted_at < now - timedelta(days=30)).delete(
+            synchronize_session=False)
+        db.flush()
+    except Exception:
+        pass
+    cursor = _parse_since(since)
+    removed: list[dict] = []
+    if cursor is not None:
+        try:
+            rows = (db.query(_TT).filter(
+                _TT.user_id == user_id,
+                _TT.deleted_at > cursor)
+                .order_by(_TT.id.asc()).limit(5000).all())
+            removed = [{"kind": str(r.kind), "key": str(r.key),
+                        "aux": str(r.aux or ""),
+                        "deleted_at": r.deleted_at.isoformat() + "Z"}
+                       for r in rows or []]
+        except Exception:
+            removed = []
     id2ext = {str(t.id): str(t.external_id) for t in db.query(Track.id, Track.external_id).all()}
     liked = [id2ext[tid] for (tid,) in db.query(_Fav.track_id).filter(_Fav.user_id == user_id).all()
              if str(tid) in id2ext]
@@ -1020,8 +1107,10 @@ def sync_to_mobile(db, user_id: str) -> dict:
                           "completes": st.completes}
     prof = user_profile(db, user_id, top_n=0)
     return {"ok": True, "user_id": user_id, "username": u.username,
+            "server_now": now.isoformat() + "Z",
             "likedSongs": liked, "dislikedSongs": disliked, "bannedArtists": banned,
             "bannedArtistsDetailed": banned_detailed,
+            "removed": removed,
             "preferredGenres": prof.get("preferredGenres", {}),
             "preferredArtists": prof.get("preferredArtists", {}),
             "trackStats": stats,

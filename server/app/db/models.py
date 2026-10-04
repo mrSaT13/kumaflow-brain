@@ -282,6 +282,29 @@ class ArtistBan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class TasteTombstone(Base):
+    """Надгробие удалённого вкуса: разбан/анлайк/снятие дизлайка.
+
+    Без этого удаления не расходятся по устройствам (мерж только добавлял).
+    kind: 'ban' | 'like' | 'dislike'.
+    key: artist_name (ban) или external_id трека (like/dislike).
+    aux: artist_external_id (ban) или track uuid (like/dislike).
+    Порядок конфликтов — по монотонному id (serial), часы сервера могут
+    врать: для LWW важна монотонность одного источника, а не точность.
+    Строки старше 30 дней подчищает sync_to_mobile.
+    """
+
+    __tablename__ = "taste_tombstones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    key: Mapped[str] = mapped_column(String(512), nullable=False)
+    aux: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class PlayEvent(Base):
     """Богатое событие прослушивания (порт mobile PlayEvent + TrackRating счётчики).
 
