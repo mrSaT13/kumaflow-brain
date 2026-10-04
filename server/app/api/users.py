@@ -49,7 +49,9 @@ class EventsIn(BaseModel):
 
 
 class BanIn(BaseModel):
-    artist_name: str
+    artist_name: str = ""
+    # Navidrome artistId (десктоп). Опционален: без него — как раньше, по имени.
+    artist_id: str = ""
 
 
 class VaultIn(BaseModel):
@@ -446,27 +448,74 @@ def push_events(user_id: str, payload: EventsIn, db: Session = Depends(get_db)):
 
 @router.post("/{user_id}/ban-artist")
 def ban_artist(user_id: str, payload: BanIn, db: Session = Depends(get_db)):
-    """Ручной бан артиста (порт mobile banArtist)."""
+    """Ручной бан артиста (порт mobile banArtist + desktop).
+
+    Принимает имя и/или Navidrome-ID (десктоп шлёт пары {id, name}).
+    Храним оба, матчинг — имя ИЛИ id. Без имени, но с ID — имя резолвим
+    по трекам, в крайнем случае сам ID (матч по ID всё равно сработает).
+    """
     from app.db.models import ArtistBan as _AB
+    from app.db.models import Track as _T
 
     u = _require_user(db, user_id)
     name = (payload.artist_name or "").strip()
+    aid = (payload.artist_id or "").strip()
+    if not name and aid:
+        try:
+            hit = db.query(_T.artist_name).filter(
+                _T.artist_external_id == aid).first()
+            name = str((hit[0] if hit else "") or "").strip() or aid
+        except Exception:
+            name = aid
     if not name:
         raise HTTPException(400, "artist_name required")
-    if db.query(_AB).filter_by(user_id=u.id, artist_name=name).first() is None:
-        db.add(_AB(user_id=u.id, artist_name=name[:512], reason="manual"))
+    row = db.query(_AB).filter_by(user_id=u.id, artist_name=name[:512]).first()
+    if row is None:
+        db.add(_AB(user_id=u.id, artist_name=name[:512],
+                   artist_external_id=(aid[:128] or None), reason="manual"))
         db.commit()
-    return {"ok": True, "artist_name": name}
+    elif aid and not getattr(row, "artist_external_id", None):
+        row.artist_external_id = aid[:128]
+        db.commit()
+    try:
+        from app.services.artist_names import backfill_ban_ids as _bb
+        if _bb(db, str(u.id)):
+            db.commit()
+    except Exception:
+        pass
+    return {"ok": True, "artist_name": name[:512]}
 
 
 @router.post("/{user_id}/unban-artist")
 def unban_artist(user_id: str, payload: BanIn, db: Session = Depends(get_db)):
-    """Разбан артиста (порт mobile unbanArtist)."""
+    """Разбан артиста (порт mobile unbanArtist + desktop).
+
+    Удаляем по имени ИЛИ по Navidrome-ID (десктоп знает ID всегда, имя —
+    не всегда): иначе разбан из плеера молча не срабатывал бы.
+    """
     from app.db.models import ArtistBan as _AB
 
     u = _require_user(db, user_id)
-    db.query(_AB).filter_by(user_id=u.id, artist_name=(payload.artist_name or "").strip()).delete()
-    db.commit()
+    name = (payload.artist_name or "").strip()
+    aid = (payload.artist_id or "").strip()
+    if not name and not aid:
+        raise HTTPException(400, "artist_name required")
+    try:
+        q = db.query(_AB).filter(_AB.user_id == u.id)
+        if name and aid:
+            from sqlalchemy import or_ as _or
+            q.filter(_or_(_AB.artist_name == name,
+                          _AB.artist_external_id == aid)).delete(
+                synchronize_session=False)
+        elif name:
+            q.filter(_AB.artist_name == name).delete(
+                synchronize_session=False)
+        else:
+            q.filter(_AB.artist_external_id == aid).delete(
+                synchronize_session=False)
+        db.commit()
+    except Exception:
+        db.rollback()
     return {"ok": True}
 
 

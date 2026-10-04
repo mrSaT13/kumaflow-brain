@@ -237,7 +237,12 @@ def recommend_for_user(db, user_id: str, n: int = 30) -> dict:
         return {"items": [], "similar_users": sim_users}
     tracks = {str(t.id): t for t in
               db.query(Track).filter(Track.id.in_(list(scores))).all()}
-    from app.services.artist_names import is_banned as _is_banned
+    from app.services.artist_names import is_banned_either as _is_banned
+    try:
+        from app.services.artist_names import load_bans as _lb
+        _, _ban_ids = _lb(db, user_id)
+    except Exception:
+        _ban_ids = set()
 
     # Нормировка по максимуму: 0..1 с осмысленным «топом = 1.0».
     top_raw = max(scores.values()) or 1.0
@@ -246,7 +251,8 @@ def recommend_for_user(db, user_id: str, n: int = 30) -> dict:
         t = tracks.get(tid)
         if not t:
             continue
-        if _is_banned(t.artist_name, bans):
+        if _is_banned(t.artist_name, getattr(t, "artist_external_id", None),
+                      bans, _ban_ids):
             continue
         items.append({"track_id": tid, "title": t.title, "artist_name": t.artist_name,
                       "album_name": t.album_name, "genre": t.genre,

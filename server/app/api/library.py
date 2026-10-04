@@ -171,6 +171,18 @@ def list_genres(source: str | None = None, db: Session = Depends(get_db)):
 _moods_cache: dict = {"at": 0.0, "moods": []}
 
 
+def invalidate_moods_cache() -> None:
+    """Сбросить TTL-кэш каталога настроений (после слияний/скана).
+
+    Иначе дропдаун показывает stale-цифры, которых фильтр уже не находит.
+    """
+    try:
+        _moods_cache["at"] = 0.0
+        _moods_cache["moods"] = []
+    except Exception:
+        pass
+
+
 @router.get("/moods")
 def list_moods(db: Session = Depends(get_db)):
     """Все настроения библиотеки + counts (для фильтра).
@@ -196,7 +208,10 @@ def list_moods(db: Session = Depends(get_db)):
             if not labels:
                 continue
             try:
-                for m in (labels or [])[:3]:
+                # Считаем ВСЕ метки (фильтр /api/tracks?mood= ищет по всем 8,
+                # а не только первым 3) с той же нормализацией, что фильтр:
+                # иначе цифра в дропдауне расходится с выдачей.
+                for m in labels or []:
                     s = str(m or "").strip().lower()
                     if s:
                         c[s] += 1
@@ -518,7 +533,10 @@ def recannonicalize(payload: dict | None = None, db: Session = Depends(get_db)):
     from app.services import dedup as _dd
 
     dry = bool((payload or {}).get("dry_run", True))
-    return _dd.recannonicalize(db, dry_run=dry)
+    out = _dd.recannonicalize(db, dry_run=dry)
+    if not dry:
+        invalidate_moods_cache()
+    return out
 
 
 @router.post("/duplicates/merge", dependencies=[Depends(require_admin)])
@@ -541,7 +559,9 @@ def merge_duplicates(payload: dict, db: Session = Depends(get_db)):
         raise _HE(400, "invalid ids")
     if not drop_ids:
         raise _HE(400, "drop_ids required")
-    return _dd.merge_tracks(db, keep_id, drop_ids)
+    out = _dd.merge_tracks(db, keep_id, drop_ids)
+    invalidate_moods_cache()
+    return out
 
 
 @router.post("/duplicates/auto", dependencies=[Depends(require_admin)])
@@ -552,7 +572,9 @@ def auto_merge_duplicates(db: Session = Depends(get_db)):
     """
     from app.services import dedup as _dd
 
-    return {"ok": True, **_dd.auto_merge_exact(db)}
+    out = {"ok": True, **_dd.auto_merge_exact(db)}
+    invalidate_moods_cache()
+    return out
 
 
 @router.get("/duplicates/fingerprint")
@@ -585,6 +607,7 @@ def auto_merge_fingerprint(payload: dict, db: Session = Depends(get_db)):
             merged += int(r.get("merged", 0) or 0)
         except Exception:
             continue
+    invalidate_moods_cache()
     return {"ok": True, "groups": len(groups), "merged": merged}
 
 

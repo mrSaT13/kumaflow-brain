@@ -261,9 +261,14 @@ class TrackDislike(Base):
 
 
 class ArtistBan(Base):
-    """Бан артиста (порт mobile bannedArtists).
+    """Бан артиста (порт mobile bannedArtists + desktop).
 
-    reason: manual, auto3 (3 дизлайка треков артиста — правило mobile).
+    reason: manual, auto3 (3 дизлайка треков артиста — правило mobile),
+    mobile/desktop (синк профиля с клиентов).
+    artist_external_id — Navidrome artistId (десктоп шлёт пары {id, name});
+    матчинг — имя ИЛИ id (см. artist_names.is_banned_either). Колонка
+    добавлена позже создания таблицы → её докладывает schema_patch
+    (nullable, старые строки работают по имени как раньше).
     """
 
     __tablename__ = "artist_bans"
@@ -272,6 +277,7 @@ class ArtistBan(Base):
         ForeignKey("media_users.id", ondelete="CASCADE"), primary_key=True
     )
     artist_name: Mapped[str] = mapped_column(String(512), primary_key=True)
+    artist_external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     reason: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

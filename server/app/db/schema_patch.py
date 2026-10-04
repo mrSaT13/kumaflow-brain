@@ -29,6 +29,9 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("cron_jobs", "next_run_at", "TIMESTAMP"),
     ("cron_jobs", "run_count", "INTEGER NOT NULL DEFAULT 0"),
     ("cron_jobs", "fail_count", "INTEGER NOT NULL DEFAULT 0"),
+    # Бан по Navidrome-ID артиста (десктоп шлёт пары {id, name}).
+    # Nullable: старые именные строки работают как раньше, матчинг — имя ИЛИ id.
+    ("artist_bans", "artist_external_id", "VARCHAR(128)"),
 ]
 
 

@@ -94,10 +94,11 @@ export function Section({
   );
 }
 
-export function EmptyState({ message }: { message: ReactNode }) {
+export function EmptyState({ message, action }: { message: ReactNode; action?: ReactNode }) {
   return (
     <div className="kuma-card flex flex-col items-center justify-center py-16 text-center">
       <div className="text-sm text-muted">{message}</div>
+      {action && <div className="mt-4">{action}</div>}
     </div>
   );
 }

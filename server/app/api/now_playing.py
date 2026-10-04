@@ -175,12 +175,18 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5,
         return []
     dis: set[str] = set()
     bans: set[str] = set()
+    ban_ids: set[str] = set()
     if user_id:
         try:
             dis = {str(r.track_id) for r in
                    db.query(TrackDislike).filter_by(user_id=user_id).all()}
             bans = {str(r.artist_name) for r in
                     db.query(ArtistBan).filter_by(user_id=user_id).all()}
+            try:
+                from app.services.artist_names import load_bans as _lb
+                _, ban_ids = _lb(db, user_id)
+            except Exception:
+                pass
         except Exception:
             pass
     dis.add(str(cur.id))
@@ -207,11 +213,13 @@ def _next_for_track(db: Session, track_id: str, user_id: str | None, n: int = 5,
         except Exception:
             pass
     try:
-        from app.services.artist_names import is_banned as _is_banned
+        from app.services.artist_names import is_banned_either as _is_banned
     except Exception:
-        _is_banned = lambda a, b: bool(a and a in b)  # noqa: E731
+        _is_banned = lambda a, i, bn, bi: bool(a and a in bn)  # noqa: E731
     pool = [t for t in pool if str(t.id) not in dis
-            and not _is_banned(t.artist_name, bans)]
+            and not _is_banned(t.artist_name,
+                               getattr(t, "artist_external_id", None),
+                               bans, ban_ids)]
     if not pool:
         return []
 

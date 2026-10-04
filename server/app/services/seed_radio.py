@@ -236,19 +236,31 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
     pool = pool[:1500]
 
     # Дизлайки/баны — мимо очереди (как cold_start).
+    # Баны: имена (как раньше) + Navidrome-ID (десктопные).
     try:
         dis = {str(r[0]) for r in db.query(TrackDislike.track_id).filter_by(user_id=user_id).all()}
         bans = {str(r.artist_name or "").lower() for r in db.query(ArtistBan).filter_by(user_id=user_id).all()}
+        try:
+            from app.services.artist_names import load_bans as _lb
+            _bn, _bi = _lb(db, user_id)
+            bans |= {b.lower() for b in _bn}
+            ban_ids = set(_bi)
+        except Exception:
+            ban_ids = set()
     except Exception:
-        dis, bans = set(), set()
-    if dis or bans:
+        dis, bans, ban_ids = set(), set(), set()
+    if dis or bans or ban_ids:
         keep_pool = []
         by_id = {str(t.id): t for t in db.query(Track).filter(Track.id.in_(pool[:2000])).all()}
         for tid in pool:
             if tid in dis:
                 continue
-            a = str((by_id.get(tid).artist_name if by_id.get(tid) else "") or "").lower()
+            _bt = by_id.get(tid)
+            a = str((_bt.artist_name if _bt else "") or "").lower()
             if a and a in bans:
+                continue
+            _aid = str((_bt.artist_external_id if _bt else "") or "")
+            if _aid and _aid in ban_ids:
                 continue
             keep_pool.append(tid)
         pool = keep_pool

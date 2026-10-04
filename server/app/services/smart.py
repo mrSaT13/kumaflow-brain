@@ -59,6 +59,15 @@ def _exclusions(db, user_id: str) -> tuple[set[str], set[str]]:
     return dis, bans
 
 
+def _exclusion_artist_ids(db, user_id: str) -> set[str]:
+    """Navidrome-ID забаненных артистов (десктопные баны). Пусто — не мешает."""
+    try:
+        from app.services.artist_names import load_bans as _lb
+        return _lb(db, user_id)[1]
+    except Exception:
+        return set()
+
+
 def _play_sets(db, user_id: str) -> tuple[set[str], dict[str, datetime]]:
     """(игранные track_id, последний раз). PlayHistory + TrackStat."""
     from app.db.models import PlayHistory, TrackStat
@@ -124,13 +133,17 @@ def discoveries(db, user_id: str, n: int = 30) -> list[str]:
                 break
     else:
         cand = [str(r[0]) for r in q.limit(1500).all()]
-    if bans and cand:
-        from app.services.artist_names import is_banned as _is_banned
+    _ban_ids = _exclusion_artist_ids(db, user_id)
+    if (bans or _ban_ids) and cand:
+        from app.services.artist_names import is_banned_either as _is_banned
 
         meta = {str(t.id): t for t in
                 db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
         cand = [c for c in cand
-                if not (meta.get(c) and _is_banned(meta[c].artist_name, bans))]
+                if not (meta.get(c) and _is_banned(
+                    meta[c].artist_name,
+                    getattr(meta[c], "artist_external_id", None),
+                    bans, _ban_ids))]
     if not cand:
         return []
     seeds = _wave.select_seeds(db, user_id, limit=5)
@@ -213,14 +226,18 @@ def _energy_pool(db, user_id: str, predicate: str, n: int) -> list[str]:
         else:  # sport
             if bpm > _sport_bpm or en > _sport_e:
                 pool.append(tid)
-    if bans and pool:
-        from app.services.artist_names import is_banned as _is_banned
+    _ban_ids2 = _exclusion_artist_ids(db, user_id)
+    if (bans or _ban_ids2) and pool:
+        from app.services.artist_names import is_banned_either as _is_banned
 
         ids = pool
         meta = {str(t.id): t for t in
                 db.query(Track).filter(Track.id.in_(ids[:2000])).all()}
         pool = [t for t in pool
-                if not (meta.get(t) and _is_banned(meta[t].artist_name, bans))]
+                if not (meta.get(t) and _is_banned(
+                    meta[t].artist_name,
+                    getattr(meta[t], "artist_external_id", None),
+                    bans, _ban_ids2))]
     if not pool:
         return []
     if pool:

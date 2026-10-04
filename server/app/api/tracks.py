@@ -78,26 +78,36 @@ def list_tracks(
     if artist:
         query = query.filter(Track.artist_name == artist)
     if mood:
-        # Настроение из TrackFeatures.mood_labels (JSON-колонка, кросс-БД:
-        # sqlite локально / postgres в проде). Матчим элемент в кавычках,
-        # чтобы «тёмный» не ловил «тёмный-2»; регистр гасим с обеих сторон.
-        # Нюанс: sqlite сериализует JSON через ensure_ascii (кириллица лежит
-        # как \uXXXX), а postgres отдаёт литералы — ищем обе формы.
-        import json as _json
-
-        from sqlalchemy import cast, func, or_
-        from sqlalchemy.types import String as _Str
+        # Настроение из TrackFeatures.mood_labels. Сравнение — точное, по
+        # нормализованным меткам (strip + lower) в Python, а не JSON-LIKE:
+        # LIKE с кавычками ломался на метках с пробелами (« агрессивный »),
+        # регистре (sqlite lower() — только ASCII) и \uXXXX-экранировании
+        # (бэкслэш — escape-символ LIKE в postgres). Каталог /moods считал
+        # strip().lower(), а фильтр искал подстроку в кавычках — цифра в
+        # дропдауне была, а выдача давала 0. Так чинятся и старые грязные
+        # строки без миграции данных.
+        from app.db.models import TrackFeatures as _TF
 
         _m = str(mood).strip().lower()
         # LIKE-инъекция/кавычки из запроса — режем, иначе ломается фильтр
         _m = "".join(c for c in _m if c not in ("\"", "%", "_", "\\"))[:64]
         if not _m:
             raise HTTPException(400, "invalid mood")
-        _esc = _json.dumps(_m, ensure_ascii=True)[1:-1]
-        _col = func.lower(cast(TrackFeatures.mood_labels, _Str))
-        query = query.join(TrackFeatures, TrackFeatures.track_id == Track.id).filter(
-            or_(_col.like(f'%"{_m}"%'), _col.like(f'%"{_esc}"%'))
-        )
+        _hit_ids: list[str] = []
+        try:
+            for (tid, labels) in db.query(_TF.track_id, _TF.mood_labels).yield_per(5000):
+                if not labels:
+                    continue
+                try:
+                    if any(str(m or "").strip().lower() == _m for m in (labels or [])):
+                        _hit_ids.append(tid)
+                except Exception:
+                    continue
+        except Exception:
+            _hit_ids = []
+        if not _hit_ids:
+            return {"items": [], "total": 0, "limit": limit, "offset": offset}
+        query = query.filter(Track.id.in_(_hit_ids))
     total = query.count()
     rows = query.order_by(Track.title.asc()).offset(offset).limit(limit).all()
     return {"items": [_track_to_dict(r) for r in rows], "total": total, "limit": limit, "offset": offset}

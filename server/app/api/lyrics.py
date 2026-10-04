@@ -143,7 +143,7 @@ def refresh_lyrics(track_id: str, db: Session = Depends(get_db)):
                     except Exception:
                         pass
             moods = (f.mood_labels or []) + ai_res.get("moods", [])
-            f.mood_labels = list(dict.fromkeys([str(m).lower() for m in moods if str(m).strip()]))[:8]
+            f.mood_labels = list(dict.fromkeys([s for s in (str(m).strip().lower() for m in moods) if s]))[:8]
             mv = dict(f.mood_vector or {})
             mv["ai_sentiment"] = ai_res.get("sentiment", "neutral")
             mv["ai_language"] = ai_res.get("language", "")

@@ -83,6 +83,16 @@ export default function LibraryPage() {
 
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const hasFilter = Boolean(qDebounced || genre || mood || source);
+
+  function resetFilters() {
+    setQ("");
+    setQDebounced("");
+    setGenre("");
+    setMood("");
+    setSource("");
+    setPage(0);
+  }
 
   // prefetch обложек: очередь 8 (умный прогрев, server кэширует + 304 + LRU-touch)
   useEffect(() => {
@@ -232,7 +242,20 @@ export default function LibraryPage() {
           {isLoading ? (
             <div className="p-6 text-sm text-muted">Загрузка…</div>
           ) : (data?.items ?? []).length === 0 ? (
-            isReal ? (
+            hasFilter ? (
+              <EmptyState
+                message={
+                  <>
+                    По заданным фильтрам ничего не найдено. Попробуйте смягчить условия или сбросьте фильтры.
+                  </>
+                }
+                action={
+                  <button className="kuma-pill hover:text-text" onClick={resetFilters}>
+                    Сбросить фильтры
+                  </button>
+                }
+              />
+            ) : isReal ? (
               <EmptyState
                 message={
                   <>

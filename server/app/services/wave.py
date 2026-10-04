@@ -1789,7 +1789,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                   recent_events: list[dict] | None = None,
                   ratings_delta: list[dict] | None = None) -> dict:
     """Главная функция: дельта -> сиды -> кандидаты -> скоринг -> следующие N."""
-    from app.db.models import ArtistBan, Track, TrackDislike
+    from app.db.models import Track, TrackDislike
 
     settings = settings or {}
     count = max(1, min(100, int(count or 20)))
@@ -1860,11 +1860,14 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         elif target_mood in _NEG_MOODS:
             target_sentiment = "negative"
 
-    # Исключения: очередь + дизлайки + баны
+    # Исключения: очередь + дизлайки + баны (имена ИЛИ Navidrome-ID).
     dis = {str(r.track_id) for r in
            db.query(TrackDislike).filter_by(user_id=user_id).all()}
-    bans = {str(r.artist_name) for r in
-            db.query(ArtistBan).filter_by(user_id=user_id).all()}
+    try:
+        from app.services.artist_names import load_bans as _load_bans
+        ban_names, ban_ids = _load_bans(db, user_id)
+    except Exception:
+        ban_names, ban_ids = set(), set()
 
     # collab-подмес: кто у похожих в топе — тем выше collabScore.
     # Считаем ДО формирования пула кандидатов: раньше это было ниже, и
@@ -1937,11 +1940,15 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # Баны режем по мета (нужен artist) — батчем.
     # Сравнение через artist_names: бан «GASHI» ловит и трек
     # «Dark Polo Gang/GASHI/Capo Plaza», регистр не важен.
-    if bans and cand:
-        from app.services.artist_names import is_banned as _is_banned
+    # Плюс точный матч по Navidrome-ID (десктопные баны).
+    if (ban_names or ban_ids) and cand:
+        from app.services.artist_names import is_banned_either as _is_banned
 
         cand = [c for c in cand
-                if not (meta.get(c) and _is_banned(meta[c].artist_name, bans))]
+                if not (meta.get(c) and _is_banned(
+                    meta[c].artist_name,
+                    getattr(meta[c], "artist_external_id", None),
+                    ban_names, ban_ids))]
     # «Та же песня» под другим row id (дубль после перескана): по id-фильтр
     # её не ловит — получаем дубли в очереди и возврат задизлайканного.
     # Ключ — нормализованные артист+название (как в dedup.norm_text).

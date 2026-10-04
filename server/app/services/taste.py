@@ -270,7 +270,18 @@ def _maybe_autoban(db, user_id: str, artist_name: str | None, extra: int = 0) ->
     if exists:
         return False
     if artist_dislike_count(db, user_id, artist_name) + extra >= 3:
-        db.add(ArtistBan(user_id=user_id, artist_name=artist_name, reason="auto3"))
+        # ID подтягиваем сразу (точный матч в волне), имя — как раньше.
+        _aid = None
+        try:
+            _h = db.query(Track.artist_external_id).filter(
+                Track.artist_name == artist_name,
+                ~Track.external_id.like("disk:%"),
+                ~Track.external_id.like("demo-%")).first()
+            _aid = str((_h[0] if _h else "") or "")[:128] or None
+        except Exception:
+            pass
+        db.add(ArtistBan(user_id=user_id, artist_name=artist_name,
+                         artist_external_id=_aid, reason="auto3"))
         logger.info("autoban artist '{}' for user {}", artist_name, user_id[:8])
         return True
     return False
@@ -853,11 +864,56 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
                 artist = _artist_of(db, tid)
                 if artist:
                     touched_artists.add(artist)
-        for an in (prof.get("bannedArtists") or [])[:1000]:
-            an = str(an).strip()
-            if an and db.query(ArtistBan).filter_by(user_id=user_id, artist_name=an).first() is None:
-                db.add(ArtistBan(user_id=user_id, artist_name=an[:512], reason="mobile"))
+        # Баны: мобила шлёт имена строками, десктоп — пары {id, name}
+        # (у него в bannedArtists лежат Navidrome-ID). Принимаем оба формата;
+        # старые именные строки резолвим в ID через backfill ниже.
+        for _ban in (prof.get("bannedArtists") or [])[:1000]:
+            _bname, _bid = "", ""
+            if isinstance(_ban, dict):
+                _bname = str(_ban.get("name") or _ban.get("artist_name")
+                             or _ban.get("artist") or "").strip()
+                _bid = str(_ban.get("id") or _ban.get("external_id")
+                           or _ban.get("artist_id")
+                           or _ban.get("artist_external_id") or "").strip()
+            else:
+                _s = str(_ban or "").strip()
+                _bname, _bid = _s, ""
+                if _s:
+                    # Голый ID от старого десктопа? Имя резолвим сразу по трекам,
+                    # чтобы в artist_name не оседал мусор вместо имени.
+                    try:
+                        _h = db.query(Track.artist_name).filter(
+                            Track.artist_external_id == _s).first()
+                        if _h and _h[0]:
+                            _bname = str(_h[0]).strip()
+                            _bid = _s
+                    except Exception:
+                        pass
+            if not _bname and _bid:
+                # Имени нет — пробуем взять его у треков по ID, иначе сам ID
+                # (матч по ID всё равно сработает, имя подтянется бэкфиллом).
+                try:
+                    _hit = db.query(Track.artist_name).filter(
+                        Track.artist_external_id == _bid).first()
+                    _bname = str((_hit[0] if _hit else "") or "").strip() or _bid
+                except Exception:
+                    _bname = _bid
+            if not _bname:
+                continue
+            _row = db.query(ArtistBan).filter_by(
+                user_id=user_id, artist_name=_bname[:512]).first()
+            if _row is None:
+                db.add(ArtistBan(user_id=user_id, artist_name=_bname[:512],
+                                 artist_external_id=(_bid[:128] or None),
+                                 reason="mobile"))
                 m_banned += 1
+            elif _bid and not getattr(_row, "artist_external_id", None):
+                _row.artist_external_id = _bid[:128]
+        try:
+            from app.services.artist_names import backfill_ban_ids as _bb
+            _bb(db, user_id)
+        except Exception:
+            pass
         tp = db.get(_TP, user_id)
         if tp is None:
             tp = _TP(user_id=user_id)
@@ -945,6 +1001,16 @@ def sync_to_mobile(db, user_id: str) -> dict:
     disliked = [id2ext[tid] for (tid,) in db.query(_TD.track_id).filter(_TD.user_id == user_id).all()
                 if str(tid) in id2ext]
     banned = [str(r.artist_name) for r in db.query(_AB).filter_by(user_id=user_id).all()]
+    # Детально для десктопа (подтяжка банов при старте): имена + Navidrome-ID.
+    # Поле bannedArtists выше не меняем — мобила его уже ест как строки.
+    try:
+        banned_detailed = [
+            {"name": str(r.artist_name),
+             "external_id": str(r.artist_external_id or "")}
+            for r in db.query(_AB).filter_by(user_id=user_id).all()
+        ]
+    except Exception:
+        banned_detailed = [{"name": b, "external_id": ""} for b in banned]
     stats = {}
     for st in db.query(_TS).filter(_TS.user_id == user_id).all():
         ext = id2ext.get(str(st.track_id))
@@ -955,6 +1021,7 @@ def sync_to_mobile(db, user_id: str) -> dict:
     prof = user_profile(db, user_id, top_n=0)
     return {"ok": True, "user_id": user_id, "username": u.username,
             "likedSongs": liked, "dislikedSongs": disliked, "bannedArtists": banned,
+            "bannedArtistsDetailed": banned_detailed,
             "preferredGenres": prof.get("preferredGenres", {}),
             "preferredArtists": prof.get("preferredArtists", {}),
             "trackStats": stats,

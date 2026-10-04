@@ -1347,7 +1347,7 @@ def lyrics_fetch(run_id: str, *args, **kwargs) -> dict:
                         except Exception:
                             pass
                     moods = (f.mood_labels or []) + ai_result.get("moods", [])
-                    f.mood_labels = list(dict.fromkeys([str(m).lower() for m in moods if str(m).strip()]))[:8]
+                    f.mood_labels = list(dict.fromkeys([s for s in (str(m).strip().lower() for m in moods) if s]))[:8]
                     mv = dict(f.mood_vector or {})
                     mv["ai_sentiment"] = ai_result.get("sentiment", "neutral")
                     mv["ai_language"] = ai_result.get("language", "")
@@ -1413,7 +1413,7 @@ def lyrics_fetch_one(track_id: str) -> dict:
                     except Exception:
                         pass
             moods = (f.mood_labels or []) + ai_result.get("moods", [])
-            f.mood_labels = list(dict.fromkeys([str(m).lower() for m in moods if str(m).strip()]))[:8]
+            f.mood_labels = list(dict.fromkeys([s for s in (str(m).strip().lower() for m in moods) if s]))[:8]
     return {"status": "success", "track_id": track_id, "ai_analyzed": bool(ai_result)}
 
 
@@ -1453,7 +1453,7 @@ def _auto_lyrics_for_track(tid: str, with_ai: bool = True) -> str:
                     f = TrackFeatures(track_id=tid)
                     db.add(f)
                 moods = (f.mood_labels or []) + ai_res.get("moods", [])
-                f.mood_labels = list(dict.fromkeys([str(m).lower() for m in moods if str(m).strip()]))[:8]
+                f.mood_labels = list(dict.fromkeys([s for s in (str(m).strip().lower() for m in moods) if s]))[:8]
                 mv = dict(f.mood_vector or {})
                 if ai_res.get("sentiment"):
                     mv["ai_sentiment"] = ai_res["sentiment"]

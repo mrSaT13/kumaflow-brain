@@ -676,8 +676,13 @@ def cold_start_playlist(server_id: str, n: int = 30, user_id: str | None = None,
                 pass
         # исключения mobile: дизлайки и забаненные артисты не кандидаты
         excluded_dis = excluded_ban = 0
-        if disliked or banned:
-            from app.services.artist_names import is_banned as _is_banned
+        try:
+            from app.services.artist_names import load_bans as _lb
+            _, _ban_ids_ml = _lb(db, user_id) if user_id else (set(), set())
+        except Exception:
+            _ban_ids_ml = set()
+        if disliked or banned or _ban_ids_ml:
+            from app.services.artist_names import is_banned_either as _is_banned
 
             kept = []
             for t in rows:
@@ -685,7 +690,9 @@ def cold_start_playlist(server_id: str, n: int = 30, user_id: str | None = None,
                 if tid in disliked:
                     excluded_dis += 1
                     continue
-                if _is_banned(t.artist_name, banned):
+                if _is_banned(t.artist_name,
+                              getattr(t, "artist_external_id", None),
+                              banned, _ban_ids_ml):
                     excluded_ban += 1
                     continue
                 kept.append(t)
