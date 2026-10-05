@@ -25,6 +25,38 @@ from app.services import lyrics_ai
 
 logger = get_logger("workers.tasks")
 
+# Ретеншн Daily: сколько последних KumaFlow Daily храним на юзера.
+# Остальные (с прошедшими датами) удаляем вместе с треками, иначе +1 в день.
+DAILY_KEEP = 7
+
+
+def _prune_old_dailies(db, server_id: str, owner_id, keep: int = DAILY_KEEP) -> int:
+    """Удалить старые KumaFlow Daily сверх keep. Возвращает число удалённых."""
+    from app.db.models import Playlist, PlaylistTrack
+
+    rows = db.query(Playlist).filter(
+        Playlist.is_auto_generated.is_(True),
+        Playlist.server_id == str(server_id),
+        Playlist.name.like("KumaFlow Daily%"),
+    ).all()
+    # owner сравниваем через str(): в БД uuid, в коде то str, то UUID.
+    want = None if owner_id is None else str(owner_id)
+    rows = [p for p in rows if (None if p.owner_user_id is None else str(p.owner_user_id)) == want]
+    # Сначала свежие. Ключи — строки, чтобы None-даты не роняли сортировку.
+    def _key(p):
+        gd = p.generated_for_date
+        ca = getattr(p, "created_at", None)
+        return (gd is not None, str(gd or ""), str(ca or ""))
+    rows.sort(key=_key, reverse=True)
+    doomed = rows[keep:] if len(rows) > keep else []
+    for p in doomed:
+        try:
+            db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
+            db.delete(p)
+        except Exception:
+            pass
+    return len(doomed)
+
 
 def _append_log(run_id: str, level: str, message: str) -> None:
     # scan_logs.run_id — NOT NULL, а кроновые джобы (daily/smart/weekly) ставятся
@@ -2254,6 +2286,13 @@ def daily_per_user(*args, **kwargs):
                         pass
                     for pos, tid in enumerate(tids):
                         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+                    # ретеншн: оставляем последние DAILY_KEEP, старые сносим
+                    try:
+                        _pruned = _prune_old_dailies(db, u.server_id, u.id)
+                        if _pruned:
+                            _append_log(run_id, "info", f"Daily {u.username}: удалено старых: {_pruned}")
+                    except Exception:
+                        pass
                     ok += 1
                     _new_pid = str(p.id)
                 # авто-пуш в Navidrome за тумблером (тихо, best-effort)
@@ -2289,6 +2328,11 @@ def daily_per_user(*args, **kwargs):
                 res = cold_start_playlist(str(server.id), n=30)
                 for pos, tid in enumerate(res.get("tracks") or []):
                     db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+                # ретеншн и для глобального daily (без юзеров)
+                try:
+                    _prune_old_dailies(db, server.id, None)
+                except Exception:
+                    pass
                 ok = 1
                 _glob_pid = str(p.id)
             # Пушили per-user ветку, а глобальный daily — нет: при пустом списке

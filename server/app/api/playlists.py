@@ -58,6 +58,32 @@ def _auto_push(db: Session, playlist_id: str) -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
 
+# Ретеншн Daily: храним последние 7 на юзера, старые с прошедшими датами сносим.
+DAILY_KEEP = 7
+
+
+def _prune_old_dailies(db: Session, server_id: str, owner_id: str | None, keep: int = DAILY_KEEP) -> int:
+    """Удалить старые KumaFlow Daily сверх keep. Best-effort, не валит генерацию."""
+    try:
+        rows = db.query(Playlist).filter(
+            Playlist.is_auto_generated.is_(True),
+            Playlist.server_id == str(server_id),
+            Playlist.name.like("KumaFlow Daily%"),
+        ).all()
+        want = None if owner_id is None else str(owner_id)
+        rows = [p for p in rows if (None if p.owner_user_id is None else str(p.owner_user_id)) == want]
+        def _key(p):
+            return (p.generated_for_date is not None, str(p.generated_for_date or ""), str(getattr(p, "created_at", None) or ""))
+        rows.sort(key=_key, reverse=True)
+        doomed = rows[keep:] if len(rows) > keep else []
+        for p in doomed:
+            db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).delete()
+            db.delete(p)
+        return len(doomed)
+    except Exception:
+        return 0
+
+
 def _to_dict(p: Playlist, db: Session, owners: dict[str, str] | None = None) -> dict:
     count = (
         db.query(PlaylistTrack).filter(PlaylistTrack.playlist_id == p.id).count()
@@ -301,6 +327,7 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
             ids = res.get("ids") or []
         for pos, tid in enumerate(ids):
             db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+        _prune_old_dailies(db, server.id, resolved_user)
         db.commit()
         push = _auto_push(db, str(p.id))
         return {"queued": True, "playlist_id": str(p.id), "tracks": len(ids), "name": res.get("name"), "comment": res.get("comment"), "from_fallback": res.get("from_fallback"), "mode": "ai",
@@ -344,6 +371,7 @@ def generate_daily(payload: GenerateIn | None = None, request: Request = None, d
         tids = result["tracks"]
     for pos, tid in enumerate(tids):
         db.add(PlaylistTrack(playlist_id=p.id, track_id=tid, position=pos))
+    _prune_old_dailies(db, server.id, resolved_user)
     db.commit()
     push = _auto_push(db, str(p.id))
     return {
