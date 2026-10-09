@@ -716,7 +716,7 @@ def wave_seed_start(payload: dict, request: Request, db: Session = Depends(get_d
         track_ref = str((payload or {}).get('track_id') or '').strip()
         if not track_ref:
             raise HTTPException(400, 'track_id required')
-        res = _sr.track_radio(str(u.id), track_ref)
+        res = _sr.track_radio(db, str(u.id), track_ref)
         ref = res.get('seed_track_id') or track_ref
     else:
         raise HTTPException(400, 'kind: artist|track')

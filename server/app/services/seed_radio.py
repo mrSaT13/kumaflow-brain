@@ -5,12 +5,96 @@ from __future__ import annotations
 Идея: Navidrome умеет похожих (`getSimilarSongs2` — узко, только свой каталог
 и Last.fm), мозг — широко (жанры, кластеры, CLAP/аудио-косинус, коллаборативка,
 скип-риск, UCB). Объединяем: серверные похожие идут ДОБОРОМ в пул кандидатов,
-а ранжирует общий скоринг волны (`score_candidates`) от центроида сида.
-Сид записывается в `wave_seeds` — главная показывает капсулу, мозг отдаёт сид
-и докручивает ту же волну, а не начинает новую.
+а ранжирует общий скоринг волны (`score_candidates`) от центроида сида — так
+теперь работают ОБЕ ветки, и по треку, и по артисту. Сид записывается в
+`wave_seeds` — главная показывает капсулу, мозг отдаёт сид и докручивает ту же
+волну, а не начинает новую.
+
+Имя артиста сравнивается нормализованно (`artist_names.norm_name`): в PostgreSQL
+`=` регистрозависим, и без этого «Eminem»/«eminem» давали пустую волну.
 """
 
 from sqlalchemy import func
+
+
+def _log_warning(msg: str, *args) -> None:
+    try:
+        from app.core.logging import get_logger as _gl
+
+        _gl("wave").warning(msg, *args)
+    except Exception:
+        pass
+
+
+def _log_info(msg: str, *args) -> None:
+    try:
+        from app.core.logging import get_logger as _gl
+
+        _gl("wave").info(msg, *args)
+    except Exception:
+        pass
+
+
+def _filter_dislikes_bans(db, user_id: str, pool: list[str]) -> list[str]:
+    """Выкинуть дизлайки и забаненных артистов из пула.
+
+    Общая часть для обоих радио: раньше она жила только в artist_radio, и волна
+    по треку могла подсунуть забаненного артиста.
+    """
+    from app.db.models import ArtistBan, Track, TrackDislike
+
+    try:
+        dis = {str(r[0]) for r in
+               db.query(TrackDislike.track_id).filter_by(user_id=user_id).all()}
+        bans = {str(r.artist_name or "").lower() for r in
+                db.query(ArtistBan).filter_by(user_id=user_id).all()}
+        try:
+            from app.services.artist_names import load_bans as _lb
+
+            _bn, _bi = _lb(db, user_id)
+            bans |= {b.lower() for b in _bn}
+            ban_ids = set(_bi)
+        except Exception:
+            ban_ids = set()
+    except Exception:
+        return list(pool)
+    if not (dis or bans or ban_ids):
+        return list(pool)
+    by_id = {str(t.id): t for t in
+             db.query(Track).filter(Track.id.in_(pool[:2000])).all()}
+    keep: list[str] = []
+    for tid in pool:
+        if tid in dis:
+            continue
+        bt = by_id.get(tid)
+        a = str((bt.artist_name if bt else "") or "").lower()
+        if a and a in bans:
+            continue
+        aid = str((bt.artist_external_id if bt else "") or "")
+        if aid and aid in ban_ids:
+            continue
+        keep.append(tid)
+    return keep
+
+
+def _seed_cluster_pool(db, seed_id: str, limit: int = 400) -> list[str]:
+    """Резервный пул: треки того же кластера, что и сид.
+
+    Нужен, когда cold_start не дал кандидатов (например, у сида нет
+    проанализированных фич — тогда seed_vec=None и волна по треку вырождалась
+    в общую холодную волну, а иногда и в пару треков).
+    """
+    from app.db.models import TrackCluster
+
+    cid = db.query(TrackCluster.cluster_id).filter(
+        TrackCluster.track_id == seed_id
+    ).first()
+    if not cid:
+        return []
+    return [str(r[0]) for r in
+            db.query(TrackCluster.track_id).filter(
+                TrackCluster.cluster_id == cid[0]
+            ).limit(limit).all()]
 
 
 def _playable_query(db, *entities):
@@ -30,11 +114,31 @@ def _playable_query(db, *entities):
 
 
 def _artist_top_tracks(db, artist_name: str, limit: int = 200) -> list:
-    from app.db.models import Track
+    """Треки артиста: сперва точное имя, при промахе — регистронезависимо.
 
+    Раньше был только `Track.artist_name == artist_name`. В PostgreSQL `=` для
+    текста регистрозависим, поэтому клиент, приславший "eminem" к "Eminem" (или
+    отличающийся пробелами), получал пустой результат, а эндпоинт отдавал 404
+    «artist not in library» — то есть «волна по артисту не работает».
+    Нормализатор в проекте уже есть, `artist_names.norm_name`.
+    """
+    from app.db.models import Track
+    from app.services.artist_names import norm_name
+
+    q = _playable_query(db, Track)
+    rows = (
+        q.filter(Track.artist_name == artist_name)
+        .order_by(Track.play_count.desc().nullslast())
+        .limit(limit)
+        .all()
+    )
+    if rows or not (artist_name or "").strip():
+        return rows
+    want = norm_name(artist_name)
+    if not want:
+        return []
     return (
-        _playable_query(db, Track)
-        .filter(Track.artist_name == artist_name)
+        q.filter(func.lower(func.trim(Track.artist_name)) == want)
         .order_by(Track.play_count.desc().nullslast())
         .limit(limit)
         .all()
@@ -50,10 +154,16 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     from collections import Counter
 
     from app.db.models import Track, TrackCluster
+    from app.services.artist_names import norm_name
+
+    # Имя артиста сравниваем нормализованно (см. _artist_top_tracks): иначе
+    # «Eminem» от «eminem» терял и жанры, и свои треки, и похожих артистов.
+    self_norm = norm_name(artist_name)
+    cmp_col = func.lower(func.trim(Track.artist_name))
 
     grows = (
         db.query(Track.genre, func.count(Track.id))
-        .filter(Track.artist_name == artist_name, Track.genre.isnot(None))
+        .filter(cmp_col == self_norm, Track.genre.isnot(None))
         .group_by(Track.genre)
         .order_by(func.count(Track.id).desc())
         .limit(3)
@@ -62,7 +172,7 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     genres = [g for g, _ in grows]
     own_ids = [
         str(r[0])
-        for r in db.query(Track.id).filter(Track.artist_name == artist_name).limit(2000).all()
+        for r in db.query(Track.id).filter(cmp_col == self_norm).limit(2000).all()
     ]
     cluster_ids: list[int] = []
     if own_ids:
@@ -85,7 +195,7 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
             .all()
         }
     cand_q = db.query(Track.artist_name, Track.genre, Track.id).filter(
-        Track.artist_name.isnot(None), Track.artist_name != artist_name
+        Track.artist_name.isnot(None), cmp_col != self_norm
     )
     if genres:
         cand_q = cand_q.filter(Track.genre.in_(genres))
@@ -100,40 +210,50 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     return [n for n, _ in scores.most_common(limit)]
 
 
-def track_radio(user_id: str, track_ref: str, n: int = 30) -> dict:
-    """Очередь «волна по треку»: центроид трека + кластер + сессионные ассоциации.
+def track_radio(db, user_id: str, track_ref: str, n: int = 30) -> dict:
+    """Очередь «волна по треку»: центроид трека + кластер + скоринг волны.
 
-    Движок — `cold_start_playlist(seed_track_id)`: audio/CLAP-косинус к сиду,
-    бонус своему кластеру, новизна, дизлайки/баны мимо. Серверные похожие
-    (getSimilarSongs2 по external_id сида) идут добором в пул, как у артиста.
-    Возвращает {tracks, label, seed_track_id, server_used}.
+    Раньше движком был `cold_start_playlist(seed_track_id)`, и ранжирования волны
+    не было вовсе — при том, что доктрина модуля обещает «ранжирует общий скоринг
+    волны (score_candidates) от центроида сида». Теперь как у артиста: кандидаты
+    (холодный старт + серверные похожие) → дизлайки/баны мимо → score_candidates
+    → энергетическая арка на стороне эндпоинта.
+
+    Пул кандидатов расширен, а не обрезан: раньше тут был ровно один вызов
+    cold_start на n*2, и если он падал — тихо возвращалось несколько треков без
+    объяснения. Теперь ошибка логируется, и есть запасной пул.
+
+    Возвращает {tracks, label, seed_track_id, server_used, pool_size}.
     """
-    from app.db.database import session_scope
     from app.services.track_resolve import get_track as _gt
 
     ref = (track_ref or "").strip()
     if not ref:
         return {"tracks": [], "error": "empty track"}
-    with session_scope() as db:
-        t = _gt(db, ref)
-        if t is None:
-            return {"tracks": [], "error": "track not found"}
-        seed_id = str(t.id)
-        seed_ext = str(t.external_id or "")
-        server_id = str(t.server_id)
-        artist = str(t.artist_name or "")
-        title = str(t.title or "")
+    t = _gt(db, ref)
+    if t is None:
+        return {"tracks": [], "error": "track not found"}
+    seed_id = str(t.id)
+    seed_ext = str(t.external_id or "")
+    server_id = str(t.server_id)
+    artist = str(t.artist_name or "")
+    title = str(t.title or "")
     label = f"{artist} — {title}".strip(" —") or title or seed_id
 
-    from app.services.ml import cold_start_playlist as _cold
-
+    base: list[str] = []
+    cold_error = ""
     try:
+        from app.services.ml import cold_start_playlist as _cold
+
+        # cold_start_playlist держит свою сессию — из db вызывающего не читаем.
         res = _cold(server_id, n=n * 2, user_id=user_id, seed_track_id=seed_id)
         base = [str(x) for x in (res.get("tracks") or [])]
-    except Exception:
-        base = []
+    except Exception as e:  # noqa: BLE001 — раньше это просто роняло пул в []
+        cold_error = str(e)
+        _log_warning("track_radio: cold_start упал, пойдём на резервный пул: {}", e)
     if seed_id in base:
         base.remove(seed_id)
+
     # Серверный добор: похожие на сид → наши id (мозг шире, сервер уже).
     server_used = False
     if seed_ext and not seed_ext.startswith(("disk:", "demo-")):
@@ -141,10 +261,52 @@ def track_radio(user_id: str, track_ref: str, n: int = 30) -> dict:
         for tid in srv_ids:
             if tid != seed_id and tid not in base:
                 base.append(tid)
-    # Сид первым номером — энергетический мостик (как просил: трек-ядро впереди).
-    tracks = [seed_id] + [t for t in base if t != seed_id]
+
+    # Резервный пул, если основной путь не дал почти ничего. Без этого «волна
+    # по треку» могла вернуть 3–10 треков вместо 30, и непонятно было почему.
+    if len(base) < n:
+        try:
+            for tid in _seed_cluster_pool(db, seed_id):
+                if tid != seed_id and tid not in base:
+                    base.append(tid)
+        except Exception as e:  # noqa: BLE001
+            _log_warning("track_radio: резервный пул по кластеру не собрался: {}", e)
+
+    # Дизлайки/баны — мимо. Раньше это делал только artist_radio, и волна по
+    # треку могла подсунуть забаненного артиста.
+    base = _filter_dislikes_bans(db, user_id, base)
+    base = [t_ for t_ in base if t_ != seed_id][: max(n * 3, n)]
+
+    # Общий скоринг волны от центроида сида — как у артиста.
+    ordered = base
+    try:
+        from app.services import wave as _wave
+        from app.services import wave_settings as _wset
+
+        settings = _wset.effective_settings(db, user_id, None)
+        ranked = _wave.score_candidates(
+            db, user_id, base, [seed_id], settings,
+            jitter_seed=f"{user_id}:seed:{seed_id}",
+        )
+        got = [str(r.get("track_id") or r.get("id")) for r in ranked]
+        got = [x for x in got if x]
+        # Скоринг не должен выкинуть то, чего он не видел: пул уже собран.
+        for tid in base:
+            if tid not in got:
+                got.append(tid)
+        ordered = got[: max(n * 3, n)]
+    except Exception as e:  # noqa: BLE001
+        _log_warning("track_radio: score_candidates упал, отдаю пул как есть: {}", e)
+
+    _log_info(
+        "track_radio: сид={} кандидатов={} итог={} cold_error={}",
+        label, len(base), min(len(ordered), max(n, 1)), cold_error or "-",
+    )
+    # Сид первым номером — энергетический мостик (трек-ядро впереди).
+    tracks = [seed_id] + [t_ for t_ in ordered if t_ != seed_id]
     return {"tracks": tracks[: max(n, 1)], "label": label,
-            "seed_track_id": seed_id, "server_used": server_used}
+            "seed_track_id": seed_id, "server_used": server_used,
+            "pool_size": len(base)}
 
 
 def _tuning_int(db, user_id: str | None, key: str, default: int,
@@ -196,13 +358,20 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
     Возвращает {tracks, seed_ids, similar_artists, server_used, label}.
     Пустой tracks — артиста нет в играбельной библиотеке.
     """
-    from app.db.models import ArtistBan, Track, TrackDislike
+    from app.db.models import Track
 
     artist_name = (artist_name or "").strip()
     if not artist_name:
         return {"tracks": [], "error": "empty artist"}
     own = _artist_top_tracks(db, artist_name)
     if not own:
+        # Раньше здесь был молчаливый 404 «artist not in library» — клиенту
+        # казалось, что волна по артисту не работает. Чаще всего артист просто
+        # не совпадал по регистру/пробелам. Теперь причина в логе и в теле.
+        _log_warning(
+            "artist_radio: «{}» не найден в играбельной библиотеке "
+            "(проверь регистр/пробелы в имени)", artist_name,
+        )
         return {"tracks": [], "error": "artist not in library"}
     seed_ids = [str(t.id) for t in own[:5]]
 
@@ -235,35 +404,9 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
                 pool.append(tid)
     pool = pool[:1500]
 
-    # Дизлайки/баны — мимо очереди (как cold_start).
-    # Баны: имена (как раньше) + Navidrome-ID (десктопные).
-    try:
-        dis = {str(r[0]) for r in db.query(TrackDislike.track_id).filter_by(user_id=user_id).all()}
-        bans = {str(r.artist_name or "").lower() for r in db.query(ArtistBan).filter_by(user_id=user_id).all()}
-        try:
-            from app.services.artist_names import load_bans as _lb
-            _bn, _bi = _lb(db, user_id)
-            bans |= {b.lower() for b in _bn}
-            ban_ids = set(_bi)
-        except Exception:
-            ban_ids = set()
-    except Exception:
-        dis, bans, ban_ids = set(), set(), set()
-    if dis or bans or ban_ids:
-        keep_pool = []
-        by_id = {str(t.id): t for t in db.query(Track).filter(Track.id.in_(pool[:2000])).all()}
-        for tid in pool:
-            if tid in dis:
-                continue
-            _bt = by_id.get(tid)
-            a = str((_bt.artist_name if _bt else "") or "").lower()
-            if a and a in bans:
-                continue
-            _aid = str((_bt.artist_external_id if _bt else "") or "")
-            if _aid and _aid in ban_ids:
-                continue
-            keep_pool.append(tid)
-        pool = keep_pool
+    # Дизлайки/баны — мимо очереди (как cold_start). Общая реализация с
+    # волной по треку: правило не должно расходиться между ветками.
+    pool = _filter_dislikes_bans(db, user_id, pool)
 
     from app.services import wave as _wave
 
