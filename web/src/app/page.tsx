@@ -10,7 +10,11 @@ import { useIsAdmin } from "@/lib/useIsAdmin";
 import { fmtNumber, PHASE_LABELS, STATUS_LABELS, STATUS_TONE, fmtDate } from "@/lib/format";
 
 export default function HomePage() {
-  const { data: overview } = useSWR("/api/library/overview", () => api.overview());
+  // Счётчики обзора — единственный виджет, который меняется при сканировании.
+  // Раньше висел без интервала: прогресс задачи шёл в реальном времени, а
+  // «Треков / Альбомов / Артистов» и процент проанализированных стояли на месте
+  // до перезагрузки страницы или возврата на вкладку.
+  const { data: overview } = useSWR("/api/library/overview", () => api.overview(), { refreshInterval: 30000 });
   const { data: runs } = useSWR("/api/scan/runs", () => api.listRuns(), { refreshInterval: 3000 });
   const { data: current } = useSWR("/api/scan/runs/current", () => api.currentRun(), {
     refreshInterval: 2000,

@@ -53,6 +53,12 @@ export default function LibraryPage() {
   }, [genre, mood, source]);
 
   const offset = page * PAGE_SIZE;
+
+  // Активная задача спрашивается ПЕРЕД списком треков: от неё теперь зависит
+  // частота опроса (см. refreshInterval ниже). Порядок хуков это позволяет.
+  const { data: current } = useSWR("/api/scan/runs/current", () => api.currentRun(), { refreshInterval: 2000 });
+  const isRunning = current?.current?.status === "running" || current?.current?.status === "queued";
+
   const { data, isLoading, mutate } = useSWR(
     ["tracks", qDebounced, genre, mood, source, page],
     () =>
@@ -64,22 +70,30 @@ export default function LibraryPage() {
         limit: PAGE_SIZE,
         offset,
       }),
-    { keepPreviousData: true },
+    {
+      keepPreviousData: true,
+      // Пока идёт скан/анализ — список наполняется, и без опроса новые треки
+      // появлялись бы только после ручного обновления страницы. В покое не
+      // опрашиваем совсем, чтобы не жечь БД на пустом месте.
+      refreshInterval: isRunning ? 10000 : 0,
+    },
   );
-  const { data: genresData } = useSWR("/api/library/genres", () => api.genres());
+  // Жанры, как и настроения ниже, должны подхватывать новые после скана:
+  // раньше здесь интервала не было, поэтому в фильтре оставался старый список.
+  const { data: genresData } = useSWR("/api/library/genres", () => api.genres(), { refreshInterval: 60000 });
   // Список настроений обновляется сам: TTL-кэш 120с на бэке + поллинг тут —
   // новые настроения после скана появятся без перезагрузки страницы.
   const { data: moodsData } = useSWR("/api/library/moods", () => api.moods(), { refreshInterval: 60000 });
   const { data: media } = useSWR("/api/settings/media-server", () => api.getMediaServer());
-  const { data: overview } = useSWR("/api/library/overview", () => api.overview());
-  const { data: health } = useSWR("/api/library/health", () => api.libraryHealth());
+  // Счётчики обзора — единственное, что меняется при сканировании. Раньше
+  // оба висели без интервала: прогресс шёл, а «Треков: N» стоял на месте.
+  const { data: overview } = useSWR("/api/library/overview", () => api.overview(), { refreshInterval: 30000 });
+  const { data: health } = useSWR("/api/library/health", () => api.libraryHealth(), { refreshInterval: 30000 });
 
   const isReal = Boolean(media?.url && media.url !== "http://localhost" && media.url !== "https://localhost" && media.url.trim() !== "");
   const [busy, setBusy] = useState(false);
   // POST /scan/library и все dedup-мутации — require_admin, отчёт виден всем.
   const { isAdmin } = useIsAdmin();
-  const { data: current } = useSWR("/api/scan/runs/current", () => api.currentRun(), { refreshInterval: 2000 });
-  const isRunning = current?.current?.status === "running" || current?.current?.status === "queued";
 
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));

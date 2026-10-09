@@ -16,6 +16,8 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import func
+
 
 def _tun_all(db, user_id: str | None = None) -> dict:
     """Эффективный rec_tuning для юзера (дефолты <- глобал <- per-user).
@@ -1889,14 +1891,22 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             pass
 
     # Пул кандидатов: всё кроме сыгранного/дизлайков/банов, капом 2000.
-    # Без IN-чанков: берём с запасом и режем в питоне (старый цикл
-    # исключал в SQL только первый чанк skip и всё равно дофильтровывал).
-    #
     # Только то, что реально сыграет плеер. Локальные файлы (disk:/demo-) в
     # плейлист не попадают: у них нет Navidrome-id, поэтому при выгрузке они
     # молча выбрасываются и очередь на выходе оказывается короче запрошенного.
     # В демо-режиме фильтр выключается сам (playable.has_navidrome) — там диск
     # и есть единственная библиотека.
+    #
+    # ВАЖНО, почему тут ORDER BY random() (было: limit без порядка):
+    # при limit без ORDER BY SQLite отдаёт ОДИН И ТОТ ЖЕ кусок при каждом
+    # запросе. На библиотеке в 79k это 2000 из 79000 — всегда одни и те же
+    # треки, остальные мозг не видел никогда и не увидит. Случайный порядок
+    # даёт разную выборку на каждый вызов: библиотека изучается целиком, и
+    # шанс, что понравившийся трек попадёт в выдачу, перестаёт зависеть от
+    # того, где он лежит в базе.
+    #
+    # Сортировка идёт в БД (один проход, дешевле, чем тянуть 79k id в питон).
+    # Подборка по вкусу — это _score_pool ниже; тут только честный вход.
     q = db.query(Track.id)
     try:
         from app.services import playable as _pl
@@ -1910,7 +1920,22 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         except Exception:
             pass
     skip_n = len(played | dis)
-    cand: list[str] = [str(r[0]) for r in q.limit(2000 + skip_n).all()]
+    cand: list[str] = []
+    try:
+        cand = [str(r[0]) for r in
+                q.order_by(func.random()).limit(2000 + skip_n).all()]
+    except Exception as e:  # noqa: BLE001
+        # Нет random() (старый SQLite/другая БД) — падаем на прежнее поведение
+        # с честной пометкой в лог: это тихо ломает разнообразие выдачи.
+        try:
+            from app.core.logging import get_logger as _gl
+
+            _gl("wave").warning(
+                "random() unavailable ({}), пул снова фиксированный — "
+                "на большой библиотеке это 1% треков без ротации", e)
+        except Exception:
+            pass
+        cand = [str(r[0]) for r in q.limit(2000 + skip_n).all()]
     cand = [c for c in cand if c not in played and c not in dis][:2000]
     # Гарантируем, что коллаборативные треки в пуле есть: если библиотека
     # больше 2000 и limit без ORDER BY отсёк нужные строки, добавляем их явно.
