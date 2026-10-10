@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "KumaFlow Brain"
-    app_version: str = "0.3.1"
+    app_version: str = "0.3.2"
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
     # Часовой пояс «домашнего» времени: границы суток для daily-плейлистов,

@@ -89,6 +89,37 @@ def _live_put(user_id: str, entry: dict, device: str = 'default') -> None:
         pass
 
 
+def _live_patch(user_id: str, patch: dict, device: str = 'default') -> None:
+    """Дописать поля в слот, не затирая остальное.
+
+    Нужно, чтобы wave_continue мог пометить слот как «играет волна»: там нет
+    очереди, а обычный _live_put заменяет запись целиком и снёс бы уже
+    опубликованную очередь. Пустые значения не пишем — старый клиент не
+    присылает ничего, и запись не должна терять накопленное.
+    """
+    slot = _norm_device(device)
+    cur: dict = {}
+    try:
+        got = _live_get(user_id, slot)
+        if isinstance(got, dict):
+            cur = dict(got)
+    except Exception:
+        cur = {}
+    changed = False
+    for k, v in (patch or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        if isinstance(v, dict) and not v:
+            continue
+        if cur.get(k) != v:
+            cur[k] = v
+            changed = True
+    if changed:
+        _live_put(user_id, cur, slot)
+
+
 def _live_pop(user_id: str, device: str = 'default') -> None:
     _LIVE.pop(f"{user_id}\x00{_norm_device(device)}", None)
     try:
@@ -205,6 +236,10 @@ def wave_continue(payload: dict, request: Request, db: Session = Depends(get_db)
         raise HTTPException(400, 'user_id required')
     check_body_user(getattr(request.state, "brain_token", None), user_id)
     u = _require_user(db, user_id)
+    # Какой слот запросил волну. Без этого мозг не может пометить слот, и
+    # принимающее устройство не понимает, что продолжает Мою волну, а не
+    # пользовательский плейлист.
+    dev = _norm_device((payload or {}).get('device'))
     try:
         # Общие пилюли волны: чего запрос не прислал — доберём из stored
         # (настроил на мобильном — ПК подхватит). Явный ключ запроса
@@ -213,17 +248,29 @@ def wave_continue(payload: dict, request: Request, db: Session = Depends(get_db)
 
         _eff = _wset.effective_settings(db, str(u.id),
                                         (payload or {}).get('settings'))
-        return {'ok': True, 'user_id': str(u.id),
-                **_wave.wave_continue(
-                    db, str(u.id),
-                    queue=list((payload or {}).get('queue') or []),
-                    current_track_id=(payload or {}).get('current_track_id'),
-                    count=int((payload or {}).get('count') or 20),
-                    settings=_eff,
-                    exclude_ids=list((payload or {}).get('exclude_ids') or []),
-                    recent_events=list((payload or {}).get('recent_events') or []),
-                    ratings_delta=list((payload or {}).get('ratings_delta') or []),
-                )}
+        result = _wave.wave_continue(
+            db, str(u.id),
+            queue=list((payload or {}).get('queue') or []),
+            current_track_id=(payload or {}).get('current_track_id'),
+            count=int((payload or {}).get('count') or 20),
+            settings=_eff,
+            exclude_ids=list((payload or {}).get('exclude_ids') or []),
+            recent_events=list((payload or {}).get('recent_events') or []),
+            ratings_delta=list((payload or {}).get('ratings_delta') or []),
+        )
+        # result может быть None — раньше он сразу шлёлся в **, и None бы
+        # уронил бы ответ. Теперь проверяем до распаковки.
+        result = result or {}
+        # Помечаем слот: с этого момента очередь, которую он опубликует, —
+        # Моя волна с конкретными пилюлями. Настройки отдаём словарём, а не
+        # строкой: подписи формирует клиент своими же waveLabel.
+        if dev and result.get('tracks'):
+            _live_patch(str(u.id), {
+                'is_wave': True,
+                'playlist_name': 'Моя волна',
+                'wave_settings': dict(_eff) if isinstance(_eff, dict) else None,
+            }, dev)
+        return {'ok': True, 'user_id': str(u.id), **result}
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -342,12 +389,28 @@ def wave_publish(payload: dict, request: Request, db: Session = Depends(get_db))
             return max(0, int(v)) if v is not None else None
         except (TypeError, ValueError):
             return None
+    pri = (payload or {})
+    prev = _live_get(str(u.id), slot) or {}
+    prev_name = prev.get('playlist_name')
+    prev_set = prev.get('wave_settings')
+    cli_name = str(pri.get('playlist_name') or '').strip()[:120]
+    cli_set = pri.get('wave_settings')
+    cli_set = cli_set if isinstance(cli_set, dict) and cli_set else None
     _live_put(str(u.id), {'queue': queue,
                           'current_track_id': str(cur) if cur else None,
-                          'position_sec': _int((payload or {}).get('position_sec')),
-                          'duration_sec': _int((payload or {}).get('duration_sec')),
-                          'device': str((payload or {}).get('device') or '')[:64] or None,
-                          'paused': bool((payload or {}).get('paused'))},
+                          'position_sec': _int(pri.get('position_sec')),
+                          'duration_sec': _int(pri.get('duration_sec')),
+                          'device': str(pri.get('device') or '')[:64] or None,
+                          'paused': bool(pri.get('paused')),
+                          # Природа ленты. Пометка мозга (wave_continue)
+                          # побеждает: старый клиент всегда присылает
+                          # is_wave=false и иначе стёр бы её сам у себя.
+                          'is_wave': bool(pri.get('is_wave')) or bool(prev.get('is_wave')),
+                          'playlist_name': cli_name or prev_name,
+                          'wave_settings': cli_set or prev_set,
+                          # Сид радио (трек/артист) — иначе принимающее
+                          # устройство продолжит ленту по вкусу, а не по сиду.
+                          'radio_seed': str(pri.get('radio_seed') or '').strip()[:160] or None},
               device=slot)
     return {'ok': True, 'user_id': str(u.id), 'queued': len(queue), 'device_id': slot}
 
@@ -380,7 +443,9 @@ def _devices_summary(user_id: str, db=None) -> list[dict]:
                     'renamed': slot in names,
                     'age_sec': int(age),
                     'queue_len': len(q),
-                    'paused': bool(e.get('paused'))})
+                    'paused': bool(e.get('paused')),
+                    'is_wave': bool(e.get('is_wave')),
+                    'playlist_name': e.get('playlist_name') or None})
     return out
 
 
@@ -455,6 +520,14 @@ def wave_resume(user_id: str, request: Request, device: str | None = None,
         'device_id': slot,
         'devices': devices,
         'paused': bool(entry.get('paused')),
+        # Природа ленты. Раньше отдавалась только очередь, и принимающее
+        # устройство не знало, волна это или пользовательский плейлист:
+        # имя обрезалось до «Продолжить · Телефон», isMyWave давал false,
+        # шапка писала «Моя коллекция».
+        'is_wave': bool(entry.get('is_wave')),
+        'playlist_name': entry.get('playlist_name'),
+        'wave_settings': entry.get('wave_settings') or None,
+        'radio_seed': entry.get('radio_seed') or None,
         'track': ({
             'track_id': str(track.id),
             'title': track.title,
