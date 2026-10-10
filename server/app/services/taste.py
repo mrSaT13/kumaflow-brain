@@ -120,6 +120,17 @@ def context_of(hour: int | None, dow: int | None) -> str:
 def action_reward(action: str, pos: int | None) -> float:
     if action == "replay":
         return 15.0
+    # Явные оценки. Раньше для like/dislike не было ветки вообще — они
+    # проваливались в return 0.0, то есть самый явный сигнал пользователя
+    # («нравится» / «не нравится») давал бандиту ровно ноль и в ранжировании
+    # не участвовал. Отсюда «ЛАЙК В ВОЛНЕ 2.1%» при живых лайках.
+    # Шкала: лайк выше обычного дослуха (5.0), но ниже переигрывания (15.0);
+    # дизлайк — явно сильнее скипа (-5.0), но не настолько, чтобы одно
+    # нажатие перебивало всю историю трека.
+    if action == "like":
+        return 10.0
+    if action == "dislike":
+        return -8.0
     if action == "seek_back":
         return 8.0
     if action == "complete":
@@ -177,6 +188,12 @@ def update_taste_signals(db, user_id: str, track, action: str,
                 if action in ("play", "complete", "replay"):
                     row.plays = int(row.plays or 0) + 1
                     row.last_played = now
+                elif action == "like":
+                    # Поле объявлено в модели и описано в её докстринге
+                    # («play/complete/replay — plays, like — likes, skip —
+                    # skips»), но нигде не писалось: создавалось как likes=0
+                    # и оставалось нулём навсегда.
+                    row.likes = int(row.likes or 0) + 1
                 elif action == "skip":
                     row.skips = int(row.skips or 0) + 1
             except Exception:
