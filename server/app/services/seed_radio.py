@@ -352,6 +352,63 @@ def _server_seed_tracks_db(seed_external_id: str) -> tuple[list[str], bool]:
         return _server_seed_tracks(db, seed_external_id)
 
 
+def _interleave_by_artist(ordered: list[str], artist_of: dict[str, str],
+                          seed_artist: str = "", n: int = 30,
+                          cap: int = 3) -> list[str]:
+    """Круговая перетасовка очереди по артистам. Сид-артист — первым.
+
+    Зачем: плоский скоринг по пулу (сид + похожие) НЕ даёт радио. Сиды —
+    это треки самого артиста, поэтому треки похожих к ним заведомо ближе по
+    звуку и выигрывают в audio/cluster. На выходе шла подборка из 2-3
+    артистов по кругу, а штраф за повтор (0.05/0.10/0.15) слишком мал,
+    чтобы это остановить.
+
+    Тут порядок не доверяется скорингу:
+      * корзина сид-артиста идёт первой — радио начинается с него;
+      * дальше round-robin по остальным корзинам в порядке их лучшего трека;
+      * не больше `cap` треков от одного артиста;
+      * кап ослабляется на ходу, если артистов мало и очередь не набралась —
+        но НАКОПЛИВАЕТСЯ в тот же список, а не начинается заново (иначе
+        ранее выбранное терялось и на выходе был обрезок).
+    """
+    from collections import Counter, defaultdict
+
+    buckets: dict[str, list[str]] = defaultdict(list)
+    for tid in ordered:
+        a = (artist_of.get(tid) or "").strip().lower()
+        buckets[a].append(tid)
+
+    keys = list(buckets.keys())
+    seed_key = ""
+    if seed_artist:
+        want = seed_artist.strip().lower()
+        seed_key = next((k for k in keys if k == want), "")
+    if seed_key:
+        keys = [seed_key] + [k for k in keys if k != seed_key]
+
+    target = min(n, len(ordered))
+    ceiling = max(len(ordered), cap)  # выше кап не нужен — всё равно всё
+    out: list[str] = []
+    taken: Counter = Counter()
+    per = max(1, cap)
+    while len(out) < target:
+        progressed = False
+        for k in keys:
+            if len(out) >= target:
+                break
+            b = buckets[k]
+            if not b or taken[k] >= per:
+                continue
+            out.append(b.pop(0))
+            taken[k] += 1
+            progressed = True
+        if not progressed:
+            if per >= ceiling:
+                break
+            per = min(per + 2, ceiling)
+    return out
+
+
 def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
     """Очередь «волна по артисту»: его треки (ядро) + похожие + серверные.
 
@@ -423,6 +480,18 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
     ordered = [str(r.get("track_id") or r.get("id")) for r in ranked[: max(n * 3, n)]]
     ordered = [t for t in ordered if t][:n]
 
+    # Мета заказанных треков — нужна артистам для перетасовки ниже.
+    artist_of: dict[str, str] = {}
+    for i in range(0, len(ordered), 500):
+        chunk = [t for t in ordered[i:i + 500] if t]
+        if not chunk:
+            continue
+        try:
+            for t in db.query(Track).filter(Track.id.in_(chunk)).all():
+                artist_of[str(t.id)] = str(t.artist_name or "")
+        except Exception:
+            continue
+
     # Энергетическая арка поверх (как daily/smart) — радио слушается волной.
     try:
         from app.services.orchestrator import create_energy_wave
@@ -431,6 +500,19 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
         waved = create_energy_wave(tracks)
         order = {str(t.id): i for i, t in enumerate(waved)}
         ordered = sorted(ordered, key=lambda tid: order.get(tid, 999))
+    except Exception:
+        pass
+
+    # Перетасовка по артистам — ПОСЛЕ дуги. Раньше её не было вовсе, и
+    # результат был «3 артиста по кругу»: сид-артист вытеснялся похожими
+    # (они ближе по звуку к его же сидам), а штраф за повтор 0.05/0.10/0.15
+    # не мог этому помешать. Дуга выравнивает энергию, круг удерживает
+    # разнообразие — по отдельности ни то, ни другое.
+    try:
+        _cap = _tuning_int(db, user_id, "radio_per_artist", 3, 1, 20)
+        ordered = _interleave_by_artist(
+            ordered, artist_of, seed_artist=artist_name, n=n, cap=_cap,
+        )
     except Exception:
         pass
     return {
