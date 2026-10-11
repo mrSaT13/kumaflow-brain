@@ -105,11 +105,20 @@ def server_now() -> datetime:
 
 
 def local_today():
-    """Дата «сегодня» в поясе сервера — граница суток для daily-плейлистов и крона."""
-    from datetime import date as _date
+    """Дата «сегодня» в поясе сервера — граница суток для daily-плейлистов и крона.
 
-    return _date.fromtimestamp(datetime.now(timezone.utc).timestamp(),
-                               tz=server_tz())
+    Раньше здесь было `date.fromtimestamp(ts, tz=server_tz())`, но параметра
+    `tz` у datetime.date нет вообще — он есть только у datetime.datetime.
+    Любой вызов падал с `TypeError: date.fromtimestamp() takes no keyword
+    arguments`, то есть молча был сломан весь код, считающий «сегодня»:
+    радио по артисту/треку (POST /api/wave/seed), генераторы ежедневных
+    плейлистов и rerank_pool. У rerank_pool это проглатывал except,
+    поэтому волна работала, а остальное падало в 500.
+
+    server_now() уже отдаёт aware-datetime в поясе сервера — .date() и есть
+    нужная дата.
+    """
+    return server_now().date()
 
 
 def local_hour() -> int:
