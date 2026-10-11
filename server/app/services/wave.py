@@ -85,15 +85,52 @@ def _weights(total_likes: int, tun: dict | None = None) -> dict[str, float]:
     return dict(pick)
 
 
-# Пресеты «Моя волна» (клиент шлёт русские пилюли или англ. коды).
-# Настроение: целевые диапазоны energy/valence/dance + родственные муд-лейблы.
+# Канонический словарь настроений. Три словаря в одном месте, потому что
+# раньше они не совпадали и волна ломалась:
+#   * пилюля в UI        -> «спокойное»  (род. падеж, как в подписи)
+#   * код пилюли плеера  -> 'calm'
+#   * муд-лейбл librosa   -> 'спокойный'  (TrackFeatures.mood_labels)
+# Старый код сравнивал код пилюли с муд-лейблом напрямую, поэтому
+# жёсткий mood-фильтр не срабатывал НИ РАЗУ: анализированные треки
+# выкидывались из пула целиком, и в «Спокойное» доезжало всё, что без
+# анализа. Любая форма -> один канонический код, дальше сравнения честные.
+MOOD_ALIASES: dict[str, str] = {
+    # пилюли UI (род. падеж)
+    'бодрое': 'energetic', 'энергичное': 'energetic', 'энергичный': 'energetic',
+    'весёлое': 'happy', 'веселое': 'happy', 'счастливое': 'happy',
+    'спокойное': 'calm', 'спокойный': 'calm',
+    'расслабленное': 'relaxed', 'расслабленный': 'relaxed',
+    'мирное': 'peaceful', 'мирный': 'peaceful',
+    'грустное': 'sad', 'грустный': 'sad', 'печальное': 'sad',
+    'меланхоличное': 'melancholic', 'меланхоличный': 'melancholic',
+    'тёмное': 'dark', 'темное': 'dark', 'тёмный': 'dark', 'темный': 'dark',
+    'агрессивное': 'aggressive', 'агрессивный': 'aggressive',
+    'танцевальное': 'dance', 'танцевальный': 'dance',
+    'мечтательное': 'dreamy', 'мечтательный': 'dreamy',
+    'тёплое': 'warm', 'теплое': 'warm', 'тёплый': 'warm', 'теплый': 'warm',
+    # синонимы кодов, которые уже могли прийти из веба/настроек
+    'relaxed': 'relaxed', 'peaceful': 'peaceful', 'excited': 'excited',
+    'upbeat': 'upbeat', 'angry': 'aggressive', 'dreamy': 'dreamy',
+    'warm': 'warm', 'dance': 'dance',
+}
+# Пресеты «Моя волна». Ключ — канонический код (см. norm_mood).
+# 'moods' — семейство муд-лейблов: один и тот же набор и для ctx-бонуса,
+# и для жёсткого mood-фильтра (раньше фильтр брал только 1-й лейбл трека
+# и сравнивал его с кодом пилюли — то есть не срабатывал никогда).
 MOOD_PRESETS: dict[str, dict] = {
-    'бодрое': {'moods': {'energetic', 'excited', 'happy'}, 'energy_min': 0.6, 'tempo_min': 110},
-    'весёлое': {'moods': {'happy', 'upbeat', 'energetic'}, 'valence_min': 0.55, 'dance_min': 0.5},
-    'спокойное': {'moods': {'calm', 'relaxed', 'peaceful'}, 'energy_max': 0.45, 'arousal_max': 0.45},
-    'грустное': {'moods': {'sad', 'melancholic', 'dark'}, 'valence_max': 0.45},
-    'тёмное': {'moods': {'dark', 'aggressive', 'melancholic'}, 'valence_max': 0.5},
-    'chill': {'moods': {'calm', 'relaxed'}, 'energy_max': 0.5},
+    'energetic': {'moods': {'energetic', 'excited', 'happy', 'dance'},
+                  'energy_min': 0.6, 'tempo_min': 110},
+    'happy': {'moods': {'happy', 'upbeat', 'energetic', 'dance'},
+              'valence_min': 0.55, 'dance_min': 0.5},
+    'calm': {'moods': {'calm', 'relaxed', 'peaceful', 'dreamy', 'warm'},
+             'energy_max': 0.45, 'arousal_max': 0.45, 'tempo_max': 120},
+    'sad': {'moods': {'sad', 'melancholic', 'dark'},
+            'valence_max': 0.45},
+    'dark': {'moods': {'dark', 'aggressive', 'melancholic'},
+             'valence_max': 0.5},
+    'chill': {'moods': {'calm', 'relaxed', 'dreamy'}, 'energy_max': 0.5},
+    'relaxed': {'moods': {'calm', 'relaxed', 'peaceful', 'dreamy'},
+                'energy_max': 0.5},
 }
 # Занятие: мягкие бонусы (не жёсткие фильтры — очередь не должна пустеть).
 # Ключи-коды — контракт с плеером (GET /api/wave/options отдаёт каталог).
@@ -116,6 +153,16 @@ ACTIVITY_ALIASES: dict[str, str] = {
     'тренируюсь': 'workout',
     'тренировка': 'workout',
     'засыпаю': 'sleep',
+}
+# Занятия, где пилюля — это не «настроение», а «темп»: мягкого ctx-бонуса
+# (+0.10) тут недостаточно, потому что энергия входит в скор с весом audio
+# 0.4 и спокойный трек просто не дотягивал до топа. Для них — жёсткий фильтр
+# по энергии/темпу, с тем же откатом, что у mood-фильтра.
+# Сознательно только «успокаивающие»: work/study остаются мягкими, иначе
+# фон для работы превращается в запрет.
+ACTIVITY_HARD: dict[str, dict] = {
+    'sleep': {'energy_max': 0.4, 'tempo_max': 110},
+    'rest': {'energy_max': 0.5, 'tempo_max': 125},
 }
 # Каталог для плеера (код — то, что плеер шлёт обратно в settings.activity).
 ACTIVITY_CATALOG: list[dict] = [
@@ -150,18 +197,22 @@ def _norm_activity(v: str | None) -> str | None:
     return ACTIVITY_ALIASES.get(s, s)
 
 
-def _norm_mood(v: str | None) -> str | None:
-    s = (v or '').strip().lower()
+def norm_mood(v: Any) -> str | None:
+    """Любая форма настроения -> канонический код ('спокойное'/'спокойный'/'calm').
+
+    Пустая/неизвестная -> как есть в нижнем регистре (пресета нет = без
+    бонусов, очередь не пустеет). Неизвестное НЕ отбрасываем, чтобы
+    новые лейблы анализатора не ломали волну.
+    """
+    s = str(v or '').strip().lower().replace('ё', 'е')
     if not s:
         return None
-    # русские пилюли -> англ. лейблы фичей
-    _ru = {'бодрое': 'energetic',
-           'весёлое': 'happy',
-           'веселое': 'happy', 'спокойное': 'calm', 'грустное': 'sad',
-           'тёмное': 'dark', 'темное': 'dark', 'меланхоличное': 'melancholic',
-           'энергичное': 'energetic', 'меланхоличный': 'melancholic',
-           'тёмный': 'dark', 'темный': 'dark', 'энергичный': 'energetic'}
-    return _ru.get(s, s)
+    return MOOD_ALIASES.get(s, s)
+
+
+def _norm_mood(v: str | None) -> str | None:
+    """Историческое имя — код пилюли в канонический вид."""
+    return norm_mood(v)
 
 
 def _norm_language(v: str | None) -> str | None:
@@ -425,11 +476,45 @@ def session_drift(db, recent_events: list[dict] | None,
 
 
 def _mood_of(feat) -> str | None:
+    """Главный муд-лейбл трека в каноническом коде ('спокойный' -> 'calm').
+
+    Именно ПЕРВЫЙ лейбл (как и было) — иначе порядок из set() плавал бы
+    между вызовами и морфинг/штраф за повтор настроения считали бы разное.
+    """
     try:
-        moods = list(feat.mood_labels or [])
-        return str(moods[0]).lower() if moods else None
+        labels = list(feat.mood_labels or [])
     except Exception:
         return None
+    for m in labels:
+        try:
+            c = norm_mood(m)
+        except Exception:
+            continue
+        if c:
+            return c
+    return None
+
+
+def _mood_codes_of(feat) -> set[str]:
+    """Все муд-лейблы трека в канонических кодах.
+
+    Анализатор кладёт в mood_labels РУССКИЕ лейблы ('спокойный',
+    'агрессивный'), пилюля плеера — англ. код ('calm'). Раньше эти словари
+    сравнивались напрямую, и любое сравнение молча давало False.
+    """
+    out: set[str] = set()
+    try:
+        labels = list(feat.mood_labels or [])
+    except Exception:
+        return out
+    for m in labels:
+        try:
+            c = norm_mood(m)
+        except Exception:
+            continue
+        if c:
+            out.add(c)
+    return out
 
 
 def _clap_weight(tun: dict | None = None) -> float:
@@ -493,8 +578,8 @@ def infer_auto_mood(db, user_id: str, session_ids: list[str] | None,
     """Автодетект настроения из центроида сессии (без пилюль).
 
     Берём energy/valence среднего по последним трекам сессии; маппим на
-    русские пилюли MOOD_PRESETS. Нет фичей/сессии → None (чистое авто-без-муда).
-    Ручная пилюля всегда побеждает — см. wave_continue.
+    канонические коды MOOD_PRESETS. Нет фичей/сессии → None (чистое
+    авто-без-муда). Ручная пилюля всегда побеждает — см. wave_continue.
     """
     try:
         sids = [str(s) for s in (session_ids or []) if s][:10]
@@ -526,20 +611,20 @@ def infer_auto_mood(db, user_id: str, session_ids: list[str] | None,
         except (TypeError, ValueError):
             h = -1
         if va <= 0.38 and en < 0.55:
-            return "грустное"
+            return "sad"
         if en >= 0.62 and va >= 0.45:
-            return "бодрое"
+            return "energetic"
         if en <= 0.42:
-            return "спокойное"
+            return "calm"
         if va >= 0.6 and en >= 0.45:
-            return "весёлое"
+            return "happy"
         if va <= 0.42:
-            return "тёмное"
+            return "dark"
         if h >= 22 or (0 <= h <= 5):
-            return "спокойное" if en < 0.55 else "тёмное"
+            return "calm" if en < 0.55 else "dark"
         if 6 <= h <= 10:
-            return "бодрое" if en >= 0.5 else "спокойное"
-        return "chill" if en < 0.5 else "бодрое"
+            return "energetic" if en >= 0.5 else "calm"
+        return "chill" if en < 0.5 else "energetic"
     except Exception:
         return None
 
@@ -712,16 +797,13 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         _skip_pipe = _sm0.get_model(db)
     except Exception:
         _skip_pipe = None
-    # Пресеты: русские пилюли клиента -> диапазоны фичей для ctx-бонусов.
-    _mood_preset = MOOD_PRESETS.get((settings.get('mood') or '').strip().lower(), {})
+    # Пресеты: код пилюли (любая форма -> канонический) -> диапазоны фичей.
+    # Раньше ключи пресетов были русскими пилюлями, а плеер шлёт 'calm':
+    # пресет не находился, и весь ctx-блок настроения молча выключался.
+    _mood_preset = MOOD_PRESETS.get(mood or '', {})
     _act_code = _norm_activity(settings.get('activity'))
     _act_preset = ACTIVITY_PRESETS.get(_act_code or '', {})
-    if mood and not _mood_preset:
-        # англ. mood без пресета — ищем по ключам без учёта регистра
-        for k, v in MOOD_PRESETS.items():
-            if k == mood:
-                _mood_preset = v
-                break
+    _mood_family = set(_mood_preset.get('moods') or ({mood} if mood else set()))
 
     prof = _taste.user_profile(db, user_id, top_n=0)
     likes_total = int((prof.get('counts') or {}).get('likes', 0) or 0)
@@ -1032,16 +1114,12 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                 ctx += 0.15
             if _act_code == 'sleep' and en < 0.3:
                 ctx += 0.1
-            if mood and _mood_of(f) == mood:
+            if mood and (_mood_codes_of(f) & _mood_family):
                 ctx += 0.1
             # пресеты настроения: родственные муд-лейблы + диапазоны
             if _mood_preset:
-                _pm = set(_mood_preset.get('moods') or set())
-                try:
-                    _fm = set(str(m).lower() for m in (f.mood_labels or []))
-                except Exception:
-                    _fm = set()
-                if _fm & _pm:
+                _fm = _mood_codes_of(f)
+                if _fm & _mood_family:
                     ctx += 0.12
                 _ok = True
                 if 'energy_min' in _mood_preset and en < _mood_preset['energy_min']:
@@ -1056,6 +1134,19 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                     _ok = False
                 if 'tempo_min' in _mood_preset and bpm and bpm < _mood_preset['tempo_min']:
                     _ok = False
+                if 'tempo_max' in _mood_preset and bpm and bpm > _mood_preset['tempo_max']:
+                    _ok = False
+                # arousal_max/min был в пресетах, но никогда не проверялся:
+                # «спокойное» с arousal 0.8 проходило как спокойное.
+                try:
+                    ar = float(f.arousal) if f.arousal is not None else None
+                except (TypeError, ValueError):
+                    ar = None
+                if ar is not None:
+                    if 'arousal_min' in _mood_preset and ar < _mood_preset['arousal_min']:
+                        _ok = False
+                    if 'arousal_max' in _mood_preset and ar > _mood_preset['arousal_max']:
+                        _ok = False
                 if _ok:
                     ctx += 0.08
             # пресеты занятия: мягкие бонусы
@@ -1832,7 +1923,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # Целевое: settings.mood (выбор юзера на странице «Моя волна»).
     from app.db.models import TrackFeatures as _TF0
 
-    target_mood = (settings.get('mood') or '').strip().lower() or None
+    target_mood = norm_mood(settings.get('mood'))
     start_mood: str | None = None
     ref_key: tuple | None = None
     ref_sentiment: str | None = None
@@ -1851,7 +1942,29 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                     ref_sentiment = None
         except Exception:
             start_mood = None
+    target_activity = _norm_activity(settings.get('activity'))
+    # Морф = мы меняем вайб на ходу. Раньше это ловилось только по смене муда
+    # (start_mood != target_mood), и смена ОДНОГО занятия — «Засыпаю» вместо
+    # «Тренировка» при той же пилюле настроения — морфом не считалась: пачка
+    # оставалась большой, и новый контекст был слышен только через полчаса.
+    # Теперь учитываем и занятие: если текущий трек не вписывается в его
+    # жёсткие рамки (sleep = energy<=0.4, темп<=110) — это переход.
     morphing = bool(target_mood and start_mood and target_mood != start_mood)
+    if not morphing and target_activity and _cf is not None:
+        _hp = ACTIVITY_HARD.get(target_activity) or {}
+        if _hp:
+            try:
+                _cur_en = float(_cf.energy) if _cf.energy is not None else 0.5
+            except (TypeError, ValueError):
+                _cur_en = 0.5
+            try:
+                _cur_bpm = float(_cf.tempo_bpm) if _cf.tempo_bpm else 0.0
+            except (TypeError, ValueError):
+                _cur_bpm = 0.0
+            if ('energy_max' in _hp and _cur_en > _hp['energy_max']) or \
+               ('energy_min' in _hp and _cur_en < _hp['energy_min']) or \
+               ('tempo_max' in _hp and _cur_bpm and _cur_bpm > _hp['tempo_max']):
+                morphing = True
     # Целевой сентимент лирики по муд-пресету (иначе держим текущий вайб).
     _POS_MOODS = {"energetic", "excited", "happy", "upbeat"}
     _NEG_MOODS = {"sad", "melancholic", "dark", "aggressive"}
@@ -2050,22 +2163,78 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         except Exception:
             _gm = {}
         cand = [c for c in cand if _gm.get(c, "").lower() not in _tmp_genres]
-    # mood-фильтр как в мобиле (по первому муд-лейблу).
-    # При морфинге (старт → цель) жёсткий фильтр снимаем: пускаем оба
-    # настроения + безфичные, а градиент раскладываем после скоринга.
+    # Жёсткий mood-фильтр по семейству лейблов пресета.
+    # При морфинге (старт -> цель) разрешаем оба настроения + безфичные,
+    # градиент раскладываем после скоринга.
+    #
+    # ТРИ защиты, которых раньше не было:
+    #  1) сравнение идёт в канонических кодах (_mood_codes_of) — код пилюли
+    #     плеера 'calm' и муд-лейбл анализатора 'спокойный' теперь одно и то же;
+    #  2) фильтр НЕ выкидывает треки без анализа (unknown = пропуск, как в
+    #     фильтре языка) — иначе на непроанализированной библиотеке пул
+    #     схлопывался бы в «всё, о чём мозг ничего не знает»;
+    #  3) если после фильтра осталось меньше, чем нужно для пачки, фильтр
+    #     откатывается целиком и пишется в лог. Пустая «Спокойная» волна
+    #     хуже, чем неидеальная.
     mood = target_mood
-    if mood and cand:
+    _act_code = target_activity
+    _hard_act = ACTIVITY_HARD.get(_act_code or '', {})
+    if (mood or _hard_act) and cand:
         from app.db.models import TrackFeatures
         fm = {str(f.track_id): f for f in
               db.query(TrackFeatures).filter(
                   TrackFeatures.track_id.in_(cand[:2000])).all()}
-        if morphing:
-            allowed = {start_mood, mood}
-            cand = [c for c in cand
-                    if (c not in fm or _mood_of(fm[c]) in allowed)]
-        else:
-            cand = [c for c in cand
-                    if (_mood_of(fm[c]) == mood if c in fm else True)]
+        _want = set((MOOD_PRESETS.get(mood) or {}).get('moods') or {mood}) if mood else set()
+        if mood and morphing and start_mood:
+            _want = _want | set((MOOD_PRESETS.get(start_mood) or {})
+                                .get('moods') or {start_mood})
+
+        def _passes(c: str) -> bool:
+            f = fm.get(c)
+            if f is None:
+                return True  # unknown = пропуск, как в фильтре языка
+            if _want and not (_mood_codes_of(f) & _want):
+                return False
+            if _hard_act:
+                try:
+                    en = float(f.energy) if f.energy is not None else 0.5
+                except (TypeError, ValueError):
+                    en = 0.5
+                try:
+                    bpm = float(f.tempo_bpm) if f.tempo_bpm else 0.0
+                except (TypeError, ValueError):
+                    bpm = 0.0
+                if 'energy_min' in _hard_act and en < _hard_act['energy_min']:
+                    return False
+                if 'energy_max' in _hard_act and en > _hard_act['energy_max']:
+                    return False
+                if 'tempo_max' in _hard_act and bpm and bpm > _hard_act['tempo_max']:
+                    return False
+            return True
+
+        _before_mood = len(cand)
+        _mood_backup = list(cand)
+        cand = [c for c in cand if _passes(c)]
+        _min_keep = max(10, int(count or 20))
+        if len(cand) < _min_keep:
+            try:
+                from app.core.logging import get_logger as _gl
+
+                _gl("wave").warning(
+                    "context filter (mood={}, activity={}): {} из {} кандидатов — "
+                    "ниже минимума {}, фильтр откачен (иначе волна пустеет)",
+                    mood, _act_code, len(cand), _before_mood, _min_keep)
+            except Exception:
+                pass
+            cand = _mood_backup
+        elif len(cand) != _before_mood:
+            try:
+                from app.core.logging import get_logger as _gl
+
+                _gl("wave").info("context filter (mood={}, activity={}): {} -> {} кандидатов",
+                                 mood, _act_code, _before_mood, len(cand))
+            except Exception:
+                pass
 
     # Фильтр по языку (пилюли клиента «по языку»): ru / foreign / instrumental.
     # Язык берём из Lyrics.language (детект при скачивании текстов).
@@ -2275,7 +2444,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         _cur_en2 = None
     # Авто-настроение: ручная пилюля побеждает всегда; авто — только мягкий
     # ctx-бонус в скоринге, жёсткий mood-фильтр выше уже отработал по ручной.
-    _manual_mood = (settings.get('mood') or '').strip().lower() or None
+    _manual_mood = norm_mood(settings.get('mood'))
     _auto_mood: str | None = None
     try:
         if not _manual_mood:
