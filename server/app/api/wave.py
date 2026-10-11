@@ -853,8 +853,31 @@ def wave_seed_start(payload: dict, request: Request, db: Session = Depends(get_d
                 pushed = _pr.get('exported')
     except Exception:
         pass
+    # Обогащённые треки для плеера. Раньше отдавался только голый список
+    # внутренних uuid, а плеер грузит песни по external_id (Subsonic) —
+    # то есть отсюда он не мог проиграть ни одного трека. 'tracks' с id
+    # оставлены ради веба и обратной совместимости.
+    _items: list[dict] = []
+    try:
+        from app.db.models import Track as _Track
+
+        for _t in (db.get(_Track, tid) for tid in tids):
+            if _t is None:
+                continue
+            _items.append({
+                'track_id': str(_t.id),
+                'external_id': str(_t.external_id or ''),
+                'title': _t.title,
+                'artist_name': _t.artist_name,
+                'album_name': _t.album_name,
+                'genre': _t.genre,
+                'duration_sec': _t.duration_sec,
+                'cover_art_id': _t.cover_art_id,
+            })
+    except Exception:
+        _items = []
     return {'ok': True, 'user_id': str(u.id), 'seed': _seed_to_dict(s),
-            'playlist_id': str(pl.id), 'tracks': tids,
+            'playlist_id': str(pl.id), 'tracks': tids, 'items': _items,
             'similar_artists': res.get('similar_artists') or [],
             'server_used': bool(res.get('server_used')), 'pushed': pushed}
 
