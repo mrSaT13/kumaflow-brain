@@ -26,3 +26,35 @@ def version() -> dict:
         key = resolve_tz_name()
     return {"name": s.app_name, "version": s.app_version, "env": s.env,
             "tz": str(key), "utc_offset_sec": off, "now": now.isoformat()}
+
+
+@router.get("/debug/pool")
+def debug_pool() -> dict:
+    """Живое состояние пула БД: кто держит слоты. Открыт как /health —
+    счётчики не чувствительны, а при QueuePool timeout это первый вопрос.
+    """
+    out: dict = {"ok": False}
+    try:
+        from app.db.database import engine
+
+        pool = engine.pool
+        try:
+            out["checkedout"] = pool.checkedout()
+        except Exception:
+            out["checkedout"] = None
+        try:
+            out["checkedin"] = pool.checkedin()
+        except Exception:
+            out["checkedin"] = None
+        try:
+            out["overflow"] = pool.overflow()
+        except Exception:
+            out["overflow"] = None
+        try:
+            out["size"] = pool.size()
+        except Exception:
+            out["size"] = None
+        out["ok"] = True
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)[:200]
+    return out

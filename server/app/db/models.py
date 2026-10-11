@@ -225,8 +225,12 @@ class PlayHistory(Base):
     __tablename__ = "play_history"
 
     id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(ForeignKey("media_users.id", ondelete="CASCADE"))
-    track_id: Mapped[str] = mapped_column(ForeignKey("tracks.id", ondelete="CASCADE"))
+    # Оба FK — в горячих WHERE на каждый опрос виджета/волны (агрегаты вкуса
+    # гонят SELECT ... WHERE user_id по play_history целиком). Без индекса —
+    # Seq Scan всей таблицы на каждый поллинг, слоты пула стоят занятыми,
+    # и всё остальное падает в QueuePool timeout. См. schema_patch.ensure_indexes.
+    user_id: Mapped[str] = mapped_column(ForeignKey("media_users.id", ondelete="CASCADE"), index=True)
+    track_id: Mapped[str] = mapped_column(ForeignKey("tracks.id", ondelete="CASCADE"), index=True)
     played_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -574,7 +578,9 @@ class ScanRun(Base):
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     total_items: Mapped[int] = mapped_column(Integer, default=0)
     processed_items: Mapped[int] = mapped_column(Integer, default=0)
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # list_runs идёт ORDER BY started_at DESC LIMIT 100: без индекса — сортировка
+    # всей таблицы (см. schema_patch.ensure_indexes).
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     metadata_extra: Mapped[Optional[dict]] = mapped_column(JSONCol(), nullable=True)

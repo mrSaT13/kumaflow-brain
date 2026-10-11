@@ -151,6 +151,33 @@ def create_app() -> FastAPI:
 
     app.add_middleware(_RelativeRedirect)
 
+    # Диагностика тормозов: что держит слоты пула. Пишем только путь
+    # (без query — там бывает ?token=) и только если дольше 5с.
+    from starlette.middleware.base import BaseHTTPMiddleware as _SlowMW
+    from starlette.requests import Request as _Req
+
+    class _SlowLog(_SlowMW):
+        async def dispatch(self, request: _Req, call_next):
+            import time as _t
+
+            _start = _t.monotonic()
+            resp = await call_next(request)
+            try:
+                _dur = _t.monotonic() - _start
+                if _dur >= 5.0:
+                    import logging as _lg
+
+                    _lg.getLogger("kumaflow.slow").warning(
+                        "SLOW %s %s %.1fs -> %s",
+                        request.method, request.url.path, _dur,
+                        getattr(resp, "status_code", "?"),
+                    )
+            except Exception:
+                pass
+            return resp
+
+    app.add_middleware(_SlowLog)
+
     app.include_router(status.router, prefix="/api", tags=["status"])
     app.include_router(settings_api.router, prefix="/api/settings", tags=["settings"])
     app.include_router(library.router, prefix="/api/library", tags=["library"])

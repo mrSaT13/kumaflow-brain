@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -250,7 +250,7 @@ def run_logs(run_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/runs/{run_id}/logs/stream")
-async def run_logs_stream(run_id: str):
+async def run_logs_stream(run_id: str, request: Request):
     """Server-Sent Events: пушим новые логи в реалтайме."""
     try:
         uuid.UUID(run_id)
@@ -277,6 +277,13 @@ async def run_logs_stream(run_id: str):
 
         while True:
             await asyncio.sleep(0.6)
+            # Клиент мог давно отвалиться (закрытая вкладка, ECONNRESET у прокси):
+            # без проверки стрим крутится до конца рана вхолостую.
+            try:
+                if await request.is_disconnected():
+                    break
+            except Exception:
+                break
             with session_scope() as db2:
                 q = db2.query(ScanLog).filter(ScanLog.run_id == run_id)
                 if last_id is not None:

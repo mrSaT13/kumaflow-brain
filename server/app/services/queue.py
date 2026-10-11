@@ -33,7 +33,13 @@ def init_redis() -> None:
     settings = get_settings()
     if _HAS_RQ:
         try:
-            _redis_client = _redis.from_url(settings.redis_url, decode_responses=False)
+            # Без таймаутов зависший Redis вешает каждый _live_*/scan_iter
+            # НАВСЕГДА: тред пула + сессия БД стоят занятыми, пул течёт
+            # в QueuePool timeout без единой ошибки в логах.
+            _redis_client = _redis.from_url(
+                settings.redis_url, decode_responses=False,
+                socket_connect_timeout=5, socket_timeout=5,
+            )
             _redis_client.ping()
             for qn in KNOWN_QUEUES:
                 _rq_queues[qn] = _RQQueue(qn, connection=_redis_client)

@@ -88,3 +88,44 @@ def ensure_columns(engine) -> list[str]:
     except Exception:
         pass
     return added
+
+
+# (имя индекса, DDL). create_all индексы на СУЩЕСТВУЮЩИЕ таблицы не добавляет,
+# поэтому живые базы после обновления их не получали — и горячие запросы
+# (агрегаты вкуса на каждый опрос, сортировка сканов) шли Seq Scan'ом,
+# держа слоты пула занятыми до QueuePool timeout.
+INDEXES: list[tuple[str, str]] = [
+    ("ix_play_history_user",
+     "CREATE INDEX IF NOT EXISTS ix_play_history_user ON play_history (user_id)"),
+    ("ix_play_history_user_track",
+     "CREATE INDEX IF NOT EXISTS ix_play_history_user_track ON play_history (user_id, track_id)"),
+    ("ix_scan_runs_started",
+     "CREATE INDEX IF NOT EXISTS ix_scan_runs_started ON scan_runs (started_at DESC)"),
+    ("ix_playlists_owner",
+     "CREATE INDEX IF NOT EXISTS ix_playlists_owner ON playlists (owner_user_id)"),
+]
+
+
+def ensure_indexes(engine) -> list[str]:
+    """Создать отсутствующие индексы. Идемпотентно (IF NOT EXISTS)."""
+    added: list[str] = []
+    try:
+        insp = inspect(engine)
+        existing_tables = set(insp.get_table_names())
+    except Exception:
+        return added
+    for name, ddl in INDEXES:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(ddl))
+            added.append(name)
+        except Exception:
+            continue
+    if added:
+        try:
+            import logging as _lg
+
+            _lg.getLogger("db").info("schema patch: индексы проверены/созданы {}", added)
+        except Exception:
+            pass
+    return added

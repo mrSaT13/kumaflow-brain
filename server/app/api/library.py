@@ -317,6 +317,103 @@ def list_artists(
     return {"items": _artist_entries(db, names), "total": total, "limit": limit, "offset": offset}
 
 
+@router.get("/artists/listeners")
+def artist_listeners(name: str | None = None, artist_id: str | None = None,
+                     days: int = 30, db: Session = Depends(get_db)):
+    """Сколько НАШИХ слушателей у артиста — для бейджа «N слуш./мес» в плеере.
+
+    Плеер раньше считал только по локальным рейтингам текущего устройства,
+    поэтому там всегда стоял 0. Мозг видит всех пользователей: distinct
+    user_id по PlayHistory за N дней (+ TrackStat с мобилы).
+    Матчинг: Navidrome artistId (artist_external_id, индекс) → точное имя
+    (индекс) → нормализованное имя (фолбек, как в радио по артисту).
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func
+
+    from app.db.models import PlayHistory, Track, TrackStat
+
+    clean = (name or "").strip()
+    aid = (artist_id or "").strip()
+    if not clean and not aid:
+        return {"ok": False, "error": "name or artist_id required"}
+    days = max(1, min(int(days or 30), 365))
+    tids: list[str] = []
+    seen: set[str] = set()
+
+    def _add(rows) -> None:
+        for (tid,) in rows or []:
+            s = str(tid)
+            if s not in seen:
+                seen.add(s)
+                tids.append(s)
+
+    if aid:
+        _add(db.query(Track.id).filter(
+            Track.artist_external_id == aid).limit(5000).all())
+    if clean:
+        _add(db.query(Track.id).filter(
+            Track.artist_name == clean).limit(5000).all())
+    if not tids and clean:
+        from app.services.artist_names import norm_name
+
+        want = norm_name(clean)
+        if want:
+            _add(db.query(Track.id).filter(
+                func.lower(func.trim(Track.artist_name)) == want
+            ).limit(5000).all())
+    label = clean or aid
+    if not tids:
+        return {"ok": True, "name": label, "monthly_listeners": 0,
+                "plays_30d": 0, "total_listeners": 0, "track_count": 0}
+    since = datetime.utcnow() - timedelta(days=days)
+
+    def _chunks(ids: list[str], n: int = 500):
+        for i in range(0, len(ids), n):
+            yield ids[i:i + n]
+
+    monthly_users: set[str] = set()
+    plays_30d = 0
+    total_users: set[str] = set()
+    for chunk in _chunks(tids):
+        try:
+            monthly_users |= {
+                str(r[0]) for r in db.query(PlayHistory.user_id).filter(
+                    PlayHistory.track_id.in_(chunk),
+                    PlayHistory.played_at > since).distinct().all()
+            }
+            plays_30d += int(db.query(func.count(PlayHistory.id)).filter(
+                PlayHistory.track_id.in_(chunk),
+                PlayHistory.played_at > since).scalar() or 0)
+            total_users |= {
+                str(r[0]) for r in db.query(PlayHistory.user_id).filter(
+                    PlayHistory.track_id.in_(chunk)).distinct().all()
+            }
+        except Exception:
+            continue
+        try:
+            # TrackStat с мобилы: слушал, но в PlayHistory строка не записалась.
+            monthly_users |= {
+                str(r[0]) for r in db.query(TrackStat.user_id).filter(
+                    TrackStat.track_id.in_(chunk),
+                    TrackStat.last_played.isnot(None),
+                    TrackStat.last_played > since).distinct().all()
+            }
+            total_users |= {
+                str(r[0]) for r in db.query(TrackStat.user_id).filter(
+                    TrackStat.track_id.in_(chunk),
+                    TrackStat.plays > 0).distinct().all()
+            }
+        except Exception:
+            continue
+    return {"ok": True, "name": label,
+            "monthly_listeners": len(monthly_users),
+            "plays_30d": plays_30d,
+            "total_listeners": len(total_users),
+            "track_count": len(tids)}
+
+
 @router.get("/artists/similar")
 def similar_artists(name: str, limit: int = Query(6, le=12), db: Session = Depends(get_db)):
     """Похожие артисты (раскрытие под кружком как в мобильном).

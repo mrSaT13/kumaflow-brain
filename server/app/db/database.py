@@ -124,8 +124,10 @@ def init_db() -> None:
     # даёт UndefinedColumn (playlists.comment, cron_jobs.last_status и др.).
     try:
         from app.db.schema_patch import ensure_columns as _ensure_cols
+        from app.db.schema_patch import ensure_indexes as _ensure_idx
 
         _ensure_cols(engine)
+        _ensure_idx(engine)
     except Exception:
         import logging as _lg
 
