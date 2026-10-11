@@ -398,6 +398,15 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
                 return []
 
     try:
+        # Сессия держит коннект пула, а дальше — до 15с сети к Navidrome.
+        # Без rollback коннект занят всё время fetch, и при поллинге
+        # виджета каждые 10-15с пул (10+20) уходит в TimeoutError каскадом
+        # по всем эндпоинтам. rollback возвращает коннект в пул, сессия
+        # молча переоткроет его на следующем запросе.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         entries = asyncio.run(_fetch())
     except Exception:
         entries = []

@@ -30,6 +30,13 @@ def _make_engine(url: str, *, test: bool = False):
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=20,
+        pool_timeout=30,
+        # Протухшие соединения PG (перезапуск, idle-timeout) иначе
+        # возвращаются в пул мёртвыми и держат слот до первого запроса.
+        pool_recycle=1800,
+        # Страховка от убежавшего запроса: один медленный SELECT больше не
+        # держит слот пула минутами, пул не уходит в TimeoutError каскадом.
+        connect_args={"connect_timeout": 5, "options": "-c statement_timeout=30000"},
         future=True,
     )
 

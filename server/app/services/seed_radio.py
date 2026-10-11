@@ -255,8 +255,13 @@ def track_radio(db, user_id: str, track_ref: str, n: int = 30) -> dict:
         base.remove(seed_id)
 
     # Серверный добор: похожие на сид → наши id (мозг шире, сервер уже).
+    # rollback перед сетью: не держать слот пула вызывающей сессии 6с.
     server_used = False
     if seed_ext and not seed_ext.startswith(("disk:", "demo-")):
+        try:
+            db.rollback()
+        except Exception:
+            pass
         srv_ids, server_used = _server_seed_tracks_db(seed_ext)
         for tid in srv_ids:
             if tid != seed_id and tid not in base:
@@ -324,7 +329,16 @@ def _tuning_int(db, user_id: str | None, key: str, default: int,
 
 def _server_seed_tracks(db, seed_external_id: str,
                         count: int = 20) -> tuple[list[str], bool]:
-    """Треки Navidrome-похожих, спроецированные на наши id. (True — сервер участвовал.)"""
+    """Треки Navidrome-похожих, спроецированные на наши id. (True — сервер участвовал.)
+
+    Сеть (до 6с) идёт БЕЗ удержания коннекта вызывающей сессии: перед fetch
+    делаем rollback, иначе каждый запрос радио держит слот пула всё время
+    ожидания Navidrome и пул уходит в TimeoutError (см. now_playing).
+    """
+    try:
+        db.rollback()
+    except Exception:
+        pass
     try:
         from app.api.library import _server_similar_songs
     except Exception:
@@ -496,7 +510,11 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
     try:
         from app.services.orchestrator import create_energy_wave
 
-        tracks = [t for t in (db.get(Track, tid) for tid in ordered) if t]
+        # Было N отдельных db.get (N roundtrip'ов к PG): одним IN-запросом.
+        by_id = {str(t.id): t for t in
+                 db.query(Track).filter(Track.id.in_(ordered)).all()} \
+            if ordered else {}
+        tracks = [by_id[tid] for tid in ordered if tid in by_id]
         waved = create_energy_wave(tracks)
         order = {str(t.id): i for i, t in enumerate(waved)}
         ordered = sorted(ordered, key=lambda tid: order.get(tid, 999))

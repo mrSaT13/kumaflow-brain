@@ -403,6 +403,11 @@ def similar_artists(name: str, limit: int = Query(6, le=12), db: Session = Depen
     server_used = False
     server_only: list[dict] = []
     if seed_ext:
+        # Сеть до 6с без удержания коннекта запроса (иначе пул течёт).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         songs = _server_similar_songs(seed_ext, count=20)
         if songs:
             server_used = True

@@ -632,6 +632,11 @@ def vault_check(user_id: str, db: Session = Depends(get_db)):
             return await client.ping()
 
     try:
+        # Не держать слот пула 15с сети.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         ok = bool(_asyncio.run(_ping()))
     except Exception as e:  # noqa: BLE001
         return {"stored": True, "auth_ok": False, "key_source": key_source,

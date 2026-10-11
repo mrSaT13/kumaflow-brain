@@ -55,25 +55,35 @@ def push_playlist_to_navidrome(db, playlist_id: str) -> dict:
     url, user, password = (cfg.get("url") or ""), (cfg.get("user") or ""), (cfg.get("password") or "")
     if not url or not user:
         return {"ok": False, "error": "Медиа-сервер не настроен"}
+    # Дальше — до 60с+ сети к Navidrome. Коннект пула на это время не нужен:
+    # nav_ids/имя/комментарий уже сняты в локалы, сессия переоткроет коннект
+    # после rollback на записи external_id.
+    _pl_name = str(p.name or "")
+    _pl_comment = str(p.comment or "").strip()[:1000]
+    _pl_id = str(p.id)
+    _pl_ext = str(p.external_id or "")
+    try:
+        db.rollback()
+    except Exception:
+        pass
 
     async def _push() -> str:
         async with SubsonicClient(url, SubsonicAuth(user=user, password=password), timeout=60.0) as client:
-            if p.external_id:
+            if _pl_ext:
                 try:
-                    await client.delete_playlist(p.external_id)
+                    await client.delete_playlist(_pl_ext)
                 except Exception:
                     pass
-            created = await client.create_playlist(name=p.name, song_ids=nav_ids)
+            created = await client.create_playlist(name=_pl_name, song_ids=nav_ids)
             remote_id = str(created.get("id") or "")
             if not remote_id:
                 raise RuntimeError("Navidrome не вернул id созданного плейлиста")
             # Комментарий не принимает createPlaylist — только updatePlaylist.
             # Без этого описание («почему такой микс») терялось бы именно там,
             # где клиент его как раз показывает.
-            _comment = str(p.comment or "").strip()[:1000]
-            if _comment:
+            if _pl_comment:
                 try:
-                    await client.update_playlist(remote_id, comment=_comment)
+                    await client.update_playlist(remote_id, comment=_pl_comment)
                 except Exception as e:  # noqa: BLE001 — не роняем пуш из-за описания
                     logger.warning("playlist {}: не удалось записать comment в Navidrome: {}",
                                    playlist_id, e)
@@ -83,8 +93,16 @@ def push_playlist_to_navidrome(db, playlist_id: str) -> dict:
         remote_id = asyncio.run(_push())
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"Navidrome: {str(e)[:300]}"}
-    p.external_id = remote_id
-    db.commit()
+    # p мог отвязаться после rollback — перечитываем строкой.
+    prow = db.get(Playlist, _pl_id)
+    if prow is not None:
+        prow.external_id = remote_id
+        db.commit()
+    else:
+        try:
+            db.rollback()
+        except Exception:
+            pass
     return {"ok": True, "navidrome_id": remote_id, "exported": len(nav_ids), "skipped": skipped}
 
 

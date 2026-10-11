@@ -626,6 +626,33 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
     cur_idx = 0
     cur_raw = str(entry.get('current_track_id') or '')
     found: list = []
+    # Было до 50 последовательных get_track (по 1-2 запроса каждый) —
+    # держали слот пула и раздували latency поллинга. Батчим в 2 запроса.
+    try:
+        from app.db.models import Track as _TrackLive
+        from app.services.track_resolve import is_uuid as _is_uuid_live
+
+        _raws: list[str] = [str(r) for r in (entry.get('queue') or []) if str(r)][:100]
+        _by_ext: dict[str, Any] = {}
+        _by_id: dict[str, Any] = {}
+        if _raws:
+            try:
+                for t in db.query(_TrackLive).filter(
+                        _TrackLive.external_id.in_(_raws)).all():
+                    _by_ext[str(t.external_id)] = t
+            except Exception:
+                pass
+            _uuids = [s for s in _raws if s not in _by_ext and _is_uuid_live(s)]
+            if _uuids:
+                try:
+                    for t in db.query(_TrackLive).filter(
+                            _TrackLive.id.in_(_uuids)).all():
+                        _by_id[str(t.id)] = t
+                except Exception:
+                    pass
+        _ordered = [(_by_ext.get(s) or _by_id.get(s)) for s in _raws]
+    except Exception:
+        _raws, _ordered = [], []
     # Дедуп зеркала: телефон может прислать одну песню дважды
     # (разные row id / external_id после перескана). Режем и по track_id,
     # и по нормализованному «артист — название» как в wave_continue.
@@ -635,8 +662,7 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
         from app.services.dedup import norm_text as _norm_text
     except Exception:
         _norm_text = None  # type: ignore
-    for raw in entry.get('queue') or []:
-        t = _gt(db, str(raw))
+    for raw, t in zip(_raws, _ordered):
         if t is None:
             continue
         tid = str(t.id)
@@ -803,7 +829,11 @@ def wave_seed_start(payload: dict, request: Request, db: Session = Depends(get_d
             from app.db.models import Track
             from app.services.orchestrator import create_energy_wave
 
-            tracks = [t for t in (db.get(Track, tid) for tid in tids) if t]
+            # Было N отдельных db.get: одним IN-запросом с сохранением порядка.
+            _by_id = {str(t.id): t for t in
+                      db.query(Track).filter(Track.id.in_(tids)).all()} \
+                if tids else {}
+            tracks = [_by_id[tid] for tid in tids if tid in _by_id]
             waved = create_energy_wave(tracks)
             order = {str(t.id): i for i, t in enumerate(waved)}
             first, rest = tids[0], tids[1:]
@@ -843,6 +873,12 @@ def wave_seed_start(payload: dict, request: Request, db: Session = Depends(get_d
 
     pushed = None
     try:
+        # commit выше уже вернул коннект запроса в пул; push держит СВОЮ
+        # сессию до 60с сети — убеждаемся, что сессия запроса точно чиста.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         from app.services.playlist_push import maybe_auto_push as _push
 
         from app.db.database import session_scope as _scope
@@ -861,7 +897,12 @@ def wave_seed_start(payload: dict, request: Request, db: Session = Depends(get_d
     try:
         from app.db.models import Track as _Track
 
-        for _t in (db.get(_Track, tid) for tid in tids):
+        # Было N отдельных db.get: одним IN-запросом с порядком tids.
+        _tmap = {str(t.id): t for t in
+                 db.query(_Track).filter(_Track.id.in_(tids)).all()} \
+            if tids else {}
+        for tid in tids:
+            _t = _tmap.get(tid)
             if _t is None:
                 continue
             _items.append({
