@@ -2511,7 +2511,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     top = ranked[:eff_count]
     # Финальная страховка на ответе: id + баны артистов + «та же песня».
     # Ловит всё, что просочилось через срез пула (cand[:800]/топ).
-    if top and (dis or bans):
+    if top and (dis or ban_names):
         try:
             from app.services.artist_names import is_banned as _is_banned2
             from app.services.dedup import norm_text as _norm_text2
@@ -2525,7 +2525,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 tid = str(r.get("track_id") or "")
                 if tid in played or tid in dis:
                     continue
-                if _is_banned2(r.get("artist_name"), bans):
+                if _is_banned2(r.get("artist_name"), ban_names):
                     continue
                 if _sk2(r.get("artist_name"), r.get("title")) in excluded_keys:
                     continue
