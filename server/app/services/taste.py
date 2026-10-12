@@ -41,6 +41,24 @@ SYNC_SOURCES = ("mobile", "desktop")
 
 _sync_cols_ok: bool | None = None
 
+# Кэш на одну SQLAlchemy-сессию, а сессия из get_db() живёт ровно один
+# HTTP-запрос (database.py: get_db закрывает её в finally). Поэтому запись
+# здесь сама собой исчезает на следующем запросе — инвалидация не нужна
+# и протухшие данные нельзя увидеть.
+_REQ_CACHE_KEY = "kumaflow_req_cache"
+
+
+def _req_store(db, bucket: str) -> dict:
+    """Словарь-хранилище на текущую сессию. Любая ошибка → пустой dict.
+
+    Тихо деградируем (как и остальной код taste.py): если Session.info
+    недоступен, функции ниже просто считают по-старому.
+    """
+    try:
+        return db.info.setdefault(_REQ_CACHE_KEY, {}).setdefault(bucket, {})
+    except Exception:
+        return {}
+
 
 def _ensure_sync_cols(db) -> bool:
     """Самопочинка схемы: taste_profiles.mobile_sync_source / desktop_synced_at.
@@ -494,20 +512,42 @@ def _user_track_aggregates(db, user_id: str) -> dict[str, dict]:
     """Агрегаты по трекам пользователя: plays/favs/dislikes/события/статы.
 
     TrackStat (bulk-синк с мобилы) складывается с локальными рядами.
+
+    Результат кэшируется на сессию. За один HTTP-запрос функцию звали три
+    раза (user_profile → score_candidates → user_profile), и каждый вызов
+    делал 6 выборок, дважды полностью сканируя PlayHistory. Теперь считаем
+    один раз; на следующий запрос кэш пуст сам собой.
     """
+    store = _req_store(db, "agg")
+    uid = str(user_id)
+    hit = store.get("a:" + uid)
+    if hit is not None:
+        return hit
     agg: dict[str, dict] = defaultdict(
         lambda: {"plays": 0, "fav": False, "dislike": False, "dislike_source": None,
                  "skips": 0, "early_skips": 0, "replays": 0, "seek_backs": 0,
                  "abandons": 0, "completes": 0, "mobile_score": 0, "last_played": None})
-    for (tid,) in db.query(PlayHistory.track_id).filter(PlayHistory.user_id == user_id).all():
-        tid = str(tid)
-        agg[tid]["plays"] += 1
+    # Один проход по PlayHistory: и счётчик plays, и last_played.
+    # Раньше это были два одинаковых .all() — полный скан таблицы дважды.
+    plays_rows = db.query(PlayHistory.track_id, PlayHistory.played_at).filter(
+        PlayHistory.user_id == user_id).all()
+    for tid, when in plays_rows:
+        a = agg[str(tid)]
+        a["plays"] += 1
+        cur = a["last_played"]
+        if when and (cur is None or when > cur):
+            a["last_played"] = when
     for (tid,) in db.query(Favorite.track_id).filter(Favorite.user_id == user_id).all():
         agg[str(tid)]["fav"] = True
     for row in db.query(TrackDislike).filter(TrackDislike.user_id == user_id).all():
         agg[str(row.track_id)]["dislike"] = True
         agg[str(row.track_id)]["dislike_source"] = row.source
-    for row in db.query(PlayEvent).filter(PlayEvent.user_id == user_id).all():
+    event_rows = db.query(PlayEvent).filter(PlayEvent.user_id == user_id).all()
+    # Гистограмма часов/дней — из тех же строк, что уже загружены. Раньше
+    # user_profile ради неё ещё раз сканировал PlayEvent (дважды).
+    hours = [0] * 24
+    days = [0] * 7
+    for row in event_rows:
         a = agg[str(row.track_id)]
         if row.action == "skip":
             a["skips"] += 1
@@ -521,13 +561,12 @@ def _user_track_aggregates(db, user_id: str) -> dict[str, dict]:
             a["abandons"] += 1
         elif row.action == "complete":
             a["completes"] += 1
-    # last_played
-    rows = db.query(PlayHistory.track_id, PlayHistory.played_at).filter(
-        PlayHistory.user_id == user_id).all()
-    for tid, when in rows:
-        cur = agg[str(tid)]["last_played"]
-        if when and (cur is None or when > cur):
-            agg[str(tid)]["last_played"] = when
+        h = row.hour
+        if isinstance(h, int) and 0 <= h < 24:
+            hours[h] += 1
+        d = row.day_of_week
+        if isinstance(d, int) and 0 <= d < 7:
+            days[d] += 1
     # TrackStat с мобилы: складываем счётчики, mobile_score — отдельно
     from app.db.models import TrackStat as _TS
 
@@ -544,6 +583,11 @@ def _user_track_aggregates(db, user_id: str) -> dict[str, dict]:
         a["mobile_score"] = st.mobile_score or 0
         if st.last_played and (a["last_played"] is None or st.last_played > a["last_played"]):
             a["last_played"] = st.last_played
+    store["a:" + uid] = agg
+    # Размеры таблиц для user_profile.counts — из уже загруженных строк,
+    # чтобы не делать ещё два COUNT по большим таблицам.
+    store["c:" + uid] = {"plays": len(plays_rows), "events": len(event_rows)}
+    store["h:" + uid] = (hours, days)
     return agg
 
 
@@ -589,12 +633,33 @@ def _snap_sources(tp, mob_at: str | None, desk_at: str | None) -> list[dict]:
     return items
 
 
+def _slice_top(full: dict, top_n: int) -> dict:
+    """Отдаём профиль с нужным срезом top_tracks, не трогая общий кэш.
+
+    Поверхностная копия — чтобы вызывающий случайно не дописал в top_tracks
+    и не испортил кэш для следующего вызова в этом же запросе.
+    """
+    out = dict(full)
+    top = full.get("top_tracks")
+    out["top_tracks"] = top[:top_n] if isinstance(top, list) else top
+    return out
+
+
 def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
     """Производный профиль вкусов (аналог mobile MLProfile + паттерны).
 
     preferredGenres/Artists — веса по формулам rateSong/seekBack/abandon.
     Плюс: облако жанров, топ треков со скором, часы/дни, настроения.
+
+    Кроме среза top_tracks результат от top_n не зависит, поэтому полный
+    профиль считается один раз на сессию и переиспользуется. За HTTP-запрос
+    функцию звали дважды (top_n=200 из select_seeds, top_n=0 из
+    score_candidates), и каждый раз она заново перечитывала всю историю
+    пользователя из БД.
     """
+    _full = _req_store(db, "profile").get(str(user_id))
+    if _full is not None:
+        return _slice_top(_full, top_n)
     from app.db.models import MediaUser, TrackFeatures
 
     u = db.get(MediaUser, user_id)
@@ -619,8 +684,21 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
     artist_likes: Counter = Counter()
     artist_plays: Counter = Counter()
     mood_c: Counter = Counter()
+    # Часы/дни уже посчитаны в _user_track_aggregates по тем же строкам
+    # PlayEvent, что и aggregate counters. Раньше ради них шёл ещё полный
+    # скан PlayEvent. Фолбэк на PlayHistory — если событий нет вовсе.
+    _agg_store = _req_store(db, "agg")
+    _hd = _agg_store.get("h:" + str(user_id))
     hours = [0] * 24
     days = [0] * 7
+    if _hd is not None:
+        hours, days = list(_hd[0]), list(_hd[1])
+    if not any(hours):
+        # fallback: часы из PlayHistory
+        for row in db.query(PlayHistory).filter(PlayHistory.user_id == user_id).all():
+            if row.played_at:
+                hours[row.played_at.hour] += 1
+                days[row.played_at.isoweekday() % 7] += 1
     scored: list[dict] = []
     liked_ids: list[str] = []
     disliked_ids: list[str] = []
@@ -662,21 +740,6 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
             "replays": a["replays"],
             "last_played": a["last_played"].isoformat() if a["last_played"] else None,
         })
-
-    for row in db.query(PlayEvent.hour).filter(PlayEvent.user_id == user_id).all():
-        h = row[0]
-        if isinstance(h, int) and 0 <= h < 24:
-            hours[h] += 1
-    for row in db.query(PlayEvent.day_of_week).filter(PlayEvent.user_id == user_id).all():
-        d = row[0]
-        if isinstance(d, int) and 0 <= d < 7:
-            days[d] += 1
-    if not any(hours):
-        # fallback: часы из PlayHistory
-        for row in db.query(PlayHistory).filter(PlayHistory.user_id == user_id).all():
-            if row.played_at:
-                hours[row.played_at.hour] += 1
-                days[row.played_at.isoweekday() % 7] += 1
 
     bans = [str(r.artist_name) for r in
             db.query(ArtistBan).filter_by(user_id=user_id).order_by(ArtistBan.created_at.desc()).all()]
@@ -750,7 +813,18 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
     except Exception:
         pass
 
-    return {
+    # counts берём из уже загруженных строк, а не двумя COUNT-запросами по
+    # большим таблицам. Если кэша нет (нештатный вызов в обход агрегатов) —
+    # считаем как раньше, чтобы не вернуть нули вместо реального числа.
+    _cnt = _agg_store.get("c:" + str(user_id)) or {}
+
+    def _count_of(key: str, model) -> int:
+        v = _cnt.get(key)
+        if v is not None:
+            return int(v)
+        return int(db.query(model).filter_by(user_id=user_id).count())
+
+    full = {
         "ok": True,
         "user_id": user_id,
         "username": u.username,
@@ -765,12 +839,14 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
         "moods": [{"name": m, "count": c} for m, c in mood_c.most_common(12)],
         "hours": hours,
         "days": days,
-        "top_tracks": scored[:top_n],
+        "top_tracks": scored,
         "mobile": mobile_snap,
         "counts": {"likes": len(liked_ids), "dislikes": len(disliked_ids),
-                   "banned": len(bans), "events": db.query(PlayEvent).filter_by(user_id=user_id).count(),
-                   "plays": db.query(PlayHistory).filter_by(user_id=user_id).count()},
+                   "banned": len(bans), "events": _count_of("events", PlayEvent),
+                   "plays": _count_of("plays", PlayHistory)},
     }
+    _req_store(db, "profile")[str(user_id)] = full
+    return _slice_top(full, top_n)
 
 
 def _parse_dt(v) -> datetime | None:

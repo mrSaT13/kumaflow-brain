@@ -10,6 +10,7 @@ Polling из UI раз в 10-15 сек. Никаких вебсокетов в M
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -18,6 +19,91 @@ from app.db import get_db
 from app.core.auth import require_scope
 
 router = APIRouter(dependencies=[Depends(require_scope("wave"))])
+
+# --- Кэш «следующих треков» -------------------------------------------------
+# Виджет поллит /api/now-playing каждые 15с (web/src/components/NowPlaying.tsx),
+# а каждый запрос пересчитывал подборку заново: ~90 SQL и полные проходы по
+# истории пользователя. Если запрос занимает минуту, поллинг успевал накопиться
+# лавиной и выедать пул БД.
+#
+# Кэшируем ТОЛЬКО тяжёлую часть (_next_for_track). Определение «что играет» и
+# блок playing остаются свежими, считаются как раньше.
+#
+# Ключ содержит id текущего трека, поэтому смена трека сама даёт новый ключ и
+# ручная инвалидация не нужна. Протухает только подборка (60с) — это укладывается
+# в уже существующий STALE_MINUTES = 10.0.
+_NEXT_TTL_SEC = 60
+_NEXT_MEM: dict[str, tuple] = {}
+_NEXT_MEM_MAX = 256
+
+
+def _next_key(user_id: str | None, track_id: str, n: int, offset: int,
+              seed: str | None) -> str:
+    return f"np:next:v1:{user_id or '-'}:{track_id}:{n}:{offset}:{(seed or '-')[:32]}"
+
+
+def _next_cache_get(key: str) -> list | None:
+    """Прочитать кэш. Любая ошибка (Redis недоступен, битый JSON) → None."""
+    now = time.time()
+    hit = _NEXT_MEM.get(key)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    try:
+        import json as _json
+
+        from app.services.queue import get_redis as _gr
+
+        raw = _gr().get(key)
+        if not raw:
+            return None
+        val = _json.loads(raw)
+        if not isinstance(val, list):
+            return None
+        _NEXT_MEM[key] = (now + _NEXT_TTL_SEC, val)
+        return val
+    except Exception:
+        return None
+
+
+def _next_cache_put(key: str, value: list) -> None:
+    """Положить в кэш. Ошибки глотаем — кэш не должен ронять ответ."""
+    try:
+        now = time.time()
+        if len(_NEXT_MEM) >= _NEXT_MEM_MAX:
+            # Сначала выкидываем протухшие; если не хватило — любые.
+            for k in [k for k, v in _NEXT_MEM.items() if v[0] <= now]:
+                _NEXT_MEM.pop(k, None)
+            if len(_NEXT_MEM) >= _NEXT_MEM_MAX:
+                _NEXT_MEM.clear()
+        _NEXT_MEM[key] = (now + _NEXT_TTL_SEC, value)
+    except Exception:
+        pass
+    try:
+        import json as _json
+
+        from app.services.queue import get_redis as _gr
+
+        _gr().setex(key, _NEXT_TTL_SEC, _json.dumps(value, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _next_cached(db: Session, track_id: str, user_id: str | None, *, n: int,
+                 offset: int, jitter_seed: str | None) -> list:
+    """next-N через кэш на 60с. Раньше прямая _next_for_track на каждый поллинг."""
+    key = _next_key(user_id, track_id, n, offset, jitter_seed)
+    hit = _next_cache_get(key)
+    if hit is not None:
+        return hit
+    try:
+        val = _next_for_track(db, track_id, user_id, n=n, offset=offset,
+                              jitter_seed=jitter_seed)
+    except Exception:
+        val = []
+    if val:
+        # Пустой результат не кэшируем: значит «нечего подсказать», а не «нет ответа».
+        _next_cache_put(key, val)
+    return val
 
 
 def _explain(cur_feat, cur_track, cand_track, cand_feat,
@@ -363,12 +449,8 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
                             cover = _rc2(db, t)
                         except Exception:
                             cover = t.cover_art_id or None
-                        nxt = []
-                        try:
-                            nxt = _next_for_track(db, str(t.id), str(brain_user.id),
-                                                  n=n, offset=offset, jitter_seed=seed)
-                        except Exception:
-                            nxt = []
+                        nxt = _next_cached(db, str(t.id), str(brain_user.id),
+                                           n=n, offset=offset, jitter_seed=seed)
                         return {"playing": {
                             "external_id": t.external_id,
                             "track_id": str(t.id),
@@ -480,9 +562,6 @@ def now_playing(user_id: str | None = None, n: int = 5, offset: int = 0,
             playing["cover_art_id"] = None
     nxt: list[dict] = []
     if local is not None:
-        try:
-            nxt = _next_for_track(db, str(local.id), user_id, n=n,
-                                  offset=offset, jitter_seed=seed)
-        except Exception:
-            nxt = []
+        nxt = _next_cached(db, str(local.id), user_id, n=n,
+                           offset=offset, jitter_seed=seed)
     return {"playing": playing, "next": nxt, "source": "navidrome", "offset": offset}
