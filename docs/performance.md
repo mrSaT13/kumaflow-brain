@@ -1,0 +1,149 @@
+# Производительность, техдолг и эксплуатация
+
+Живой список по итогам разбора инцидента от 2026-10-12: `/api/now-playing`
+висел по 300–470 с, пул БД уходил в `QueuePool limit of size 10 overflow 20`,
+воркер падал по OOM (`Child process [9903] died`).
+
+Отмеченное `[x]` — уже в `main`.
+
+---
+
+## Замер: сделать ПЕРВЫМ, до любых правок
+
+Гипотеза («убираем повторные чтения — станет быстро») проверена только по коду
+и логам. Реальных цифр на сервере нет ни для «до», ни для «после».
+
+- [ ] **Снять профиль на прод-сервере.** Пока тормозит — в одном окне:
+      ```bash
+      docker compose exec backend py-spy dump --pid 1
+      docker compose exec postgres psql -U kumaflow -c \
+        "select query, calls, mean_exec_time from pg_stat_statements
+         order by mean_exec_time desc limit 15"
+      docker compose exec postgres psql -U kumaflow -c \
+        "select state, count(*), max(now()-query_start) from pg_stat_activity group by state"
+      ```
+      `pg_stat_statements` надо включить один раз в БД:
+      `ALTER SYSTEM SET shared_preload_libraries='pg_stat_statements';` + рестарт.
+- [ ] **Зафиксировать «до»:** время `/api/now-playing` и `curl /api/debug/pool`
+      (checkedout/size) при открытой главной странице 5 минут.
+- [ ] **Сравнить «после» деплоя 0.3.9** с теми же цифрами. Если разницы нет —
+      гипотеза неверна, возвращаться к замеру, а не доделывать правки.
+
+## Сделано в 0.3.9
+
+- [x] **Кэш подборки next-N на 60 с** (`api/now_playing.py`). Ключ включает id
+      текущего трека, поэтому смена трека сама даёт новый ключ — ручная
+      инвалидация не нужна. Два уровня: процессный `_NEXT_MEM` + Redis (общий
+      для `--workers 2`).
+- [x] **Кэш на `Session.info`** (`services/taste.py`): `user_profile` и
+      `_user_track_aggregates` считаются один раз на запрос вместо 2–3 раз.
+      Сессия из `get_db` живёт ровно один запрос, поэтому запись исчезает сама.
+      Убран двойной скан `PlayHistory`, гистограмма часов/дней — из уже
+      загруженных `PlayEvent`, `counts` — по длине строк вместо двух `COUNT(*)`.
+- [x] **`NameError: 'bans'`** в `wave_continue` (`services/wave.py`). Ронял
+      весь эндпоинт, а не только фильтрацию банами. Тесты: 24 failed → 11.
+
+## Осталось по производительности
+
+Порядок = ожидаемый эффект на единицу риска.
+
+- [ ] **N+1 в обложках.** `now_playing.py:367` зовёт
+      `covers.resolve_track_cover_id` в цикле по окну (361–369) → до **20 SQL**
+      на 10 треков (`covers.py:265,268`). Собрать один запрос по
+      `album_id IN (...)`.
+- [ ] **`_next_for_track` тянет до 900 ORM-объектов** (`now_playing.py:286`
+      `.limit(300)` + `:292` `.limit(600)`), потом `score_candidates` **ещё раз**
+      грузит 400 (`services/wave.py:965`). Брать только нужные id/колонки.
+- [ ] **`ArtistBan WHERE user_id` читается 4 раза** за запрос:
+      `now_playing.py:270,272` + `collab.py:226,243`. Один раз.
+- [ ] **`collab._signals` сканирует глобальные таблицы** — все `Favorite`,
+      все `TrackDislike`, весь `Playlist ⋈ PlaylistTrack` (`collab.py:86,92,100`).
+      TTL 60 с, но на холодную это сотни тысяч строк в память.
+- [ ] **`IN (...)` без лимита** по всей истории юзера: `taste.py:673,677`,
+      `collab.py:239`. При 20k событиях — 20k bind-параметров.
+- [ ] **`skip_model.get_model` на холодную** (`services/wave.py:797`):
+      `user_profile` на **каждого** юзера из 20 000 последних событий, ≈ +154
+      SQL на один запрос. Кэш 6 ч — поэтому скачки 468 с → 267 с. Считать
+      только для текущего пользователя.
+- [ ] **Кэш `get_media_server_config`** (`services/media_server.py:23`) —
+      читает `AppSetting` на каждом запросе, включая каждый поллинг виджета.
+- [ ] **Backpressure.** Сейчас любой всплеск копится и выедает пул. Нужен
+      предел конкурентности и быстрый отказ (429 + `Retry-After`) вместо
+      ожидания по минуте. **Требует правки фронта:** `api.ts` должен отличать
+      429/503 от падения, иначе «виджет молча исчез» превратится в «ошибка:
+      перегружено» — для пользователя это хуже.
+- [ ] **Precompute по событию вместо расчёта на каждый запрос.** Считать next-5
+      в момент `POST /api/wave/publish` и отдавать из Redis готовым. Это то,
+      что делает Яндекс. **Требует инвалидации в трёх местах** (смена трека,
+      скип, бан артиста) — забытое место = тихий баг. Поэтому после замера,
+      не раньше.
+- [ ] **asyncpg вместо блокирующего psycopg** — уход из threadpool целиком.
+      Большой рефакторинг, делать последним и только если пункты выше не
+      дали результата.
+
+## Баги (найдены, не исправлены)
+
+- [ ] **`select_seeds` недетерминирован.** `services/wave.py:390` зовёт
+      `random.shuffle` через **глобальный** random, хотя `score_candidates`
+      переведён на `jitter_seed`. Одинаковый вход → разный выход (проверено:
+      4 трека из 5 отличаются). Докстринг `wave.py:768` прямо говорит
+      «детерминированный jиттер **вместо глобального random**» — переход
+      начали, `select_seeds` забыли. Ломает
+      `test_wave_continue_russian_pill_same_result`.
+      **Решение продуктовое:** «Далее» может специально давать разное. Если да —
+      чинить тест, а не код.
+- [ ] **Кап по артисту в seed_radio не работает.** `test_per_artist_cap_respected`:
+      `{'S': 3, 'A': 3, 'B': 3}` при капе 2.
+
+## Тесты: 11 красных, разобрано
+
+- [ ] **8 падений — нет зависимости**: `soundfile` и др. в локальном окружении
+      (`test_sonar.py` × 7, `test_yandex_library::test_token_roundtrip`).
+- [ ] **2 падения — загрязнение состояния между тестами**
+      (`test_tracks_mood.py`, `test_tracks_mood_normalized.py`): в паре проходят,
+      в общем прогоне нет. Чинить изоляцию, не сами тесты.
+- [ ] **1** — см. `select_seeds` выше.
+
+## Инфраструктура
+
+- [ ] **`max_connections`.** `deploy/Dockerfile.server:53` запускает
+      `--workers 2`, пул БД `pool_size=10 + max_overflow=20` → **60 соединений
+      на backend** плюс по 30 у `worker`, `worker-audio`, `worker-clap`,
+      `scheduler`. При полном использовании ~180 при `max_connections=100`
+      у `postgres:16-alpine`. Прямо сейчас это замаскировано инцидентом выше;
+      после фикса проверить и свести к разумному.
+
+## Безопасность
+
+- [ ] **`POSTGRES_PASSWORD: CHANGE_ME_postgres_password`** в публичном
+      `docker-compose.yml`. Репозиторий публичный. Смена: `ALTER USER` +
+  **тот же пароль** в compose у backend и postgres одновременно — `pgdata`
+  помнит пароль первой инициализации, смена только в env даст рассинхрон.
+
+---
+
+## Обновление сервера (неочевидный порядок)
+
+Push в `main` сам запускает `docker-publish` (сборка трёх образов в GHCR),
+но сервер тянет готовый образ — **до успешной сборки обновлять рано**.
+
+```bash
+# 1. Дождаться зелёной сборки: github.com/mrSaT13/kumaflow-brain/actions
+# 2. На сервере:
+cd kumaflow
+cp docker-compose.yml docker-compose.yml.bak
+git pull
+docker compose pull
+docker compose up -d
+```
+
+`git pull` безопасен для локальных правок compose: коммиты трогают только
+`server/`, а не `docker-compose.yml`, поэтому merge чистый.
+
+Проверки после:
+
+```bash
+curl -s http://localhost:8000/api/version      # ждём 0.3.9
+curl -s http://localhost:8000/api/debug/pool   # checkedout/size
+docker compose logs -f backend                 # старт, без "Exception in ASGI"
+```
