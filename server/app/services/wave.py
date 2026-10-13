@@ -768,6 +768,33 @@ def _skip_prob(pipe, track, feat, pref_g: dict, cur_energy: float | None,
     return skip_risk(track, feat, pref_g, cur_energy, drift, fatigue)
 
 
+def _context_overrides(act_code: str | None, mood_code: str | None,
+                       jitter: float, mood_penalty: list,
+                       novelty_extra: float) -> tuple:
+    """Ужесточение характера под пилюлю (in-memory, в базу не пишем).
+
+    Пилюля «Тренировка» на плеере иначе давала только жёсткий фильтр, а характер
+    (разброс/удержание/новизна) оставался общим — контраст слабее, чем от
+    кнопок-пресетов в тюнинге. Правило: только ужесточаем сохранённое,
+    сохранённое строже — побеждает оно. Пилюля выключена — всё как было.
+    Чистая функция — тестируется без БД.
+    """
+    try:
+        act = act_code or ''
+        m = mood_code or ''
+        mp = list(mood_penalty)
+        if act == 'workout' or m == 'aggressive':
+            jitter = min(float(jitter), 0.04)
+            mp = [max(float(a), b) for a, b in zip(mp, [0.10, 0.20, 0.30])]
+            novelty_extra = min(float(novelty_extra), 0.02)
+        elif act in ('rest', 'sleep'):
+            jitter = min(float(jitter), 0.08)
+            novelty_extra = min(float(novelty_extra), 0.04)
+        return jitter, mp, novelty_extra
+    except Exception:
+        return jitter, mood_penalty, novelty_extra
+
+
 def score_candidates(db, user_id: str, candidate_ids: list[str],
                      seed_ids: list[str], settings: dict | None = None,
                      recent_events: list[dict] | None = None,
@@ -973,6 +1000,10 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     _rf = _tun_list(tun, 'repeats', 'recency_factors', [0.3, 0.6, 0.85], 3)
     _nov_extra = _tun_float(tun, 'repeats', 'novelty_extra', 0.08)
     _jitter = _tun_float(tun, 'character', 'jitter', 0.12)
+    # Контекстное ужесточение под занятие/настроение (см. _context_overrides):
+    # пилюля на плеере даёт и фильтр, и характер — кнопок в тюнинге жать не надо.
+    _jitter, _mp, _nov_extra = _context_overrides(
+        _act_code, mood, _jitter, _mp, _nov_extra)
     _skip_w = _tun_float(tun, 'character', 'skip_weight', 0.25)
     _key_w = _tun_float(tun, 'character', 'key_weight', 0.06)
     _cluster_w = _tun_float(tun, 'character', 'cluster_weight', 0.06)

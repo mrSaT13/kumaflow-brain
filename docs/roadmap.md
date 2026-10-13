@@ -208,6 +208,13 @@
   через `AppSetting(updates:last_notified)`. Крон `check_updates` ежедневно
   08:00 + ручной `POST /api/updates/check`. Нет сети — тихо «неизвестно».
 
+## Сделано в 0.3.13 (13.10.2026, пилюля = фильтр + характер)
+
+- [x] **Контекстные оверрайды.** `_context_overrides`: занятие `workout`
+  и настроение `aggressive` ужесточают `jitter → 0.04`, `mood_penalty`,
+  `novelty` прямо в запросе (in-memory, в базу не пишем). `rest/sleep` —
+  мягче разброс/новизна. Сохранённый тюнинг строже — побеждает он.
+
 ## KumaFlow Connect + клиенты (12.10.2026, объединено с «Новые клиенты»)
 
 База готова: per-device слоты живой очереди + `POST /api/wave/publish` /
