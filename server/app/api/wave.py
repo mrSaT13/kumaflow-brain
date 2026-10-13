@@ -330,12 +330,14 @@ def wave_settings_get(user_id: str, request: Request, db: Session = Depends(get_
 
 
 @router.put('/settings')
+@router.post('/settings')
 def wave_settings_put(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Сохранить пилюли волны (merge). Пустая строка стирает пилюлю.
 
     Body: {user_id, settings{mood?, activity?, characteristic?, language?}}.
     PUT {} — сброс для всех устройств (version растёт, очередь
     перестраивается следующей докруткой).
+    POST — алиас PUT для мобильных клиентов (405-фикс 0.3.10).
     """
     from app.services import wave_settings as _wset
 
