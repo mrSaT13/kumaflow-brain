@@ -150,6 +150,15 @@ def _tick_once() -> None:
                     from app.workers import tasks as _t
 
                     enqueue_light(_t.auto_tune, job_timeout=1800)
+                elif kind == "check_updates":
+                    # Дешёвый (один GET к GitHub) — inline, как covers_gc:
+                    # очередь ради этого не дёргаем, ошибки глотает сам сервис.
+                    try:
+                        from app.services import updates as _up
+
+                        _up.check_and_notify(db)
+                    except Exception:
+                        pass
                 else:
                     continue
                 # Статусы видны в UI: без них «крон не работает» и «крон упал» выглядели одинаково.

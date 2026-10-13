@@ -230,6 +230,8 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => http<{ status: string }>("/api/health"),
   version: () => http<{ name: string; version: string; env?: string; tz?: string; utc_offset_sec?: number; now?: string }>("/api/version"),
+  updates: () => http<{ ok: boolean; current: string; changelog: string }>("/api/updates"),
+  checkUpdates: () => http<{ ok: boolean; current: string; latest: string | null; update_available: boolean; notified?: boolean; note?: string }>(`/api/updates/check`, { method: "POST" }),
 
   overview: () =>
     http<{

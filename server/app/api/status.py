@@ -28,6 +28,33 @@ def version() -> dict:
             "tz": str(key), "utc_offset_sec": off, "now": now.isoformat()}
 
 
+@router.get("/updates")
+def updates() -> dict:
+    """О программе: своя версия + чейнджлог из CHANGELOG.md."""
+    from app.services import updates as _up
+
+    return {"ok": True, "current": _up.current_version(),
+            "changelog": _up.local_changelog()}
+
+
+@router.post("/updates/check")
+def updates_check() -> dict:
+    """Ручная проверка обновлений с GitHub (кнопка в О программе).
+
+    Та же проверка, что ежедневный крон: есть новее — уведомит
+    в колокольчик один раз на версию (дедуп по AppSetting).
+    """
+    from app.db.database import session_scope
+    from app.services import updates as _up
+
+    with session_scope() as db:
+        res = _up.check_and_notify(db)
+    out = {"ok": True, **res}
+    if res.get("latest") is None:
+        out["note"] = "GitHub недоступен — попробуй позже"
+    return out
+
+
 @router.get("/debug/pool")
 def debug_pool() -> dict:
     """Живое состояние пула БД: кто держит слоты. Открыт как /health —
