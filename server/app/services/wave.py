@@ -787,9 +787,20 @@ def _context_overrides(act_code: str | None, mood_code: str | None,
             jitter = min(float(jitter), 0.04)
             mp = [max(float(a), b) for a, b in zip(mp, [0.10, 0.20, 0.30])]
             novelty_extra = min(float(novelty_extra), 0.02)
+        elif act == 'party':
+            # Вечеринка — тот же драйв, но танцевальный: чуть мягче тренировки.
+            jitter = min(float(jitter), 0.06)
+            mp = [max(float(a), b) for a, b in zip(mp, [0.08, 0.15, 0.25])]
+            novelty_extra = min(float(novelty_extra), 0.03)
+        elif act in ('commute', 'wakeup', 'walk'):
+            # В дороге/подъём/прогулка — бодро и ровно, без жёсткого удержания.
+            jitter = min(float(jitter), 0.08)
+            novelty_extra = min(float(novelty_extra), 0.04)
         elif act in ('rest', 'sleep'):
             jitter = min(float(jitter), 0.08)
             novelty_extra = min(float(novelty_extra), 0.04)
+        # work/study — фон для работы: характер не трогаем сознательно,
+        # иначе фон превращается в запрет (см. ACTIVITY_HARD).
         return jitter, mp, novelty_extra
     except Exception:
         return jitter, mood_penalty, novelty_extra
