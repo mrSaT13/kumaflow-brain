@@ -419,7 +419,10 @@ def _interleave_by_artist(ordered: list[str], artist_of: dict[str, str],
         if not progressed:
             if per >= ceiling:
                 break
-            per = min(per + 2, ceiling)
+            # Ослабляем по +1 (было +2): перелёт капа минимальный.
+            # Например, 3 артиста × cap 2 → per 3 даёт ровно 9 треков,
+            # а не скачок сразу до 4.
+            per = min(per + 1, ceiling)
     return out
 
 

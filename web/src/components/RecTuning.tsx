@@ -202,6 +202,26 @@ const PRESETS: { id: string; title: string; desc: string; set: Record<string, nu
       "repeats.artist_cap": 1,
     },
   },
+  {
+    id: "workout", title: "Тренировка (рок/драйв)",
+    desc: "Держит энергию жёстко, разброс и новизна вниз, скипы чувствительнее.",
+    set: {
+      "character.jitter": 0.04, "repeats.novelty_extra": 0.02,
+      "repeats.mood_penalty": [0.1, 0.2, 0.3],
+      "repeats.artist_penalty": [0.1, 0.18, 0.3],
+      "playlists.smooth_max_step": 0.1,
+      "skips.drift_counts": [2, 3, 5],
+    },
+  },
+  {
+    id: "rest", title: "Отдых (медляки)",
+    desc: "Мягко держит спокойное, шире окно, можно знакомое.",
+    set: {
+      "character.jitter": 0.08, "repeats.novelty_extra": 0.04,
+      "repeats.mood_penalty": [0.02, 0.04, 0.08],
+      "playlists.smooth_max_step": 0.12,
+    },
+  },
 ];
 
 type Num = number | number[] | Record<string, number>;

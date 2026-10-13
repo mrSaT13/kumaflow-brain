@@ -32,6 +32,11 @@ def test_mood_filter_matches_catalog_despite_dirty_labels():
     invalidate_moods_cache()
     db = SessionLocal()
     try:
+        # Точные счётчики — чистим чужие сиды внутри своей транзакции
+        # (см. test_tracks_mood.py: wave-тесты сеют свои лейблы в ту же БД).
+        db.query(TrackFeatures).delete()
+        db.query(Track).delete()
+        db.commit()
         srv = db.query(MediaServer).filter_by(name="mood-norm").first()
         if srv is None:
             srv = MediaServer(id=str(uuid.uuid4()), type="navidrome",
@@ -59,3 +64,4 @@ def test_mood_filter_matches_catalog_despite_dirty_labels():
         assert counts.get("тёплый", 0) >= 1, counts
     finally:
         db.close()
+        invalidate_moods_cache()

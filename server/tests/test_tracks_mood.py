@@ -1,14 +1,26 @@
 """Фильтр треков по настроению + справочник настроений. Живая sqlite."""
 import uuid as _uuid
 
-from app.api.library import list_moods
+from app.api.library import invalidate_moods_cache, list_moods
 from app.api.tracks import list_tracks
 from app.db.database import SessionLocal, init_db
 from app.db.models import MediaServer, Track, TrackFeatures
 
 
 def _seed():
+    # Тест считает точные total — чужые сиды других тестов (wave сеет
+    # «спокойный»/«happy» в ту же БД) и глобальный кэш moods на 120с
+    # ломают счёт. Чистим всё внутри своей транзакции (откат conftest
+    # вернёт как было) + сбрасываем кэш до и после.
+    invalidate_moods_cache()
     init_db()
+    db = SessionLocal()
+    try:
+        db.query(TrackFeatures).delete()
+        db.query(Track).delete()
+        db.commit()
+    finally:
+        db.close()
     db = SessionLocal()
     srv = db.query(MediaServer).filter_by(name="mood-t").first()
     if srv is None:
@@ -50,3 +62,4 @@ def test_mood_filter_and_catalog():
         assert {"энергичный", "спокойный"} <= names
     finally:
         db.close()
+        invalidate_moods_cache()

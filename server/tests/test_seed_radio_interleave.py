@@ -30,13 +30,30 @@ def test_seed_first_even_if_similar_scores_higher():
 
 
 def test_per_artist_cap_respected():
-    ids, amap = _mk({"S": ["s1", "s2", "s3"], "A": ["a1", "a2", "a3"],
-                     "B": ["b1", "b2", "b3"]})
-    out = _interleave_by_artist(ids, amap, seed_artist="S", n=9, cap=2)
+    # Пул широкий: строгий кап выполним без урезания очереди
+    # (5 артистов × 2 трека, n=10, cap=2 → ровно 10, ослабление не нужно).
+    ids, amap = _mk({"S": ["s1", "s2"], "A": ["a1", "a2"],
+                     "B": ["b1", "b2"], "C": ["c1", "c2"],
+                     "D": ["d1", "d2"]})
+    out = _interleave_by_artist(ids, amap, seed_artist="S", n=10, cap=2)
+    assert len(out) == 10, out
     counts = {}
     for t in out:
         counts[amap[t]] = counts.get(amap[t], 0) + 1
     assert max(counts.values()) <= 2, counts
+
+
+def test_cap_relaxes_minimally_when_pool_thin():
+    # Тонкий пул: ослабить кап, но минимально (3 артиста × cap 2 → per 3,
+    # а не скачок до 4 как было при шаге +2).
+    ids, amap = _mk({"S": ["s1", "s2", "s3"], "A": ["a1", "a2", "a3"],
+                     "B": ["b1", "b2", "b3"]})
+    out = _interleave_by_artist(ids, amap, seed_artist="S", n=9, cap=2)
+    assert len(out) == 9, out
+    counts = {}
+    for t in out:
+        counts[amap[t]] = counts.get(amap[t], 0) + 1
+    assert max(counts.values()) <= 3, counts
 
 
 def test_many_artists_instead_of_few():

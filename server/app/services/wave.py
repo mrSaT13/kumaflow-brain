@@ -123,14 +123,17 @@ MOOD_PRESETS: dict[str, dict] = {
     'happy': {'moods': {'happy', 'upbeat', 'energetic', 'dance'},
               'valence_min': 0.55, 'dance_min': 0.5},
     'calm': {'moods': {'calm', 'relaxed', 'peaceful', 'dreamy', 'warm'},
-             'energy_max': 0.45, 'arousal_max': 0.45, 'tempo_max': 120},
+             'energy_max': 0.45, 'arousal_max': 0.45, 'tempo_max': 100},
     'sad': {'moods': {'sad', 'melancholic', 'dark'},
             'valence_max': 0.45},
-    'dark': {'moods': {'dark', 'aggressive', 'melancholic'},
-             'valence_max': 0.5},
-    'chill': {'moods': {'calm', 'relaxed', 'dreamy'}, 'energy_max': 0.5},
+    'dark': {'moods': {'dark', 'melancholic'},
+             'valence_max': 0.45},
+    'aggressive': {'moods': {'aggressive', 'energetic', 'dark'},
+                   'energy_min': 0.65, 'tempo_min': 120},
+    'chill': {'moods': {'calm', 'relaxed', 'dreamy'}, 'energy_max': 0.45,
+              'tempo_max': 100},
     'relaxed': {'moods': {'calm', 'relaxed', 'peaceful', 'dreamy'},
-                'energy_max': 0.5},
+                'energy_max': 0.45, 'tempo_max': 100},
 }
 # Занятие: мягкие бонусы (не жёсткие фильтры — очередь не должна пустеть).
 # Ключи-коды — контракт с плеером (GET /api/wave/options отдаёт каталог).
@@ -139,12 +142,12 @@ ACTIVITY_PRESETS: dict[str, dict] = {
     'wakeup': {'energy_min': 0.5, 'tempo_min': 100, 'valence_min': 0.4},
     'commute': {'energy_min': 0.6, 'tempo_min': 110},
     'work': {'energy_min': 0.3, 'energy_max': 0.6, 'tempo_max': 120},
-    'workout': {'energy_min': 0.6, 'tempo_min': 110},
+    'workout': {'energy_min': 0.65, 'tempo_min': 120},
     'sleep': {'energy_max': 0.35},
     'study': {'energy_min': 0.3, 'energy_max': 0.6, 'tempo_max': 120},
     'party': {'energy_min': 0.7, 'tempo_min': 115, 'dance_min': 0.5},
     'walk': {'energy_min': 0.4, 'energy_max': 0.7, 'valence_min': 0.4},
-    'rest': {'energy_max': 0.5},
+    'rest': {'energy_max': 0.4},
 }
 ACTIVITY_ALIASES: dict[str, str] = {
     'просыпаюсь': 'wakeup',
@@ -161,9 +164,35 @@ ACTIVITY_ALIASES: dict[str, str] = {
 # Сознательно только «успокаивающие»: work/study остаются мягкими, иначе
 # фон для работы превращается в запрет.
 ACTIVITY_HARD: dict[str, dict] = {
-    'sleep': {'energy_max': 0.4, 'tempo_max': 110},
-    'rest': {'energy_max': 0.5, 'tempo_max': 125},
+    'sleep': {'energy_max': 0.35, 'tempo_max': 95},
+    'rest': {'energy_max': 0.4, 'tempo_max': 100},
+    'workout': {'energy_min': 0.65, 'tempo_min': 120},
 }
+# Жанр -> муд для треков без анализа (временный фолбек, пока нет TrackFeatures).
+# Точный звук всегда побеждает: как только трек проанализирован, решает аудио.
+GENRE_MOOD_FALLBACK: dict[str, str] = {
+    'rock': 'aggressive', 'metal': 'aggressive', 'punk': 'aggressive',
+    'hardcore': 'aggressive', 'hard rock': 'aggressive',
+    'heavy metal': 'aggressive', 'alternative metal': 'aggressive',
+    'ambient': 'calm', 'classical': 'calm', 'jazz': 'calm',
+    'sleep': 'calm', 'lullaby': 'calm', 'meditation': 'calm',
+    'dance': 'energetic', 'electronic': 'energetic', 'techno': 'energetic',
+    'house': 'energetic', 'trance': 'energetic',
+}
+
+
+def _genre_mood(genre: str | None) -> str | None:
+    """Муд по жанру для unknown-треков. Нет жанра/нет маппинга -> None (= пропуск)."""
+    try:
+        g = (genre or '').strip().lower()
+    except Exception:
+        return None
+    if not g:
+        return None
+    for key, mood in GENRE_MOOD_FALLBACK.items():
+        if key in g:
+            return mood
+    return None
 # Каталог для плеера (код — то, что плеер шлёт обратно в settings.activity).
 ACTIVITY_CATALOG: list[dict] = [
     {'code': 'wakeup', 'label': 'Просыпаюсь', 'hint': 'бодро, но мягко'},
@@ -1188,10 +1217,19 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             c = used_genres[t.genre]
             pen += _gp[0] if c == 1 else (_gp[1] if c == 2 else _gp[2])
         # Разнообразие настроений: не класть одно и то же настроение пачкой.
-        _cm = _mood_of(f)
-        if _cm and _cm in used_moods:
-            c = used_moods[_cm]
-            pen += _mp[0] if c == 1 else (_mp[1] if c == 2 else _mp[2])
+        # Смотрим ВСЕ лейблы трека (агрессивный часто 2-й после энергичного),
+        # берём максимальный штраф — детерминированно (sorted), без тройного штрафа.
+        _cms = sorted(_mood_codes_of(f)) if f is not None else []
+        if _cms:
+            _best = 0.0
+            for _mc in _cms:
+                if _mc in used_moods:
+                    c = used_moods[_mc]
+                    _cand_pen = _mp[0] if c == 1 else (_mp[1] if c == 2 else _mp[2])
+                    if _cand_pen > _best:
+                        _best = _cand_pen
+            pen += _best
+        _cm = _cms[0] if _cms else (_mood_of(f) if f is not None else None)
         # Усталость артиста за неделю (по истории): загонянное остужаем.
         if fatigue and t.artist_name and t.artist_name in fatigue:
             _fp = int(fatigue[t.artist_name] or 0)
@@ -1218,9 +1256,17 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             except Exception:
                 clap_s = 0.0
         # Ручка настроения бандита (mood-армы): любит такое в этот контекст.
+        # Берём лучший из всех лейблов трека (см. выше про 2-й агрессивный).
         mood_b = 0.0
         try:
-            if mood_arm and _cm:
+            if mood_arm and _cms:
+                _best_b = 0.0
+                for _mc in _cms:
+                    _v = min(max(float(mood_arm.get(_mc, 0.0)), _marm_min), _marm_max)
+                    if _v > _best_b:
+                        _best_b = _v
+                mood_b = _best_b
+            elif mood_arm and _cm:
                 mood_b = min(max(float(mood_arm.get(_cm, 0.0)), _marm_min), _marm_max)
         except (TypeError, ValueError):
             mood_b = 0.0
@@ -1963,7 +2009,8 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 _cur_bpm = 0.0
             if ('energy_max' in _hp and _cur_en > _hp['energy_max']) or \
                ('energy_min' in _hp and _cur_en < _hp['energy_min']) or \
-               ('tempo_max' in _hp and _cur_bpm and _cur_bpm > _hp['tempo_max']):
+               ('tempo_max' in _hp and _cur_bpm and _cur_bpm > _hp['tempo_max']) or \
+               ('tempo_min' in _hp and _cur_bpm and _cur_bpm < _hp['tempo_min']):
                 morphing = True
     # Целевой сентимент лирики по муд-пресету (иначе держим текущий вайб).
     _POS_MOODS = {"energetic", "excited", "happy", "upbeat"}
@@ -2184,6 +2231,11 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         fm = {str(f.track_id): f for f in
               db.query(TrackFeatures).filter(
                   TrackFeatures.track_id.in_(cand[:2000])).all()}
+        try:
+            _gm2 = {str(t.id): (t.genre or '') for t in
+                    db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
+        except Exception:
+            _gm2 = {}
         _want = set((MOOD_PRESETS.get(mood) or {}).get('moods') or {mood}) if mood else set()
         if mood and morphing and start_mood:
             _want = _want | set((MOOD_PRESETS.get(start_mood) or {})
@@ -2192,23 +2244,34 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         def _passes(c: str) -> bool:
             f = fm.get(c)
             if f is None:
-                return True  # unknown = пропуск, как в фильтре языка
+                # unknown: пробуем жанр-фолбек, иначе пропуск (как раньше).
+                if _want:
+                    _gmood = _genre_mood(_gm2.get(c))
+                    if _gmood is not None:
+                        return _gmood in _want
+                return True
             if _want and not (_mood_codes_of(f) & _want):
                 return False
-            if _hard_act:
-                try:
-                    en = float(f.energy) if f.energy is not None else 0.5
-                except (TypeError, ValueError):
-                    en = 0.5
-                try:
-                    bpm = float(f.tempo_bpm) if f.tempo_bpm else 0.0
-                except (TypeError, ValueError):
-                    bpm = 0.0
-                if 'energy_min' in _hard_act and en < _hard_act['energy_min']:
+            # Жёсткие рамки настроения (пресет) + занятия: энергия/темп.
+            _preset = MOOD_PRESETS.get(mood) or {} if mood else {}
+            try:
+                en = float(f.energy) if f.energy is not None else 0.5
+            except (TypeError, ValueError):
+                en = 0.5
+            try:
+                bpm = float(f.tempo_bpm) if f.tempo_bpm else 0.0
+            except (TypeError, ValueError):
+                bpm = 0.0
+            for _lim in (_preset, _hard_act):
+                if not _lim:
+                    continue
+                if 'energy_min' in _lim and en < _lim['energy_min']:
                     return False
-                if 'energy_max' in _hard_act and en > _hard_act['energy_max']:
+                if 'energy_max' in _lim and en > _lim['energy_max']:
                     return False
-                if 'tempo_max' in _hard_act and bpm and bpm > _hard_act['tempo_max']:
+                if 'tempo_min' in _lim and bpm and bpm < _lim['tempo_min']:
+                    return False
+                if 'tempo_max' in _lim and bpm and bpm > _lim['tempo_max']:
                     return False
             return True
 
