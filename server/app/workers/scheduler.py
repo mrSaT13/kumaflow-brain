@@ -331,7 +331,9 @@ def _watchdog_analysis(db, now) -> None:
         _jt = int(_gs().analysis_job_timeout_sec or 600)
     except Exception:
         _jt = 600
-    enqueue(_t.sonic_analysis, new_id, job_timeout=_jt)
+    from app.services.queue import enqueue as _enqueue
+
+    _enqueue(_t.sonic_analysis, new_id, job_timeout=_jt)
     logger.info("analysis watchdog: перезапустил остаток {} (прошлый {})", remaining, str(latest.id)[:8])
 
 

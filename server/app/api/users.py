@@ -750,7 +750,10 @@ def _resolve_track(db: Session, raw: str):
     s = (raw or '').strip()
     if not s:
         return None
-    t = db.get(Track, s)
+    try:
+        t = db.get(Track, s)
+    except Exception:
+        t = None
     if t is not None:
         return t
     return db.query(Track).filter(Track.external_id == s).first()
