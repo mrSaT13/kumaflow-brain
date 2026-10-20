@@ -461,6 +461,12 @@ class TasteProfile(Base):
     mobile_sync_source: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     desktop_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     sync_sources: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
+    # Слепок вкуса ПО ИСТОЧНИКАМ: {source: {genres, artists, liked, disliked,
+    # banned, counts, at}}. Один общий слепок на всех клиентов — это баг:
+    # последний записавший затирал предыдущего (яндекс-импорт шёл как
+    # «mobile» и стирал мобильный профиль). Теперь у каждого источника своя
+    # корзина, а поля mobile_* — СЛИЯНИЕ всех корзин (их читает скоринг).
+    sync_profiles: Mapped[dict] = mapped_column(JSONCol(), default=dict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )

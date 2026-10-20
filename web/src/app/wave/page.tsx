@@ -14,6 +14,7 @@ import { moodLook } from "@/lib/moodStyle";
 type WaveComp = {
   audio?: number; genre?: number; artist?: number;
   behavior?: number; collab?: number; novelty?: number;
+  timbre?: number; knn?: number; clap?: number;
 };
 
 type WaveTrack = {
@@ -93,6 +94,9 @@ const COMP_LABELS: { key: keyof WaveComp; label: string }[] = [
   { key: "behavior", label: "поведение" },
   { key: "collab", label: "коллаб" },
   { key: "novelty", label: "новизна" },
+  { key: "timbre", label: "тембр" },
+  { key: "knn", label: "k-NN" },
+  { key: "clap", label: "clap" },
 ];
 
 export default function WavePage() {

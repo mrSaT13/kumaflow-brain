@@ -388,6 +388,9 @@ def import_taste(db, user_id: str, client=None, max_tracks: int = 400) -> dict:
                     "bannedArtists": banned,
                     "artistDislikeCounts": {}},
         "events": [],
+        # Свой источник: без этого импорт считался «мобилой» и затирал
+        # мобильный слепок вкуса (жанры/артисты/лайки/баны).
+        "source": "yandex",
     })
     res.update({"ok": True, "source": "yandex",
                 "liked_total": len(liked_shorts), "disliked_total": len(disliked_shorts),

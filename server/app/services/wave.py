@@ -235,7 +235,13 @@ MOOD_PRESETS: dict[str, dict] = {
     'dark': {'moods': {'dark', 'melancholic'},
              'valence_max': 0.45},
     'aggressive': {'moods': {'aggressive', 'energetic', 'dark'},
-                   'energy_min': 0.65, 'tempo_min': 120},
+                   'energy_min': 0.65, 'tempo_min': 120,
+                   # «Боевое» ≠ «бодрое»: быстрый МАЖОРНЫЙ EDM (valence ~0.75)
+                   # проходил пилюлю наравне с Bodies, потому что семейство
+                   # лейблов включает «энергичный», а это ровно energy.
+                   # Теперь у пилюли есть и «мрачно»: valence низкий, arousal
+                   # высокий. Мажорное и спокойное — мимо.
+                   'valence_max': 0.55, 'arousal_min': 0.7},
     'chill': {'moods': {'calm', 'relaxed', 'dreamy'}, 'energy_max': 0.45,
               'tempo_max': 100},
     'relaxed': {'moods': {'calm', 'relaxed', 'peaceful', 'dreamy'},
@@ -1409,6 +1415,75 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     else:
         _cw = 0.0
 
+    # ---- ПОТОК (этап 3, часть 2): тембр и k-NN ---------------------------
+    # Тембр (chroma + форма MFCC) и косинус к КОНКРЕТНЫМ опорным трекам
+    # (k-NN) — сигналы, которых в скоринге не было. Считаются один раз на
+    # вызов, не на трек. Нет анализа/эмбеддингов -> вклад 0, волна 1в1.
+    _tw = _tun_float(tun, 'character', 'timbre_weight', 0.05)
+    _knn_w = _tun_float(tun, 'character', 'knn_weight', 0.08)
+    try:
+        from app.services import flow as _flow
+    except Exception:
+        _flow = None
+    timbre_map: dict[str, Any] = {}
+    timbre_seed_cent = None
+    timbre_sess_cent = None
+    knn_map: dict[str, float] = {}
+    knn_source: str | None = None
+    # Опоры k-NN: что играет сейчас (session) + сиды вкуса.
+    _flow_ref_ids: list[str] = list(dict.fromkeys(
+        list(session_ids or []) + list(seed_ids or [])))
+    if _flow is not None and (_tw > 0 or _knn_w > 0):
+        if _tw > 0:
+            try:
+                for _tid, _f in feats.items():
+                    if _f is None:
+                        continue
+                    _tv = _flow.timbre_vector(_f)
+                    if _tv:
+                        timbre_map[_tid] = _tv
+                timbre_seed_cent = _flow.timbre_centroid(
+                    [timbre_map[s] for s in (seed_ids or []) if s in timbre_map])
+                timbre_sess_cent = _flow.timbre_centroid(
+                    [timbre_map[s] for s in (session_ids or []) if s in timbre_map])
+            except Exception:
+                timbre_map, timbre_seed_cent, timbre_sess_cent = {}, None, None
+        if _knn_w > 0 and _flow_ref_ids:
+            try:
+                # 1) CLAP-эмбеддинги (семантика звука) — если есть.
+                if clap_map:
+                    knn_map = _flow.knn_scores(
+                        {tid: clap_map[tid] for tid in candidate_ids
+                         if tid in clap_map},
+                        clap_map, _flow_ref_ids)
+                    if knn_map:
+                        knn_source = "clap"
+                # 2) Фолбэк: 9-D вектор librosa (темп/энергия/центроид/...).
+                if not knn_map:
+                    _fv: dict[str, Any] = {}
+                    for _tid in list(candidate_ids) + _flow_ref_ids:
+                        _f = feats.get(_tid)
+                        if _f is None:
+                            continue
+                        _v = _feature_vector(None, _f)
+                        if _v is not None:
+                            _fv[_tid] = _v
+                    knn_map = _flow.knn_scores(_fv, _fv, _flow_ref_ids)
+                    if knn_map:
+                        knn_source = "audio"
+            except Exception:
+                knn_map, knn_source = {}, None
+    if timbre_map or knn_map:
+        try:
+            from app.core.logging import get_logger as _gl
+
+            _gl("wave").info(
+                "wave flow: тембр {} треков, k-NN {} ({}), опор {}",
+                len(timbre_map), len(knn_map), knn_source or "-",
+                len(_flow_ref_ids))
+        except Exception:
+            pass
+
     # behaviorBonus по свежим событиям (окно и таблица — из личного тюнинга,
     # дефолт: окно 10 как в мобиле).
     _b_win = _tun_int(tun, 'skips', 'behavior_window', 10)
@@ -1781,6 +1856,31 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                 clap_s = min(max(clap_s, 0.0), 1.0)
             except Exception:
                 clap_s = 0.0
+        # Тембр: сходство МАТЕРИАЛА трека (гармоника + форма) с сидами и
+        # сессией. Один жанр — разный материал: ударные против струнных.
+        timbre_c = 0.0
+        if timbre_map and _flow is not None:
+            _tv = timbre_map.get(tid)
+            if _tv is not None:
+                _parts: list[tuple[float, float]] = []
+                if timbre_seed_cent is not None:
+                    _parts.append((0.6, _flow.timbre_to_centroid(
+                        _tv, timbre_seed_cent)))
+                if timbre_sess_cent is not None:
+                    _parts.append((0.4, _flow.timbre_to_centroid(
+                        _tv, timbre_sess_cent)))
+                if _parts:
+                    _wsum = sum(w for w, _ in _parts)
+                    timbre_c = sum(w * v for w, v in _parts) / _wsum
+                    timbre_c = min(max(timbre_c, 0.0), 1.0)
+        # k-NN: похожесть на КОНКРЕТНЫЕ опорные треки, а не на их среднее.
+        # Трек, похожий на один играющий трек, получает реальный балл.
+        knn_c = 0.0
+        if knn_map:
+            try:
+                knn_c = min(max(float(knn_map.get(tid, 0.0)), 0.0), 1.0)
+            except (TypeError, ValueError):
+                knn_c = 0.0
         # Ручка настроения бандита (mood-армы): любит такое в этот контекст.
         # Берём лучший из всех лейблов трека (см. выше про 2-й агрессивный).
         mood_b = 0.0
@@ -1836,7 +1936,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                      pen - neg_pen - mood_pen + srv_bonus + time_b + arm_b + assoc_b +
                      _cw * clap_s + mood_b - _skip_w * skip_p +
                      _jit_v +
-                     _key_w * key_c + _cluster_w * cluster_c + _lyr_w * lyr_c)
+                     _key_w * key_c + _cluster_w * cluster_c + _lyr_w * lyr_c +
+                     _tw * timbre_c + _knn_w * knn_c)
         # Кламп 0..1 — ТОЛЬКО для показа. Раньше он же был и рангом: сумма
         # потолков (~2.6) упирает в 1.0 почти всю пачку, и порядок решался
         # остатками (то есть порядком обхода пула), а не моделью. Теперь
@@ -1887,6 +1988,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                              'arm': round(arm_b, 3),
                              'assoc': round(assoc_b, 3),
                              'clap': round(clap_s, 3),
+                             'timbre': round(timbre_c, 3),
+                             'knn': round(knn_c, 3),
                              'skip': round(skip_p, 3),
                              'mood_arm': round(mood_b, 3),
                              'mood_pen': round(mood_pen, 3),
@@ -1956,6 +2059,14 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
     if not cand:
         return []
     n = max(1, min(100, int(n or 30)))
+    # Тюнинг пула/сидов/усталости — те же ручки, что и в волне (кнопки были
+    # пустыми: значения игнорировались, всё было зашито константами).
+    _lim = wave_limits(db, user_id)
+    _pool_limit = _lim["pool_limit"]
+    _score_win = _lim["score_window"]
+    _collab_extra = _lim["collab_extra"]
+    _seed_limit = _lim["seed_limit"]
+    _fatigue_days = _lim["fatigue_days"]
     try:
         from app.core.time import local_hour as _lh, local_today as _lt
 
@@ -1970,9 +2081,10 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
     _seeds = [str(s) for s in (seeds or []) if s]
     if not _seeds:
         try:
-            _seeds = select_seeds(db, user_id, limit=5)
+            _seeds = select_seeds(db, user_id, limit=_seed_limit)
         except Exception:
             _seeds = []
+
     # свежие события -> дрейф + behaviorBonus (последние 60)
     recent_events: list[dict] = []
     try:
@@ -2006,7 +2118,7 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
     try:
         from app.db.models import TrackCluster as _TC
 
-        _need = list({str(c) for c in (cand[:800] + _seeds)})
+        _need = list({str(c) for c in (cand[:_score_win] + _seeds)})
         for i in range(0, len(_need), 500):
             try:
                 for row in db.query(_TC).filter(
@@ -2031,11 +2143,11 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
     try:
         from app.db.models import PlayHistory as _PH
 
-        for i in range(0, len(cand[:800]), 500):
+        for i in range(0, len(cand[:_score_win]), 500):
             try:
                 for tid, when in db.query(_PH.track_id, _PH.played_at).filter(
                         _PH.user_id == str(user_id),
-                        _PH.track_id.in_(cand[:800][i:i + 500])).all():
+                        _PH.track_id.in_(cand[:_score_win][i:i + 500])).all():
                     if when and (str(tid) not in last_played or
                                  when > last_played[str(tid)]):
                         last_played[str(tid)] = when
@@ -2052,7 +2164,7 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
         from app.db.models import PlayHistory as _PH2
         from app.db.models import Track as _T2
 
-        _since = _dt2.utcnow() - _td2(days=7)
+        _since = _dt2.utcnow() - _td2(days=_fatigue_days)
         _recent = [str(r[0]) for r in
                    db.query(_PH2.track_id).filter(
                        _PH2.user_id == str(user_id),
@@ -2103,7 +2215,7 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
         _ctx = _ctx_of(_hour, _dow)
     except Exception:
         _ctx = "day_wd"
-    time_map = time_bonus_for(db, user_id, cand[:800], _hour)
+    time_map = time_bonus_for(db, user_id, cand[:_score_win], _hour)
     try:
         arm_artist, arm_genre = arm_boost_for(db, user_id, _ctx)
     except Exception:
@@ -2118,7 +2230,7 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
         assoc = {}
     try:
         _clap_ids = list(dict.fromkeys(
-            list(cand[:800]) + list(_seeds) + list(session_ids)))[:1500]
+            list(cand[:_score_win]) + list(_seeds) + list(session_ids)))[:1500]
         clap_map = _load_clap_map(db, _clap_ids)
     except Exception:
         clap_map = {}
@@ -2131,7 +2243,7 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
     except Exception:
         pass
     ranked = score_candidates(
-        db, user_id, cand[:800], _seeds, settings_eff, recent_events,
+        db, user_id, cand[:_score_win], _seeds, settings_eff, recent_events,
         collab_scores, current_hour=_hour,
         jitter_seed=f"{user_id}:{kind or 'pool'}:{_day}",
         drift=drift, cluster_map=cluster_map or None,
@@ -2941,6 +3053,25 @@ def _smooth_energy_pass(items: list[dict], max_step: float = 0.18,
         return items
 
 
+def wave_limits(db, user_id: str | None = None) -> dict[str, int]:
+    """Размеры пула/окна/сидов/добора из тюнинга.
+
+    Раньше эти пять чисел были зашиты константами (2000/800/200/5/7), а
+    кнопки в «Настройках → Волна» меняли значение, которое никто не читал.
+    Теперь ручки живые; дефолты = прежние константы, поведение 1в1.
+    """
+    tun = _tun_all(db, user_id)
+    return {
+        "pool_limit": _tun_int(tun, 'playlists', 'pool_limit', 2000),
+        "score_window": _tun_int(tun, 'playlists', 'score_window', 800),
+        "collab_extra": _tun_int(tun, 'playlists', 'collab_extra', 200),
+        "seed_limit": _tun_int(tun, 'playlists', 'seed_limit', 5),
+        "fatigue_days": _tun_int(tun, 'repeats', 'fatigue_days', 7),
+        "radio_cluster_pool": _tun_int(tun, 'playlists', 'radio_cluster_pool',
+                                       300),
+    }
+
+
 def _smooth_keys_order(items: list[dict],
                        tun: dict | None = None) -> list[dict]:
     """Key-сглаживание соседей: пузырьковые свопы, улучшающие суммарную
@@ -2991,6 +3122,151 @@ def _smooth_keys_order(items: list[dict],
     return items
 
 
+def _smooth_flow_order(items: list[dict], tun: dict | None = None,
+                       timbre_map: dict[str, Any] | None = None) -> list[dict]:
+    """Локальная перестановка соседей по СОВМЕСТИМОСТИ ПОТОКА.
+
+    Дуга (`order_by_wave_arc`) задаёт ФОРМУ пачки — как играть. Этот проход
+    задаёт СОДЕРЖАНИЕ стыков: соседние треки не должны шокировать темпом и
+    тембром. Тональность сглаживается отдельно (`_smooth_keys_order`), а
+    темп и тембр остались без ограничения.
+
+    Критерий пары: близость темпа (BPM) + похожесть тембра (chroma+MFCC).
+    Своп разрешён, только если он не рвёт дугу (|Δenergy| < flow_energy_max)
+    и суммарно улучшает раскладку. Множество треков не меняется — только
+    локальный порядок соседей.
+    """
+    items = list(items)
+    if len(items) < 2:
+        return items
+    tun = tun or {}
+    _w_tempo = _tun_float(tun, 'playlists', 'flow_tempo_weight', 0.3)
+    _w_timbre = _tun_float(tun, 'playlists', 'flow_timbre_weight', 0.3)
+    if _w_tempo <= 0 and _w_timbre <= 0:
+        return items
+    _e_max = _tun_float(tun, 'playlists', 'flow_energy_max', 0.15)
+    _passes = _tun_int(tun, 'playlists', 'flow_passes', 3)
+    _tw_win = float(_tun_int(tun, 'playlists', 'flow_tempo_window', 40))
+    try:
+        from app.services import flow as _flow
+    except Exception:
+        return items
+    timbre_map = timbre_map or {}
+
+    def _en(r: dict) -> float:
+        try:
+            v = r.get("energy")
+            return float(v) if v is not None else 0.5
+        except (TypeError, ValueError):
+            return 0.5
+
+    def _tempo(r: dict) -> float | None:
+        try:
+            v = r.get("tempo")
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _pair(a: dict, b: dict) -> float:
+        s = 0.0
+        if _w_tempo > 0:
+            s += _w_tempo * _flow.tempo_compatibility(
+                _tempo(a), _tempo(b), _tw_win)
+        if _w_timbre > 0:
+            s += _w_timbre * _flow.timbre_similarity(
+                timbre_map.get(str(a.get("track_id") or "")),
+                timbre_map.get(str(b.get("track_id") or "")))
+        return s
+
+    def _tot(ts: list[dict]) -> float:
+        return sum(_pair(a, b) for a, b in zip(ts, ts[1:]))
+
+    for _ in range(max(0, _passes)):
+        improved = False
+        for i in range(len(items) - 1):
+            if abs(_en(items[i]) - _en(items[i + 1])) >= _e_max:
+                continue
+            cur = _tot(items)
+            items[i], items[i + 1] = items[i + 1], items[i]
+            if _tot(items) > cur + 1e-9:
+                improved = True
+            else:
+                items[i], items[i + 1] = items[i + 1], items[i]
+        if not improved:
+            break
+    return items
+
+
+def _radio_seed_anchor(db, user_id: str) -> str | None:
+    """Внутренний id трека-якоря радио (`wave_seeds`) или None.
+
+    Радио-сид — это «волна по треку/артисту». Раньше он жил только в капсуле
+    (`GET /api/wave/seed`) и в очереди одного запроса: как только очередь
+    радио доигрывалась, волна возвращалась к сидам вкуса — стиль («как у
+    Bodies») терялся, и «Боевое» снова становилось «быстро и мощно».
+    Теперь сохранённый сид — якорь волны: он идёт первым сидом (центроид
+    звука, k-NN-опоры, тембр, кластер) и добирает пул соседями.
+    """
+    try:
+        from app.db.models import Track
+        from app.db.models import WaveSeed
+
+        s = db.get(WaveSeed, str(user_id))
+        if s is None:
+            return None
+        if (s.kind or '') == 'track':
+            tid = str(s.ref or '').strip()
+            if not tid:
+                return None
+            if db.get(Track, tid) is not None:
+                return tid
+            row = db.query(Track.id).filter(Track.external_id == tid).first()
+            return str(row[0]) if row else None
+        # Артист: якорь — его самый играемый трек (иначе стиль не удержать).
+        name = str(s.ref or '').strip()
+        if not name:
+            return None
+        row = db.query(Track.id).filter(Track.artist_name == name).order_by(
+            Track.play_count.desc().nullslast()).first()
+        if row is None:
+            try:
+                from app.services.artist_names import norm_name
+
+                want = norm_name(name)
+                row = db.query(Track.id).filter(
+                    func.lower(func.trim(Track.artist_name)) == want).order_by(
+                    Track.play_count.desc().nullslast()).first()
+            except Exception:
+                row = None
+        return str(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _radio_cluster_pool(db, anchor_id: str, limit: int = 300) -> list[str]:
+    """Соседи якоря по кластеру (та же «полка» библиотеки).
+
+    Пул волны — 2000 СЛУЧАЙНЫХ треков из библиотеки. Настоящие соседи
+    играющего трека в него почти не попадают, поэтому «в стиле трека» было
+    невозможно: даже с якорем в сидах кандидаты оказывались случайными.
+    Кластерные соседи — дешёвый и честный добор (общий признак по librosa).
+    """
+    if not anchor_id:
+        return []
+    try:
+        from app.db.models import TrackCluster
+
+        cid = db.query(TrackCluster.cluster_id).filter(
+            TrackCluster.track_id == anchor_id).first()
+        if not cid:
+            return []
+        rows = db.query(TrackCluster.track_id).filter(
+            TrackCluster.cluster_id == cid[0]).limit(max(1, int(limit))).all()
+        return [str(r[0]) for r in rows]
+    except Exception:
+        return []
+
+
 def wave_continue(db, user_id: str, queue: list[str] | None = None,
                   current_track_id: str | None = None, count: int = 20,
                   settings: dict | None = None,
@@ -3002,6 +3278,17 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
     settings = settings or {}
     count = max(1, min(100, int(count or 20)))
+
+    # Тюнинг пула/сидов/усталости. КНОПКИ в «Настройках → Волна» были, а
+    # значения не применялись: пул, окно скоринга, добор коллаборативных,
+    # число сидов и окно усталости были зашиты константами. Теперь ручки
+    # живые (дефолты = прежние константы, поведение 1в1).
+    _lim = wave_limits(db, user_id)
+    _pool_limit = _lim["pool_limit"]
+    _score_win = _lim["score_window"]
+    _collab_extra = _lim["collab_extra"]
+    _seed_limit = _lim["seed_limit"]
+    _fatigue_days = _lim["fatigue_days"]
 
     applied = apply_delta(db, user_id, ratings_delta, recent_events)
 
@@ -3028,12 +3315,21 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         played.update(_resolve_ids(db, [current_track_id]))
 
     seeds = select_seeds(db, user_id,
-                         characteristic=settings.get('characteristic'), limit=5)
+                         characteristic=settings.get('characteristic'),
+                         limit=_seed_limit)
+    # Радио-якорь: сохранённый сид радио («волна по треку/артисту») держит
+    # стиль. Раньше он в волне не участвовал вообще — очередь радио
+    # доигрывалась, и волна возвращалась к сидам вкуса («быстро и мощно»
+    # вместо «как у Bodies»). Якорь идёт первым сидом.
+    _radio_anchor = _radio_seed_anchor(db, user_id)
+    if _radio_anchor and _radio_anchor not in played:
+        seeds = ([_radio_anchor] +
+                 [s for s in seeds if s != _radio_anchor])[:_seed_limit]
     cur_ids: list[str] = []
     if current_track_id:
         cur = _resolve_ids(db, [current_track_id])
         cur_ids = cur
-        seeds = (cur + seeds)[:5]
+        seeds = (cur + seeds)[:_seed_limit]
 
     # Стартовое настроение — для плавного морфинга в целевое.
     # Целевое: settings.mood (выбор юзера на странице «Моя волна»).
@@ -3151,9 +3447,24 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             pass
     skip_n = len(played | dis)
     cand: list[str] = []
+    # Соседи радио-якоря — В ПУЛ ПЕРВЫМИ. Пул волны набирается случайно,
+    # и настоящие соседи играющего трека в него не попадали: «в стиле трека»
+    # было невозможно даже с якорем в сидах. Кап radio_cluster_pool — волна
+    # не должна схлопнуться в один кластер.
+    _radio_pool: list[str] = []
+    if _radio_anchor:
+        try:
+            _radio_pool = [t for t in _radio_cluster_pool(
+                db, _radio_anchor, _lim["radio_cluster_pool"])
+                if t not in played and t not in dis and t != _radio_anchor]
+        except Exception:
+            _radio_pool = []
+    _rand_limit = max(1, _pool_limit - len(_radio_pool))
+    cand = list(_radio_pool)
     try:
-        cand = [str(r[0]) for r in
-                q.order_by(func.random()).limit(2000 + skip_n).all()]
+                cand += [str(r[0]) for r in
+                         q.order_by(func.random()).limit(_rand_limit + skip_n).all()]
+
     except Exception as e:  # noqa: BLE001
         # Нет random() (старый SQLite/другая БД) — падаем на прежнее поведение
         # с честной пометкой в лог: это тихо ломает разнообразие выдачи.
@@ -3165,8 +3476,9 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 "на большой библиотеке это 1% треков без ротации", e)
         except Exception:
             pass
-        cand = [str(r[0]) for r in q.limit(2000 + skip_n).all()]
-    cand = [c for c in cand if c not in played and c not in dis][:2000]
+        cand += [str(r[0]) for r in q.limit(_rand_limit + skip_n).all()]
+    cand = [c for c in cand if c not in played and c not in dis][:_pool_limit]
+
     # Порядок пула — ДЕТЕРМИНИРОВАННЫЙ. Пул выше собран через ORDER BY
     # random() (это нужно, чтобы мозг постепенно изучал всю библиотеку), но
     # дальше по пулу идут решения, которые зависят от ПОРЯДКА:
@@ -3182,11 +3494,11 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         _cset = set(cand)
         _missing = [t for t in collab_scores if t not in _cset and t not in played and t not in dis]
         if _missing:
-            cand = cand + _missing[:200]
+            cand = cand + _missing[:_collab_extra]
             try:
                 from app.core.logging import get_logger as _gl
 
-                _gl("wave").info("collab: добавлено {} треков в пул сверх лимита", len(_missing[:200]))
+                _gl("wave").info("collab: добавлено {} треков в пул сверх лимита", len(_missing[:_collab_extra]))
             except Exception:
                 pass
     # Мета кандидатов — один проход чанками (SQLite держит ~999 vars в IN).
@@ -3208,7 +3520,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     if cand:
         from app.db.models import TrackFeatures as _TF
 
-        for i in range(0, len(cand[:2000]), 500):
+        for i in range(0, len(cand[:_pool_limit]), 500):
             chunk = cand[i:i + 500]
             try:
                 for f in db.query(_TF).filter(_TF.track_id.in_(chunk)).all():
@@ -3307,7 +3619,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     if _tmp_genres and cand:
         try:
             _gm = {str(t.id): (t.genre or "") for t in
-                   db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
+                   db.query(Track).filter(Track.id.in_(cand[:_pool_limit])).all()}
         except Exception:
             _gm = {}
         cand = [c for c in cand if _gm.get(c, "").lower() not in _tmp_genres]
@@ -3331,7 +3643,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         # Фичи уже загружены выше (для дедупа) — второй запрос не делаем.
         try:
             _gm2 = {str(t.id): (t.genre or '') for t in
-                    db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
+                    db.query(Track).filter(Track.id.in_(cand[:_pool_limit])).all()}
         except Exception:
             _gm2 = {}
         _want = set((MOOD_PRESETS.get(mood) or {}).get('moods') or set())
@@ -3423,7 +3735,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             from app.services.lyrics import detect_lyrics_language as _det_lang
 
             _lm: dict[str, str] = {}
-            for r in db.query(_Ly).filter(_Ly.track_id.in_(cand[:2000])).all():
+            for r in db.query(_Ly).filter(_Ly.track_id.in_(cand[:_pool_limit])).all():
                 _lang_v = (r.language or '').strip().lower()
                 if not _lang_v:
                     try:
@@ -3436,7 +3748,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         _meta_ru: set = set()
         if lang in ('foreign', 'instrumental') or strict:
             try:
-                _meta_ru = _meta_ru_ids(db, [c for c in cand[:2000] if c not in _lm])
+                _meta_ru = _meta_ru_ids(db, [c for c in cand[:_pool_limit] if c not in _lm])
             except Exception:
                 _meta_ru = set()
         if lang == 'ru':
@@ -3480,7 +3792,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     try:
         from app.db.models import TrackCluster as _TC
 
-        _need_cl = list({str(c) for c in (cand[:800] + seeds)})
+        _need_cl = list({str(c) for c in (cand[:_score_win] + seeds)})
         for i in range(0, len(_need_cl), 500):
             try:
                 for row in db.query(_TC).filter(
@@ -3517,7 +3829,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
         from app.db.models import PlayHistory as _PH
 
-        _lp_ids = list(dict.fromkeys(list(cand[:800]) + list(played)))[:1200]
+        _lp_ids = list(dict.fromkeys(list(cand[:_score_win]) + list(played)))[:1200]
         for i in range(0, len(_lp_ids), 500):
             try:
                 for tid, when in db.query(_PH.track_id, _PH.played_at).filter(
@@ -3538,7 +3850,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
 
         from app.db.models import PlayHistory as _PH2
 
-        _since = _dt2.utcnow() - _td2(days=7)
+        _since = _dt2.utcnow() - _td2(days=_fatigue_days)
         _recent: list[str] = []
         try:
             _recent = [str(r[0]) for r in
@@ -3592,7 +3904,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         _ctx = _ctx_of(_cur_hour, _dow)
     except Exception:
         _ctx = "day_wd"
-    time_map = time_bonus_for(db, user_id, cand[:800], _cur_hour)
+    time_map = time_bonus_for(db, user_id, cand[:_score_win], _cur_hour)
     arm_artist, arm_genre = arm_boost_for(db, user_id, _ctx)
     try:
         mood_arm_map = mood_boost_for(db, user_id, _ctx)
@@ -3602,7 +3914,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # CLAP-карта пула+сидов+сессии: нет анализа → {} → вклад 0, не ломается.
     try:
         _clap_ids = list(dict.fromkeys(
-            list(cand[:800]) + list(seeds) + list(session_ids)))[:1500]
+            list(cand[:_score_win]) + list(seeds) + list(session_ids)))[:1500]
         clap_map = _load_clap_map(db, _clap_ids)
     except Exception:
         clap_map = {}
@@ -3645,12 +3957,12 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     # добавленные в cand сверх лимита, в это окно не попали бы — и их вклад
     # в скор снова исчез бы. Поэтому берём обычные 800 и сверху добавляем
     # сами коллаборативные (их не больше 200, всего ~1000 строк на скоринг).
-    _score_pool = cand[:800]
+    _score_pool = cand[:_score_win]
     if collab_scores:
         _in_pool = set(_score_pool)
         _extra = [t for t in collab_scores if t in cand and t not in _in_pool]
         if _extra:
-            _score_pool = _score_pool + _extra[:200]
+            _score_pool = _score_pool + _extra[:_collab_extra]
     # Порядок обхода пула — ДЕТЕРМИНИРОВАННЫЙ (по id). Пул выше собран
     # через ORDER BY random() (это нужно, чтобы мозг постепенно изучал всю
     # библиотеку), но скоринг идёт по нему в порядке выборки, а штрафы за
@@ -3708,7 +4020,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                          genre_cap=_g_cap, mood_cap=_m_cap,
                          vec_map=_vecs_own, spread_min=_spread)
     # Финальная страховка на ответе: id + баны артистов + «та же песня».
-    # Ловит всё, что просочилось через срез пула (cand[:800]/топ).
+    # Ловит всё, что просочилось через срез пула (cand[:_score_win]/топ).
     if top and (dis or ban_names):
         try:
             from app.services.artist_names import is_banned as _is_banned2
@@ -3795,6 +4107,22 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 r["cover_art_id"] = None
     except Exception:
         pass
+    # Тембровые векторы пачки — для попарного ограничения потока (соседние
+    # треки не должны шокировать тембром). Считаем только для отобранных.
+    _timbre_map: dict[str, Any] = {}
+    try:
+        from app.services import flow as _flow2
+
+        for _r in top:
+            _tid = str(_r.get("track_id") or "")
+            _f = fm.get(_tid)
+            if _f is None:
+                continue
+            _tv = _flow2.timbre_vector(_f)
+            if _tv:
+                _timbre_map[_tid] = _tv
+    except Exception:
+        _timbre_map = {}
     morph = None
     # Энергия текущего трека — якорь для плавной раскладки (см. _smooth_energy_pass).
     _cur_en: float | None = None
@@ -3823,6 +4151,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             # энергия сглаживается локально, порядок лестницы сохраняется.
             top = _smooth_energy_local(top, max_step=0.18)
             top = _smooth_keys_order(top, _mtun)
+            top = _smooth_flow_order(top, _mtun, timbre_map=_timbre_map)
             morph = {"from": start_mood, "to": target_mood, "ramp": True}
         else:
             # Векторов нет (нет анализа у текущего трека и у цели) —
@@ -3845,6 +4174,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             # сценарий) переходов по энергии не было. Теперь дуга есть в обеих
             # ветках.
             top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
+            top = _smooth_flow_order(top, _mtun, timbre_map=_timbre_map)
     elif len(top) > 3:
         # Форма волны: разгон -> вершина -> спад.
         # Раньше здесь была монотонная раскладка по энергии (smooth_energy_order):
@@ -3881,6 +4211,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             # старая раскладка по энергии, волна не должна пустеть.
             top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
         top = _smooth_keys_order(top, _mtun)
+        top = _smooth_flow_order(top, _mtun, timbre_map=_timbre_map)
     # Мостик: первый трек выдачи — плавное продолжение текущего.
     # Если переход резкий — подтягиваем лучший мостик из топ-10 окна.
     if cur_ids and top and _cf is not None:

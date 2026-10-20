@@ -823,6 +823,12 @@ def search_by_embedding(
     фильтра). В итоге аудио-векторы подмешивались в текстовый поиск, а кроме
     того один и тот же трек возвращался дважды. Особенно заметно стало после
     того, как у аудио-фичи появился отдельный тумблер.
+
+    Волна этот поиск НЕ зовёт намеренно: тут скан ВСЕЙ таблицы эмбеддингов
+    (на библиотеке это десятки тысяч векторов) на каждый запрос. В волне k-NN
+    считает `services/flow.py` по уже загруженному пулу (CLAP-карта грузится
+    для скоринга) — это дешевле в десятки раз. Этот поиск остаётся для
+    разовых запросов (анализ/поиск по треку).
     """
     if not _HAS_NP:
         return []
@@ -849,21 +855,17 @@ def search_by_embedding(
                 # voyager 2.x: query
                 ids, dists = index.query(q, k=min(top_k, len(filtered)))
                 id_map = {i: r for i, (r, _) in enumerate(filtered)}
-                out = []
+                hits: list[tuple[float, str]] = []
                 for idx, dist in zip(ids, dists):
                     r = id_map.get(int(idx))
                     if r is None:
                         continue
-                    t = db.get(Track, r.track_id)
-                    if t is None:
-                        continue
                     # voyager возвращает косинусное расстояние (1 - cosine)
-                    score = 1.0 - float(dist)
-                    out.append({"track_id": str(t.id), "title": t.title, "artist_name": t.artist_name, "score": round(score, 4)})
-                return out
+                    hits.append((1.0 - float(dist), str(r.track_id)))
+                return _tracks_by_score(db, hits, top_k)
         except Exception:
             pass
-        scored = []
+        scored: list[tuple[float, str]] = []
         for r in rows:
             v = np.frombuffer(r.vector, dtype=np.float32)
             if v.shape[0] != q.shape[0]:
@@ -874,26 +876,49 @@ def search_by_embedding(
                 continue
             v = v / vn
             s = float(np.dot(q, v))
-            t = db.get(Track, r.track_id)
-            if t is None:
-                continue
-            scored.append((s, t))
+            scored.append((s, str(r.track_id)))
         scored.sort(key=lambda kv: kv[0], reverse=True)
-        # Один трек — одна строка выдачи, даже если в базе лежат векторы
-        # нескольких моделей одинаковой размерности.
-        out: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for s, t in scored:
-            tid = str(t.id)
-            if tid in seen:
-                continue
-            seen.add(tid)
-            out.append({
-                "track_id": tid,
-                "title": t.title,
-                "artist_name": t.artist_name,
-                "score": round(float(s), 4),
-            })
-            if len(out) >= top_k:
-                break
-        return out
+        return _tracks_by_score(db, scored, top_k)
+
+
+def _tracks_by_score(db, scored: list[tuple[float, str]],
+                     top_k: int) -> list[dict[str, Any]]:
+    """(скор, track_id) -> строки выдачи. Треки грузим ОДНИМ запросом.
+
+    Раньше тут был `db.get(Track, ...)` в цикле по всем эмбеддингам: на
+    библиотеке в десятки тысяч треков это десятки тысяч запросов на один
+    поиск. Сначала режем список до top_k, потом один запрос по id.
+    """
+    if not scored:
+        return []
+    # один трек — одна строка выдачи, даже если в базе лежат векторы
+    # нескольких моделей одинаковой размерности.
+    uniq: list[tuple[float, str]] = []
+    seen: set[str] = set()
+    for s, tid in scored:
+        if tid in seen:
+            continue
+        seen.add(tid)
+        uniq.append((s, tid))
+        if len(uniq) >= max(1, int(top_k or 20)):
+            break
+    if not uniq:
+        return []
+    ids = [tid for _, tid in uniq]
+    try:
+        rows = db.query(Track).filter(Track.id.in_(ids)).all()
+    except Exception:
+        rows = []
+    by_id = {str(t.id): t for t in rows}
+    out: list[dict[str, Any]] = []
+    for s, tid in uniq:
+        t = by_id.get(tid)
+        if t is None:
+            continue
+        out.append({
+            "track_id": tid,
+            "title": t.title,
+            "artist_name": t.artist_name,
+            "score": round(float(s), 4),
+        })
+    return out

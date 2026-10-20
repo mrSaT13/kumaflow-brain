@@ -86,6 +86,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "mood_arm_min": -0.08,
         "mood_arm_max": 0.12,
         "neg_weight": 0.15,
+        # ПОТОК (этап 3, часть 2): тембр (chroma+MFCC) и k-NN по эмбеддингам
+        "timbre_weight": 0.05,
+        "knn_weight": 0.08,
     },
     "skips": {
         # session_drift: N скипов подряд -> mild/moderate/strong
@@ -127,6 +130,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "smooth_passes": 8,
         "key_energy_max": 0.15,
         "key_passes": 3,
+        # попарное ограничение потока: темп и тембр соседей
+        "flow_passes": 3,
+        "flow_energy_max": 0.15,
+        "flow_tempo_weight": 0.3,
+        "flow_timbre_weight": 0.3,
+        "flow_tempo_window": 40,
         # форма волны: разгон -> вершина -> спад (0 = выключить, старая
         # монотонная раскладка по энергии)
         "arc_on": 1,
@@ -145,6 +154,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "radio_similar": 6,
         "radio_per_similar": 15,
         "radio_server": 20,
+        # радио-якорь в волне: сколько соседей сида добирать в пул
+        "radio_cluster_pool": 300,
     },
     "auto": {
         "repeats": False,
@@ -179,8 +190,9 @@ for _k, _lo, _hi in (
         ("adaptive_floor", 1, 20), ("smooth_passes", 0, 50),
         ("key_passes", 0, 20), ("seed_limit", 1, 20),
         ("arc_on", 0, 1),
+        ("flow_passes", 0, 50), ("flow_tempo_window", 5, 200),
         ("radio_similar", 1, 20), ("radio_per_similar", 1, 100),
-        ("radio_server", 0, 100)):
+        ("radio_server", 0, 100), ("radio_cluster_pool", 0, 2000)):
     _g2 = ("repeats" if _k in ("fatigue_days", "artist_cap")
            else "character" if _k == "likes_threshold"
            else "skips" if _k in ("behavior_window", "play_long_sec",
@@ -197,12 +209,17 @@ for _k, _lo, _hi in (
         ("srv_starred", 0.0, 1.0), ("srv_rating", 0.0, 1.0),
         ("mood_arm_min", -1.0, 1.0), ("mood_arm_max", -1.0, 1.0),
         ("neg_weight", 0.0, 1.0), ("bonus_like", -1.0, 1.0),
+        ("timbre_weight", 0.0, 1.0), ("knn_weight", 0.0, 1.0),
         ("bonus_replay", -1.0, 1.0), ("bonus_complete", -1.0, 1.0),
         ("bonus_play_long", -1.0, 1.0), ("penalty_abandon", -1.0, 1.0),
         ("penalty_skip_early", -1.0, 1.0), ("penalty_skip_late", -1.0, 1.0),
         ("genre_ban_skips", 1, 20), ("night_energy_max", 0.0, 1.0),
-        ("sport_energy_min", 0.0, 1.0), ("smooth_max_step", 0.01, 1.0),
-        ("key_energy_max", 0.01, 1.0), ("arc_peak_pos", 0.05, 0.95),
+        ("sport_energy_min", 0.0, 1.0),         ("smooth_max_step", 0.01, 1.0),
+        ("key_energy_max", 0.01, 1.0),
+        ("flow_energy_max", 0.01, 1.0),
+        ("flow_tempo_weight", 0.0, 1.0),
+        ("flow_timbre_weight", 0.0, 1.0),
+ ("arc_peak_pos", 0.05, 0.95),
         ("arc_release", 0.2, 1.0), ("seed_top_favorite", 0.0, 1.0),
         ("seed_recent_favorite", 0.0, 1.0), ("seed_top_unfamiliar", 0.0, 1.0),
         ("seed_recent_unfamiliar", 0.0, 1.0), ("seed_top_popular", 0.0, 1.0),
@@ -214,7 +231,9 @@ for _k, _lo, _hi in (
         _g3 = "skips"
         _t3 = "int" if _k == "genre_ban_skips" else "float"
     elif _k in ("night_energy_max", "sport_energy_min", "smooth_max_step",
-                "key_energy_max", "arc_peak_pos", "arc_release") \
+                "key_energy_max", "arc_peak_pos", "arc_release",
+                "flow_energy_max", "flow_tempo_weight",
+                "flow_timbre_weight") \
             or _k.startswith(("seed_", "adaptive")) \
             or _k in ("forgotten_days", "sport_bpm_min"):
         _g3 = "playlists"

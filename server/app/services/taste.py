@@ -37,7 +37,7 @@ ACTIONS = ("play", "complete", "skip", "replay", "seek_back", "abandon")
 # (старые сборки мобилы метку не шлют). Известные — mobile/desktop, остальные
 # клиенты шлют своё имя ([a-z0-9_-], до 16) — иначе схлопнутся в «мобилу»
 # и карточка автообновления их не покажет.
-SYNC_SOURCES = ("mobile", "desktop")
+SYNC_SOURCES = ("mobile", "desktop", "yandex")
 
 _sync_cols_ok: bool | None = None
 
@@ -81,6 +81,7 @@ def _ensure_sync_cols(db) -> bool:
             "mobile_sync_source": "VARCHAR(16) DEFAULT ''",
             "desktop_synced_at": "TIMESTAMP",
             "sync_sources": "JSON",
+            "sync_profiles": "JSON",
         }
         added = False
         for name, col_ddl in ddl.items():
@@ -89,7 +90,7 @@ def _ensure_sync_cols(db) -> bool:
                     db.execute(_txt(f"ALTER TABLE taste_profiles ADD COLUMN {name} {col_ddl}"))
                 except Exception:
                     # SQLite не знает JSON-тип — TEXT тоже годится (JSONCol сериализует сам).
-                    if name == "sync_sources":
+                    if name in ("sync_sources", "sync_profiles"):
                         db.execute(_txt(f"ALTER TABLE taste_profiles ADD COLUMN {name} TEXT"))
                     else:
                         raise
@@ -868,6 +869,66 @@ def _to_int(v, default: int = 0) -> int:
         return default
 
 
+def _merged_taste_view(profs: dict) -> dict:
+    """Слияние корзин источников в общий вид (его читает скоринг).
+
+    Жанры/артисты — по максимуму веса (шкала не разъезжается: сумма весов
+    из разных клиентов иначе ломала бы нормировку в скоринге), списки —
+    объединение, счётчики — сумма (один и тот же дизлайк с двух клиентов).
+    """
+    genres: dict = {}
+    artists: dict = {}
+    liked: list[str] = []
+    disliked: list[str] = []
+    banned: list[str] = []
+    counts: dict = {}
+    seen_liked: set[str] = set()
+    seen_disliked: set[str] = set()
+    seen_banned: set[str] = set()
+    for _src, sp in (profs or {}).items():
+        if not isinstance(sp, dict):
+            continue
+        for g, w in (sp.get("genres") or {}).items():
+            g = str(g).strip().lower()
+            if not g:
+                continue
+            try:
+                fv = float(w)
+            except (TypeError, ValueError):
+                continue
+            cur = genres.get(g)
+            if cur is None or fv > float(cur):
+                genres[g] = w
+        for a, w in (sp.get("artists") or {}).items():
+            a = str(a)
+            if not a:
+                continue
+            try:
+                fv = float(w)
+            except (TypeError, ValueError):
+                continue
+            cur = artists.get(a)
+            if cur is None or fv > float(cur):
+                artists[a] = w
+        for key, bucket, seen in (("liked", liked, seen_liked),
+                                  ("disliked", disliked, seen_disliked),
+                                  ("banned", banned, seen_banned)):
+            for x in (sp.get(key) or []):
+                x = str(x)
+                if x and x not in seen:
+                    seen.add(x)
+                    bucket.append(x)
+        for a, c in (sp.get("counts") or {}).items():
+            try:
+                a = str(a)
+                counts[a] = int(counts.get(a, 0)) + _to_int(c)
+            except (TypeError, ValueError):
+                continue
+    return {"genres": genres, "artists": artists,
+            "liked": liked[:10000], "disliked": disliked[:10000],
+            "banned": banned[:1000], "counts": counts}
+
+
 def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
     """Полный синк истории с мобилы: рейтинги + профиль + свежие события.
 
@@ -1052,20 +1113,55 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
         # apply_delta звал sync_from_mobile с профилем {} на каждой волне
         # с дельтой оценок. Итог: мобильный вкус стирался на ровном месте.
         # «Не прислал» = «не трогаем»; «прислал пустым» = «очисти».
+        #
+        # С 0.3.23 слепок РАЗДЕЛЁН ПО ИСТОЧНИКАМ: своя корзина у мобилы,
+        # десктопа, яндекса и т.д. Раньше корзина была одна на всех, и
+        # последний записавший затирал предыдущего (яндекс-импорт шёл как
+        # «mobile» и стирал мобильный профиль целиком). Теперь mobile_* —
+        # это СЛИЯНИЕ всех корзин, его и читает скоринг.
+        _profs = dict(getattr(tp, "sync_profiles", None) or {})
+        if not _profs:
+            # Данные без разбивки по источникам (пишущий до 0.3.23).
+            # Относим их к тому, кто писал последним, — чтобы первый же
+            # новый синк не съел накопленный вкус.
+            _legacy_src = str(getattr(tp, "mobile_sync_source", "") or "") or "mobile"
+            _profs[_legacy_src] = {
+                "genres": dict(getattr(tp, "mobile_genres", None) or {}),
+                "artists": dict(getattr(tp, "mobile_artists", None) or {}),
+                "liked": [str(x) for x in (getattr(tp, "mobile_liked", None) or [])],
+                "disliked": [str(x) for x in (getattr(tp, "mobile_disliked", None) or [])],
+                "banned": [str(x) for x in (getattr(tp, "mobile_banned", None) or [])],
+                "counts": dict(getattr(tp, "mobile_counts", None) or {}),
+            }
+        _bucket = dict(_profs.get(source) or {})
         if "preferredGenres" in prof:
-            tp.mobile_genres = {
+            _bucket["genres"] = {
                 str(k).strip().lower(): v
                 for k, v in (dict(prof.get("preferredGenres") or {}).items())}
         if "preferredArtists" in prof:
-            tp.mobile_artists = dict(prof.get("preferredArtists") or {})
+            _bucket["artists"] = dict(prof.get("preferredArtists") or {})
         if "likedSongs" in prof:
-            tp.mobile_liked = list(prof.get("likedSongs") or [])[:10000]
+            _bucket["liked"] = [str(x) for x in (prof.get("likedSongs") or [])][:10000]
         if "dislikedSongs" in prof:
-            tp.mobile_disliked = list(prof.get("dislikedSongs") or [])[:10000]
+            _bucket["disliked"] = [str(x) for x in (prof.get("dislikedSongs") or [])][:10000]
         if "bannedArtists" in prof:
-            tp.mobile_banned = list(prof.get("bannedArtists") or [])[:1000]
+            _bucket["banned"] = list(prof.get("bannedArtists") or [])[:1000]
         if "artistDislikeCounts" in prof:
-            tp.mobile_counts = dict(prof.get("artistDislikeCounts") or {})
+            _bucket["counts"] = dict(prof.get("artistDislikeCounts") or {})
+        _profs[source] = _bucket
+        try:
+            tp.sync_profiles = _profs
+        except Exception:
+            # Колонки нет (fallback-режим) — работаем как раньше: слитое
+            # значение всё равно попадёт в legacy-поля.
+            pass
+        _merged = _merged_taste_view(_profs)
+        tp.mobile_genres = _merged["genres"]
+        tp.mobile_artists = _merged["artists"]
+        tp.mobile_liked = _merged["liked"]
+        tp.mobile_disliked = _merged["disliked"]
+        tp.mobile_banned = _merged["banned"]
+        tp.mobile_counts = _merged["counts"]
         # Штамп времени — по источнику: mobile_synced_at только для мобилы,
         # desktop_synced_at только для десктопа. mobile_sync_source = кто
         # последним писал слепок (старые записи без метки = мобила).

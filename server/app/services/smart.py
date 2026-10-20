@@ -146,10 +146,12 @@ def discoveries(db, user_id: str, n: int = 30) -> list[str]:
                     bans, _ban_ids))]
     if not cand:
         return []
-    seeds = _wave.select_seeds(db, user_id, limit=5)
+    tun = _tun_all(db, user_id)
+    # Сиды и окно скоринга — по тюнингу (кнопки были, значения игнорировались).
+    _sl = _tun_int(tun, "seed_limit", 5)
+    seeds = _wave.select_seeds(db, user_id, limit=_sl)
     # Единый скоринг: полный контекст ядра (дрейф, руки, CLAP, skip-модель,
     # коллаборативка, авто-муд). Предфильтр выше (неслышанное, баны) сохранён.
-    tun = _tun_all(db, user_id)
     _sw = _tun_int(tun, "score_window", 800)
     return _wave.rerank_pool(db, user_id, cand[:max(50, _sw)], seeds=seeds,
                              kind="discoveries", n=n, source="smart")
