@@ -120,7 +120,13 @@ def mark_served(
         if not tid or tid in pending:
             continue
         reason = t.get("reason")
-        score = t.get("score")
+        # В БД пишем СЫРОЙ скор модели ('score_raw'), а не растянутый
+        # min-max по окну ('score' к этому моменту уже размазан для показа).
+        # Иначе цикл обучения получал бы неверные числа: у всех треков в
+        # топе было бы по 0..1 «в среднем».
+        score = t.get("score_raw")
+        if score is None:
+            score = t.get("score")
         try:
             score_f = float(score) if score is not None else None
         except (TypeError, ValueError):

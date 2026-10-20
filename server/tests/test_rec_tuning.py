@@ -118,6 +118,36 @@ def test_drift_honors_per_user_counts():
         _wipe()
 
 
+def test_reads_are_cached_and_write_invalidates(monkeypatch):
+    """Кэш тюнинга живёт: два чтения подряд — одно в БД.
+
+    Тюнинг читается на каждый запрос волны; без кэша это было два чтения
+    AppSetting на запрос. Запись кэш сбрасывает — правка видна сразу.
+    """
+    _wipe()
+    db = _db()
+    calls = {"n": 0}
+    real_read = _rt._read_row
+
+    def counting_read(db_, key):
+        calls["n"] += 1
+        return real_read(db_, key)
+
+    monkeypatch.setattr(_rt, "_read_row", counting_read)
+    try:
+        _rt.get_all(db, UID)
+        first = calls["n"]
+        assert first >= 1
+        _rt.get_all(db, UID)
+        assert calls["n"] == first, "повторное чтение должно взять кэш"
+        # запись сбрасывает кэш — новое значение видно сразу
+        _rt.set_flags({"character": {"jitter": 0.42}}, db, UID)
+        assert _rt.get_all(db, UID)["character"]["jitter"] == 0.42
+    finally:
+        db.close()
+        _wipe()
+
+
 def test_artist_cap_and_adaptive_caps():
     _wipe()
     db = _db()

@@ -1829,15 +1829,19 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             except Exception:
                 mood_pen = 0.0
         _jit_v = _rng.random() * _jitter
-        total = (w['audio'] * audio + w['genre'] * genre_s +
-                 w['artist'] * artist_s + w['behavior'] * behavior +
-                 w['collab'] * collab + w['novelty'] * novelty +
-                 _nov_extra * novelty + ctx + bonus.get(tid, 0.0) -
-                 pen - neg_pen - mood_pen + srv_bonus + time_b + arm_b + assoc_b +
-                 _cw * clap_s + mood_b - _skip_w * skip_p +
-                 _jit_v +
-                 _key_w * key_c + _cluster_w * cluster_c + _lyr_w * lyr_c)
-        total = min(max(total, 0.0), 1.0)
+        total_raw = (w['audio'] * audio + w['genre'] * genre_s +
+                     w['artist'] * artist_s + w['behavior'] * behavior +
+                     w['collab'] * collab + w['novelty'] * novelty +
+                     _nov_extra * novelty + ctx + bonus.get(tid, 0.0) -
+                     pen - neg_pen - mood_pen + srv_bonus + time_b + arm_b + assoc_b +
+                     _cw * clap_s + mood_b - _skip_w * skip_p +
+                     _jit_v +
+                     _key_w * key_c + _cluster_w * cluster_c + _lyr_w * lyr_c)
+        # Кламп 0..1 — ТОЛЬКО для показа. Раньше он же был и рангом: сумма
+        # потолков (~2.6) упирает в 1.0 почти всю пачку, и порядок решался
+        # остатками (то есть порядком обхода пула), а не моделью. Теперь
+        # сортируем по сырому score_raw, а 'score' остаётся 0..1 для клиента.
+        total = min(max(total_raw, 0.0), 1.0)
         # Причина: сначала — прямое попадание в настроение (его выбрал
         # пользователь, это самое точное объяснение), потом остальные.
         _mood_hit = bool(_mood_family and f is not None and
@@ -1860,6 +1864,10 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                     'title': t.title,
                     'artist_name': t.artist_name, 'album_name': t.album_name,
                     'genre': t.genre, 'score': round(total, 4),
+                    # Сырой скор модели (без клампа) — по нему идёт
+                    # ранжирование и в БД пишется он, а не растянутый
+                    # для показа min-max.
+                    'score_raw': round(total_raw, 4),
                     'audio': round(audio, 3), 'reason': reason,
                     # Канонический код настроения трека — по нему считаются
                     # капы разнообразия при отборе пачки.
@@ -1890,16 +1898,27 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             used_genres[t.genre] = used_genres.get(t.genre, 0) + 1
         if _cm:
             used_moods[_cm] = used_moods.get(_cm, 0) + 1
-    out.sort(key=lambda x: x['score'], reverse=True)
+    # Ранжирование — по сырому скору модели: кламп 0..1 упирал почти всю
+    # пачку в 1.0, и треки с разным качеством шли в случайном порядке.
+    out.sort(key=lambda x: (x.get('score_raw')
+                             if x.get('score_raw') is not None else x['score']),
+             reverse=True)
     return out
 
 
 def spread_scores(items: list[dict], key: str = "score") -> list[dict]:
     """Растянуть скоры окна в 0..1 (min-max), чтобы топ не выглядел как
     сплошные 1.00: сырые total часто упираются в кламп 1.0.
-    Монотонно — порядок не меняется, только видимая дифференциация."""
+    Монотонно — порядок не меняется, только видимая дифференциация.
+
+    Растягиваем по СЫРОМУ скору (score_raw), если он есть: по клампнутому
+    min-max бесполезен (половина пачки — ровно 1.0), и топ опять выглядит
+    как «1.00 × N». Сам score_raw не трогаем — он идёт в БД как оценка
+    модели (см. rec_feedback.mark_served)."""
     try:
-        vals = [float(it.get(key) or 0) for it in items]
+        vals = [float(it.get('score_raw')
+                      if it.get('score_raw') is not None else (it.get(key) or 0))
+                for it in items]
     except Exception:
         return items
     if len(vals) < 2:

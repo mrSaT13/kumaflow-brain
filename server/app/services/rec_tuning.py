@@ -291,7 +291,7 @@ def invalidate_cache(user_id: str | None = None) -> None:
         _cache["flags"] = {}
         _cache["at"] = {}
         return
-    ck = str(user_id).strip() or "-"
+    ck = _cache_key(user_id)
     _cache["flags"].pop(ck, None)
     _cache["at"].pop(ck, None)
 
@@ -340,19 +340,58 @@ def _read_row(db, key: str) -> Any:
         return None
 
 
-def get_all(db=None, user_id: str | None = None) -> dict[str, dict[str, Any]]:
+def _cache_key(user_id: str | None) -> str:
+    return str(user_id or "").strip() or "-"
+
+
+def _cached_get(user_id: str | None) -> dict[str, dict[str, Any]] | None:
+    """Живой кэш тюнинга (None = протух/нет)."""
+    import time as _time
+
+    now = _time.time()
+    ck = _cache_key(user_id)
+    at = _cache["at"].get(ck, 0.0)
+    if ck in _cache["flags"] and (now - float(at)) < _TTL_SEC:
+        return _cache["flags"][ck]
+    return None
+
+
+def _cached_put(user_id: str | None, flags: dict[str, dict[str, Any]]) -> None:
+    import time as _time
+
+    now = _time.time()
+    ck = _cache_key(user_id)
+    _cache["flags"][ck] = flags
+    _cache["at"][ck] = now
+    if len(_cache["flags"]) > _CACHE_MAX:
+        oldest = min(_cache["at"], key=lambda k: _cache["at"].get(k, 0.0))
+        _cache["flags"].pop(oldest, None)
+        _cache["at"].pop(oldest, None)
+
+
+def get_all(db=None, user_id: str | None = None,
+            use_cache: bool = True) -> dict[str, dict[str, Any]]:
     """Эффект для юзера: дефолты <- глобал <- per-user overlay.
 
     user_id=None = только глобал. Любая ошибка чтения -> дефолты
     (скоринг не должен падать из-за настроек).
+
+    Чтение кэшируется на _TTL_SEC: тюнинг читается на КАЖДЫЙ запрос волны
+    (и в API, и в авто-тюнере), а без кэша это были два чтения AppSetting
+    на запрос. Кэш живёт 20 секунд, запись (set_flags/reset_flags) его
+    сбрасывает — поэтому подкрутка видна сразу.
     """
+    if use_cache:
+        hit = _cached_get(user_id)
+        if hit is not None:
+            return deepcopy(hit)
     flags: dict[str, dict[str, Any]] = deepcopy(DEFAULTS)
     try:
         if db is None:
             from app.db.database import session_scope
 
             with session_scope() as _db:
-                return get_all(_db, user_id)
+                return get_all(_db, user_id, use_cache=use_cache)
         _apply_row(flags, _read_row(db, KEY), allow_auto=True)
         uk = _user_key(user_id)
         if uk:
@@ -361,25 +400,9 @@ def get_all(db=None, user_id: str | None = None) -> dict[str, dict[str, Any]]:
             _apply_row(flags, _read_row(db, uk), allow_auto=False)
     except Exception:
         pass
-    return flags
-
-
-def _cached(user_id: str | None) -> dict[str, dict[str, Any]]:
-    import time as _time
-
-    now = _time.time()
-    ck = str(user_id or "").strip() or "-"
-    at = _cache["at"].get(ck, 0.0)
-    if ck in _cache["flags"] and (now - float(at)) < _TTL_SEC:
-        return _cache["flags"][ck]  # type: ignore[return-value]
-    flags = get_all(user_id=user_id)
-    _cache["flags"][ck] = flags
-    _cache["at"][ck] = now
-    if len(_cache["flags"]) > _CACHE_MAX:
-        oldest = min(_cache["at"], key=lambda k: _cache["at"].get(k, 0.0))
-        _cache["flags"].pop(oldest, None)
-        _cache["at"].pop(oldest, None)
-    return flags
+    if use_cache:
+        _cached_put(user_id, flags)
+    return deepcopy(flags)
 
 
 def get_group(group: str, db=None,
@@ -387,9 +410,7 @@ def get_group(group: str, db=None,
     """Одна группа (repeats/character/skips/playlists/auto) для юзера."""
     if group not in DEFAULTS:
         return {}
-    if db is not None:
-        return get_all(db, user_id).get(group, {})
-    return _cached(user_id).get(group, {})
+    return get_all(db, user_id).get(group, {})
 
 
 def is_auto(group: str, db=None) -> bool:

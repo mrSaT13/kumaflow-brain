@@ -1046,13 +1046,26 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
         if tp is None:
             tp = _TP(user_id=user_id)
             db.add(tp)
-        tp.mobile_genres = {str(k).strip().lower(): v
-                              for k, v in (dict(prof.get("preferredGenres") or {}).items())}
-        tp.mobile_artists = dict(prof.get("preferredArtists") or {})
-        tp.mobile_liked = list(prof.get("likedSongs") or [])[:10000]
-        tp.mobile_disliked = list(prof.get("dislikedSongs") or [])[:10000]
-        tp.mobile_banned = list(prof.get("bannedArtists") or [])[:1000]
-        tp.mobile_counts = dict(prof.get("artistDislikeCounts") or {})
+        # Слепок вкуса: обновляем ТОЛЬКО те поля, которые клиент реально
+        # прислал. Раньше отсутствующий ключ считался «пустым» и затирал
+        # снапшот (жанры/артисты/лайки/дизлайки/баны/счётчики) — а
+        # apply_delta звал sync_from_mobile с профилем {} на каждой волне
+        # с дельтой оценок. Итог: мобильный вкус стирался на ровном месте.
+        # «Не прислал» = «не трогаем»; «прислал пустым» = «очисти».
+        if "preferredGenres" in prof:
+            tp.mobile_genres = {
+                str(k).strip().lower(): v
+                for k, v in (dict(prof.get("preferredGenres") or {}).items())}
+        if "preferredArtists" in prof:
+            tp.mobile_artists = dict(prof.get("preferredArtists") or {})
+        if "likedSongs" in prof:
+            tp.mobile_liked = list(prof.get("likedSongs") or [])[:10000]
+        if "dislikedSongs" in prof:
+            tp.mobile_disliked = list(prof.get("dislikedSongs") or [])[:10000]
+        if "bannedArtists" in prof:
+            tp.mobile_banned = list(prof.get("bannedArtists") or [])[:1000]
+        if "artistDislikeCounts" in prof:
+            tp.mobile_counts = dict(prof.get("artistDislikeCounts") or {})
         # Штамп времени — по источнику: mobile_synced_at только для мобилы,
         # desktop_synced_at только для десктопа. mobile_sync_source = кто
         # последним писал слепок (старые записи без метки = мобила).
