@@ -38,9 +38,14 @@ MIN_LABELED = 5000   # минимум размеченных строк (роа�
 MIN_POSITIVE = 200   # минимум ранних скипов (иначе дисбаланс не вытянуть)
 DATASET_LIMIT = 20000  # свежие события, nuevos primero
 MODEL_TTL_SEC = 6 * 3600
+# Отрицательный кэш: модели нет (обычное состояние — мало размеченных событий).
+# Без него датасет (20k PlayEvent + профиль на каждого юзера) пересобирался бы
+# на КАЖДЫЙ запрос в score_candidates, т.е. на каждый /api/wave/continue.
+NEG_TTL_SEC = 3600
 SETTINGS_KEY = "skip_model"
 
-_cache: dict[str, Any] = {"at": 0.0, "pipe": None, "metrics": {}}
+_cache: dict[str, Any] = {"at": 0.0, "pipe": None, "metrics": {},
+                          "none_at": 0.0}
 
 
 def label_for(action: str | None, position_sec: Any) -> int | None:
@@ -359,19 +364,28 @@ def _save_metrics(db, metrics: dict) -> None:
 
 
 def get_model(db):
-    """Обученная труба или None. Кэш на процесс + TTL, метрики — в AppSetting."""
+    """Обученная труба или None. Кэш на процесс + TTL, метрики — в AppSetting.
+
+    Два состояния кэша: «есть модель» (``pipe``) и «модели нет» (``none_at``).
+    Отрицательный кэш обязателен: ``get_model`` зовётся из ``score_candidates``
+    на каждый запрос волны, а датасет без модели строить дорого.
+    """
     now = time.monotonic()
     hit = _cache.get("pipe")
     if hit is not None and now - float(_cache.get("at") or 0) < MODEL_TTL_SEC:
         return hit
+    # модель не обучилась — не трогаем БД, пока TTL отрицательного кэша не вышел
+    if now - float(_cache.get("none_at") or 0.0) < NEG_TTL_SEC:
+        return None
     try:
         X, y = build_dataset(db)
         res = train(X, y)
     except Exception:
         res = None
     if res is None:
-        # отрицательный кэш короткий: данные могли подрасти
-        _cache["at"] = now - MODEL_TTL_SEC + 600.0
+        # отрицательный кэш: данные могли подрасти, но не каждый запрос
+        _cache["none_at"] = now
+        _cache["at"] = 0.0
         _cache["pipe"] = None
         try:
             _save_metrics(db, {"active": False, "labeled": len(y),
@@ -381,6 +395,7 @@ def get_model(db):
             pass
         return None
     _cache["at"] = now
+    _cache["none_at"] = 0.0
     _cache["pipe"] = res["pipe"]
     _cache["metrics"] = res
     try:
@@ -405,10 +420,13 @@ def predict_proba(pipe, vec: list[float]) -> float | None:
 
 def status(db) -> dict:
     """Диагностика для API/логов: активна ли модель и на чём обучена."""
+    now = time.monotonic()
     out: dict[str, Any] = {"active": _cache.get("pipe") is not None,
                            "features": FEATURES,
                            "min_labeled": MIN_LABELED,
-                           "min_positive": MIN_POSITIVE}
+                           "min_positive": MIN_POSITIVE,
+                           "neg_cached": now - float(
+                               _cache.get("none_at") or 0.0) < NEG_TTL_SEC}
     out.update(_cache.get("metrics") or {})
     try:
         from app.db.models import AppSetting
@@ -424,3 +442,4 @@ def reset_cache() -> None:
     _cache["at"] = 0.0
     _cache["pipe"] = None
     _cache["metrics"] = {}
+    _cache["none_at"] = 0.0

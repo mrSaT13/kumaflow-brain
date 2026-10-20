@@ -120,6 +120,41 @@ def _seed_small():
     return uid
 
 
+def test_get_model_negative_cache_avoids_dataset_rebuild(monkeypatch):
+    """Модели нет (обычное состояние) — датасет НЕ пересобирается на каждый вызов.
+
+    get_model зовётся из score_candidates на каждый /api/wave/continue, а
+    build_dataset тянет 20k PlayEvent + профиль на каждого юзера.
+    """
+    calls = {"n": 0}
+    real_build = _sm.build_dataset
+
+    def counting_build(db, limit=_sm.DATASET_LIMIT):
+        calls["n"] += 1
+        return real_build(db, limit=limit)
+
+    monkeypatch.setattr(_sm, "build_dataset", counting_build)
+    _sm.reset_cache()
+    db = SessionLocal()
+    try:
+        _seed_small()
+        assert _sm.get_model(db) is None
+        assert calls["n"] == 1
+        assert _sm.get_model(db) is None
+        assert _sm.get_model(db) is None
+        assert calls["n"] == 1  # датасет не трогаем, пока TTL отрицательного кэша жив
+        st = _sm.status(db)
+        assert st["active"] is False
+        assert st["neg_cached"] is True
+        # сброс кэша — датасет снова собирается
+        _sm.reset_cache()
+        assert _sm.get_model(db) is None
+        assert calls["n"] == 2
+    finally:
+        db.close()
+        _sm.reset_cache()
+
+
 def test_get_model_falls_back_gracefully():
     from datetime import datetime
 
