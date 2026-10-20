@@ -131,6 +131,24 @@ def test_without_radio_seed_no_anchor():
         _wipe()
 
 
+def test_stale_radio_seed_is_not_anchor():
+    """Старый сид не должен рулить волной (TTL 12 ч) — иначе стиль застрянет."""
+    from datetime import datetime, timedelta
+
+    _wipe()
+    db = SessionLocal()
+    try:
+        s = WaveSeed(user_id=UID, kind="track", ref=ANCHOR, label="old")
+        s.created_at = datetime.utcnow() - timedelta(hours=30)
+        s.updated_at = datetime.utcnow() - timedelta(hours=30)
+        db.add(s)
+        db.commit()
+        assert _wave._radio_seed_anchor(db, UID) is None
+    finally:
+        db.close()
+        _wipe()
+
+
 def test_radio_cluster_pool_collects_neighbours():
     db = SessionLocal()
     try:

@@ -3197,6 +3197,14 @@ def _smooth_flow_order(items: list[dict], tun: dict | None = None,
     return items
 
 
+# Сколько живёт радио-якорь в волне. Капсула «волна по Eminem» живёт долго
+# (это память последнего радио — зашёл через неделю, увидел, жми), но ЯКОРЬ
+# волны — только пока радио свежее: иначе сид, запущенный вчера, завтра
+# будет рулить всей волной. Плеер шлёт DELETE /api/wave/seed при сбросе
+# сида; TTL — страховка для мобилы и для случая «плеер закрыли, не сбросив».
+RADIO_SEED_TTL_H = 12
+
+
 def _radio_seed_anchor(db, user_id: str) -> str | None:
     """Внутренний id трека-якоря радио (`wave_seeds`) или None.
 
@@ -3214,6 +3222,17 @@ def _radio_seed_anchor(db, user_id: str) -> str | None:
         s = db.get(WaveSeed, str(user_id))
         if s is None:
             return None
+        # Свежесть: старый сид не должен рулить волной (см. RADIO_SEED_TTL_H).
+        try:
+            _stamp = getattr(s, "updated_at", None) or getattr(s, "created_at", None)
+            if _stamp is not None:
+                from datetime import datetime as _dt3
+
+                _age_h = (_dt3.utcnow() - _stamp).total_seconds() / 3600.0
+                if _age_h > RADIO_SEED_TTL_H:
+                    return None
+        except Exception:
+            pass
         if (s.kind or '') == 'track':
             tid = str(s.ref or '').strip()
             if not tid:
