@@ -127,6 +127,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "smooth_passes": 8,
         "key_energy_max": 0.15,
         "key_passes": 3,
+        # форма волны: разгон -> вершина -> спад (0 = выключить, старая
+        # монотонная раскладка по энергии)
+        "arc_on": 1,
+        "arc_peak_pos": 0.68,
+        "arc_release": 0.78,
         # сиды вкуса: лимит + доли топ/recent по characteristic
         "seed_limit": 5,        "seed_top_favorite": 0.7,
         "seed_recent_favorite": 0.2,
@@ -173,6 +178,7 @@ for _k, _lo, _hi in (
         ("adaptive_mild", 1, 100), ("adaptive_morphing", 1, 100),
         ("adaptive_floor", 1, 20), ("smooth_passes", 0, 50),
         ("key_passes", 0, 20), ("seed_limit", 1, 20),
+        ("arc_on", 0, 1),
         ("radio_similar", 1, 20), ("radio_per_similar", 1, 100),
         ("radio_server", 0, 100)):
     _g2 = ("repeats" if _k in ("fatigue_days", "artist_cap")
@@ -196,7 +202,8 @@ for _k, _lo, _hi in (
         ("penalty_skip_early", -1.0, 1.0), ("penalty_skip_late", -1.0, 1.0),
         ("genre_ban_skips", 1, 20), ("night_energy_max", 0.0, 1.0),
         ("sport_energy_min", 0.0, 1.0), ("smooth_max_step", 0.01, 1.0),
-        ("key_energy_max", 0.01, 1.0), ("seed_top_favorite", 0.0, 1.0),
+        ("key_energy_max", 0.01, 1.0), ("arc_peak_pos", 0.05, 0.95),
+        ("arc_release", 0.2, 1.0), ("seed_top_favorite", 0.0, 1.0),
         ("seed_recent_favorite", 0.0, 1.0), ("seed_top_unfamiliar", 0.0, 1.0),
         ("seed_recent_unfamiliar", 0.0, 1.0), ("seed_top_popular", 0.0, 1.0),
         ("seed_recent_popular", 0.0, 1.0), ("seed_top_default", 0.0, 1.0),
@@ -207,7 +214,8 @@ for _k, _lo, _hi in (
         _g3 = "skips"
         _t3 = "int" if _k == "genre_ban_skips" else "float"
     elif _k in ("night_energy_max", "sport_energy_min", "smooth_max_step",
-                "key_energy_max") or _k.startswith(("seed_", "adaptive")) \
+                "key_energy_max", "arc_peak_pos", "arc_release") \
+            or _k.startswith(("seed_", "adaptive")) \
             or _k in ("forgotten_days", "sport_bpm_min"):
         _g3 = "playlists"
         _t3 = "float"

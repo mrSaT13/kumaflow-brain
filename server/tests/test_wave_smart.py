@@ -335,8 +335,12 @@ def test_energy_wave_arc_without_mood():
         assert len(res["tracks"]) == 5
         ens = [t["energy"] for t in res["tracks"]]
         assert all(e is not None for e in ens)
+        # Форма волны: разгон -> вершина -> спад (раньше было монотонно:
+        # «старт спокойный, хвост — пик сегмента»).
         assert ens[0] == min(ens)  # старт спокойный
-        assert ens[-1] == max(ens)  # хвост — пик сегмента
+        peak = max(range(len(ens)), key=lambda i: ens[i])
+        assert peak > 0, ens  # вершина не в самом начале
+        assert ens[peak] > ens[-1], ens  # хвост — спад
         assert all(t.get("key") for t in res["tracks"])  # key обогащён
     finally:
         db.close()

@@ -2616,6 +2616,199 @@ def _smooth_ramp_order(items: list[dict], start_vec: dict[str, float],
     return items
 
 
+# --- Форма волны: разгон -> вершина -> спад ---------------------------------
+# Монотонная раскладка по энергии (orchestrator.smooth_energy_order) даёт
+# «ровную» волну: сначала тихо, потом громко — и до самого конца. Настоящая
+# волна имеет ФОРМУ: разгон, вершина, спад.
+#
+# Форма задаётся ИНТЕНСИВНОСТЬЮ (энергия + arousal), а «цвет» трека
+# (valence, dance) остаётся общим для пачки: дуга — это динамика, а не смена
+# настроения. Иначе волна «переезжала» из меланхолии в эпик по дороге и
+# переставала быть волной.
+#
+# Точка входа — интенсивность текущего трека: стык пачек не рвётся, и если
+# пользователь уже слушает громко, волна не полезет ещё выше, а сойдёт.
+ARC_PEAK_POS = 0.68    # где вершина (доля пачки)
+ARC_RELEASE = 0.78     # во сколько спад гасит динамику
+
+
+def mood_intensity(vec: dict[str, float] | None) -> float:
+    """Скалярная «интенсивность» вектора: чем выше, тем громче и бодрее.
+
+    energy 0.5 / arousal 0.3 / dance 0.2. Оси, которых нет, не считаются:
+    трек без arousal не должен штрафоваться за отсутствие координаты.
+    """
+    num = 0.0
+    den = 0.0
+    for axis, w in (('energy', 0.5), ('arousal', 0.3), ('dance', 0.2)):
+        if not vec or axis not in vec:
+            continue
+        try:
+            v = float(vec[axis])
+        except (TypeError, ValueError):
+            continue
+        num += w * min(max(v, 0.0), 1.0)
+        den += w
+    return (num / den) if den > 0 else 0.5
+
+
+def _ease(t: float) -> float:
+    """smoothstep: разгон не рвётся, вершина не «столбик»."""
+    try:
+        t = float(t)
+    except (TypeError, ValueError):
+        t = 0.0
+    t = min(max(t, 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _avg_vec(vecs: list[dict[str, float]]) -> dict[str, float]:
+    """Средний вектор по списку (пропущенные оси не учитываются)."""
+    acc: dict[str, float] = {}
+    for v in vecs or []:
+        for k, val in (v or {}).items():
+            try:
+                acc[k] = acc.get(k, 0.0) + float(val)
+            except (TypeError, ValueError):
+                continue
+    n = max(1, len(vecs or []))
+    return {k: val / n for k, val in acc.items()}
+
+
+def wave_arc_curve(n: int, start_level: float, peak_level: float = 1.0,
+                   peak_pos: float = ARC_PEAK_POS,
+                   release: float = ARC_RELEASE) -> list[float]:
+    """Кривая интенсивности пачки: 0 — пол, 1 — вершина.
+
+    start_level — с какого уровня волна продолжается (интенсивность текущего
+    трека, нормированная на шкалу пула). peak_level — высота вершины (1.0 —
+    самая горячая трека пула). release — во сколько спад гасит динамику
+    (0.78 = спад до 78 % вершины).
+    """
+    if n <= 0:
+        return []
+    p = min(max(float(peak_pos or 0.0), 0.05), 0.95)
+    r = min(max(float(release or 1.0), 0.2), 1.0)
+    s = min(max(float(start_level or 0.0), 0.0), 1.0)
+    pk = min(max(float(peak_level or 1.0), s), 1.0)
+    out: list[float] = []
+    for i in range(n):
+        t = i / float(n - 1) if n > 1 else 0.0
+        if t <= p:
+            u = (t / p) if p > 0 else 1.0
+            out.append(s + (pk - s) * _ease(u))
+        else:
+            u = (t - p) / max(1e-6, 1.0 - p)
+            out.append(pk - (pk - pk * r) * _ease(u))
+    return out
+
+
+def _smooth_arc_order(items: list[dict], want: list[float],
+                       vec_map: dict[str, dict[str, float]],
+                       passes: int = 6) -> list[dict]:
+    """Локальные обмены соседей, уменьшающие ошибку дуги.
+
+    Глобальный порядок не переставляет — чинит только стыки (как
+    _smooth_keys_order, но по динамике).
+    """
+    items = list(items)
+    if len(items) < 3:
+        return items
+
+    def _err(seq: list[dict]) -> float:
+        e = 0.0
+        for i, r in enumerate(seq):
+            if i >= len(want):
+                break
+            v = (vec_map or {}).get(str(r.get('track_id') or '')) or {}
+            if not v:
+                continue
+            d = mood_intensity(v) - want[i]
+            e += d * d
+        return e
+
+    for _ in range(max(0, int(passes))):
+        improved = False
+        for i in range(len(items) - 1):
+            cur = _err(items)
+            items[i], items[i + 1] = items[i + 1], items[i]
+            if _err(items) < cur - 1e-9:
+                improved = True
+            else:
+                items[i], items[i + 1] = items[i + 1], items[i]
+        if not improved:
+            break
+    return items
+
+
+def order_by_wave_arc(items: list[dict], vec_map: dict[str, dict[str, float]],
+                      *, start_vec: dict[str, float] | None = None,
+                      peak_vec: dict[str, float] | None = None,
+                      release: float = ARC_RELEASE,
+                      peak_pos: float = ARC_PEAK_POS) -> list[dict] | None:
+    """Разложить пачку по форме волны: разгон -> вершина -> спад.
+
+    Вершина — самая горячая трека пула: пилюля задаёт ПОЛ (жёсткий фильтр
+    уже отсек тихое), но не потолок — иначе треки выше пилюли некуда было бы
+    девать, и хвост пачки ломался. Цвет (valence, dance) при равенстве по
+    динамике тянется к центру пилюли, если она выбрана.
+
+    Точка входа — интенсивность текущего трека, поэтому стык пачек не рвётся.
+
+    Возвращает None, если дугу строить не из чего (нет векторов или пул
+    однородный по динамике) — тогда вызывающий оставляет старую раскладку.
+    """
+    n = len(items)
+    if n < 3 or not vec_map:
+        return None
+    entries: list[tuple[int, dict[str, float], float]] = []
+    for idx, r in enumerate(items):
+        v = vec_map.get(str(r.get('track_id') or '')) or {}
+        if v:
+            entries.append((idx, v, mood_intensity(v)))
+    if len(entries) < 3:
+        return None
+    ints = sorted(e[2] for e in entries)
+    lo_i, hi_i = ints[0], ints[-1]
+    if hi_i - lo_i < 1e-6:
+        return None  # пул однородный по динамике — дуга нечего рисовать
+    # точка входа: интенсивность текущего трека
+    start_level = lo_i
+    if start_vec:
+        start_level = min(max(mood_intensity(start_vec), lo_i), hi_i)
+    level = (start_level - lo_i) / (hi_i - lo_i)
+    curve = wave_arc_curve(n, level, peak_level=1.0,
+                            peak_pos=peak_pos, release=release)
+    want = [lo_i + c * (hi_i - lo_i) for c in curve]
+    # «цвет» пачки: центр пилюли, если выбрана, иначе средний вектор пула
+    ctx = dict(peak_vec) if peak_vec else _avg_vec([e[1] for e in entries])
+    if not ctx:
+        ctx = _avg_vec([e[1] for e in entries])
+    used: set[int] = set()
+    placed: list[int] = []
+    for i in range(n):
+        best_j = -1
+        best_key = None
+        for j, (_idx, v, iv) in enumerate(entries):
+            if j in used:
+                continue
+            # главный критерий — интенсивность (форма волны), второй —
+            # расстояние в муд-пространстве (среди равных по динамике)
+            key = (round(abs(iv - want[i]), 6),
+                   round(mood_vec_dist(v, ctx), 6))
+            if best_key is None or key < best_key:
+                best_key = key
+                best_j = j
+        if best_j < 0:
+            break
+        used.add(best_j)
+        placed.append(entries[best_j][0])
+    out = [items[i] for i in placed]
+    seen = set(placed)
+    out.extend(items[i] for i in range(n) if i not in seen)
+    return _smooth_arc_order(out, want, vec_map)
+
+
 def _smooth_energy_local(items: list[dict], max_step: float = 0.18,
                          passes: int = 8) -> list[dict]:
     """Локальное сглаживание энергии БЕЗ глобальной сортировки.
@@ -3634,10 +3827,40 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             # ветках.
             top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
     elif len(top) > 3:
-        # Без целевого настроения — раскладываем оркестратором: плавные
-        # переходы по энергии, затем key-сглаживание.
+        # Форма волны: разгон -> вершина -> спад.
+        # Раньше здесь была монотонная раскладка по энергии (smooth_energy_order):
+        # сначала тихо, потом громко — и до самого конца. Волна без формы —
+        # это «плейлист с плавными переходами». Теперь пачка имеет форму, а
+        # точка входа — звук текущего трека, поэтому стык пачек не рвётся.
         _mtun = _tun_all(db, user_id)
-        top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
+        _arc = None
+        if _tun_int(_mtun, 'playlists', 'arc_on', 1):
+            _sv = mood_vector(_cf) if _cf is not None else {}
+            _pv = (MOOD_TARGETS.get(_eff_mood_norm) or {}) if _eff_mood_norm else {}
+            _arc = order_by_wave_arc(
+                top, _vecs_all, start_vec=_sv, peak_vec=_pv,
+                release=_tun_float(_mtun, 'playlists', 'arc_release',
+                                   ARC_RELEASE),
+                peak_pos=_tun_float(_mtun, 'playlists', 'arc_peak_pos',
+                                    ARC_PEAK_POS))
+        if _arc is not None:
+            top = _arc
+            try:
+                from app.core.logging import get_logger as _gl
+
+                _ens = [r.get("energy") for r in top if r.get("energy") is not None]
+                if _ens:
+                    _gl("wave").info(
+                        "wave arc: {} треков, энергия {:.2f} -> {:.2f} -> {:.2f} "
+                        "(вершина на {} %)", len(top), _ens[0],
+                        max(_ens), _ens[-1],
+                        int(100 * ARC_PEAK_POS))
+            except Exception:
+                pass
+        else:
+            # Дугу строить не из чего (нет анализа, пул однородный) —
+            # старая раскладка по энергии, волна не должна пустеть.
+            top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
         top = _smooth_keys_order(top, _mtun)
     # Мостик: первый трек выдачи — плавное продолжение текущего.
     # Если переход резкий — подтягиваем лучший мостик из топ-10 окна.
@@ -3667,9 +3890,22 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                               r.get("mood_code") == start_mood) else 0.5
                 return _kk * 0.5 + (1.0 - min(_de, 1.0)) * 0.3 + _mm * 0.2
 
+            def _en_of(r: dict) -> float:
+                try:
+                    return float(r.get("energy")
+                                 if r.get("energy") is not None else 0.5)
+                except (TypeError, ValueError):
+                    return 0.5
+
             _b0 = _bridge(top[0])
             _bi, _bv = 0, _b0
+            # Мостик не должен ломать форму волны: в начало пачки подтягивается
+            # трек того же динамического уровня (иначе разгон начинался бы
+            # скачком). Поэтому кандидаты с заметно другой энергией отсекаем.
+            _e_first = _en_of(top[0])
             for _i in range(1, min(10, len(top))):
+                if abs(_en_of(top[_i]) - _e_first) > 0.12:
+                    continue
                 _s = _bridge(top[_i])
                 if _s > _bv:
                     _bi, _bv = _i, _s
