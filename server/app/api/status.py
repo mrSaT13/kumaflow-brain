@@ -1,5 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
 from app.core.config import get_settings
+from app.db.database import get_db
 
 router = APIRouter()
 
@@ -53,6 +56,32 @@ def updates_check() -> dict:
     if res.get("latest") is None:
         out["note"] = "GitHub недоступен — попробуй позже"
     return out
+
+
+@router.get("/skip-model")
+def skip_model_status(db: Session = Depends(get_db)):
+    """Состояние скип-предиктора: есть ли модель и почему её нет.
+
+    Модель обучается на PlayEvent (нужно 5000 размеченных событий и 200
+    ранних скипов) и переобучается по крону раз в час. Пока данных мало —
+    `active: false`, и волна работает на эвристике `skip_risk`.
+    """
+    from app.services import skip_model as _sm
+
+    try:
+        st = _sm.status(db)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:200]}
+    st.setdefault("min_labeled", _sm.MIN_LABELED)
+    st.setdefault("min_positive", _sm.MIN_POSITIVE)
+    st["ok"] = True
+    st["hint"] = (
+        "Модель активна — волна учитывает вероятность раннего скипа."
+        if st.get("active") else
+        "Модели пока нет: не хватает размеченных событий. Волна работает "
+        "на эвристике; переобучение — по крону раз в час."
+    )
+    return st
 
 
 @router.get("/debug/pool")

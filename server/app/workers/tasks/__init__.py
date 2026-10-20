@@ -2791,6 +2791,42 @@ def auto_tune(*args, **kwargs):
         return {"status": "failure", "error": str(e)}
 
 
+def skip_model_train(*args, **kwargs):
+    """Крон: переобучить скип-предиктор (P(скип<30с)).
+
+    Модель обучается на PlayEvent всех пользователей. Пока размеченных
+    событий мало (< 5000 или < 200 ранних скипов) — модели нет, и волна
+    работает на эвристике `skip_risk`. Это НЕ «модель сломалась»: она
+    появится сама, как только наберётся история (и раньше — по этому крону,
+    а не по факту запроса волны).
+    """
+    run_id = args[0] if args else None
+    try:
+        from app.services import skip_model as _sm
+
+        with session_scope() as db:
+            st = _sm.retrain(db)
+        active = bool(st.get("active"))
+        summary = ("Скип-модель обучена: n=%s, позитивов=%s, AUC=%s"
+                   % (st.get("n"), st.get("pos"), st.get("auc_train"))
+                   if active else
+                   "Скип-модель пока не обучена: %s размеченных событий, "
+                   "нужно %d (и %d ранних скипов)" % (
+                       st.get("labeled"), _sm.MIN_LABELED, _sm.MIN_POSITIVE))
+        logger.info(summary)
+        if run_id:
+            _append_log(run_id, "info", summary)
+            _finish_run(run_id, "success")
+        return {"status": "success", "active": active, "status_detail": st,
+                "summary": summary}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("skip_model_train failed: {}", e)
+        if run_id:
+            _append_log(run_id, "error", str(e))
+            _finish_run(run_id, "failure", str(e))
+        return {"status": "failure", "error": str(e)}
+
+
 def weekly_discovery_all(*args, **kwargs):
     """Крон по понедельникам: Открытия недели (CLAP) для каждого пользователя."""
     run_id = args[0] if args else None

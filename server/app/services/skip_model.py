@@ -41,7 +41,10 @@ MODEL_TTL_SEC = 6 * 3600
 # Отрицательный кэш: модели нет (обычное состояние — мало размеченных событий).
 # Без него датасет (20k PlayEvent + профиль на каждого юзера) пересобирался бы
 # на КАЖДЫЙ запрос в score_candidates, т.е. на каждый /api/wave/continue.
-NEG_TTL_SEC = 3600
+# TTL = 10 минут: столько же, сколько задумывал исходный код (в нём стоял
+# hack `_cache["at"] = now - MODEL_TTL_SEC + 600.0`, но он не срабатывал —
+# guard требовал `hit is not None`). Плюс переобучение по крону (раз в час).
+NEG_TTL_SEC = 600
 SETTINGS_KEY = "skip_model"
 
 _cache: dict[str, Any] = {"at": 0.0, "pipe": None, "metrics": {},
@@ -363,20 +366,25 @@ def _save_metrics(db, metrics: dict) -> None:
             pass
 
 
-def get_model(db):
+def get_model(db, force: bool = False):
     """Обученная труба или None. Кэш на процесс + TTL, метрики — в AppSetting.
 
     Два состояния кэша: «есть модель» (``pipe``) и «модели нет» (``none_at``).
     Отрицательный кэш обязателен: ``get_model`` зовётся из ``score_candidates``
     на каждый запрос волны, а датасет без модели строить дорого.
+
+    force=True — пересобрать датасет и обучить заново (крон/ручной вызов),
+    игнорируя оба кэша.
     """
     now = time.monotonic()
     hit = _cache.get("pipe")
-    if hit is not None and now - float(_cache.get("at") or 0) < MODEL_TTL_SEC:
-        return hit
-    # модель не обучилась — не трогаем БД, пока TTL отрицательного кэша не вышел
-    if now - float(_cache.get("none_at") or 0.0) < NEG_TTL_SEC:
-        return None
+    if not force:
+        if hit is not None and now - float(_cache.get("at") or 0) < MODEL_TTL_SEC:
+            return hit
+        # модель не обучилась — не трогаем БД, пока TTL отрицательного кэша
+        # не вышел
+        if now - float(_cache.get("none_at") or 0.0) < NEG_TTL_SEC:
+            return None
     try:
         X, y = build_dataset(db)
         res = train(X, y)
@@ -405,6 +413,20 @@ def get_model(db):
     except Exception:
         pass
     return res["pipe"]
+
+
+def retrain(db) -> dict:
+    """Форс-переобучение (крон/ручной вызов). Возвращает статус модели.
+
+    Сбрасывает оба кэша и обучает заново: после того как набралось 5000
+    размеченных событий, модель появляется не «по факту запроса», а по
+    расписанию — даже если трафика нет.
+    """
+    _cache["at"] = 0.0
+    _cache["none_at"] = 0.0
+    _cache["pipe"] = None
+    get_model(db, force=True)
+    return status(db)
 
 
 def predict_proba(pipe, vec: list[float]) -> float | None:

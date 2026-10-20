@@ -150,6 +150,15 @@ def _tick_once() -> None:
                     from app.workers import tasks as _t
 
                     enqueue_light(_t.auto_tune, job_timeout=1800)
+                elif kind == "skip_model":
+                    # Скип-предиктор обучается по расписанию: ждать, пока
+                    # наберётся 5000 размеченных событий и кто-то позовёт
+                    # волну, смысла нет — модель должна появиться сама.
+                    # Задача тяжёлая (20k событий + профили), поэтому в
+                    # очередь, а не inline в тик.
+                    from app.workers import tasks as _t
+
+                    enqueue_light(_t.skip_model_train, job_timeout=1800)
                 elif kind == "check_updates":
                     # Дешёвый (один GET к GitHub) — inline, как covers_gc:
                     # очередь ради этого не дёргаем, ошибки глотает сам сервис.

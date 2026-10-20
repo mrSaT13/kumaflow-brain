@@ -155,6 +155,48 @@ def test_get_model_negative_cache_avoids_dataset_rebuild(monkeypatch):
         _sm.reset_cache()
 
 
+def test_negative_cache_ttl_is_short():
+    """TTL отрицательного кэша — 10 минут.
+
+    Модель не должна отставать от данных: как только наберётся 5000
+    размеченных событий, она появляется (плюс крон переобучает раз в час).
+    """
+    assert 60 <= _sm.NEG_TTL_SEC <= 3600
+
+
+def test_retrain_forces_dataset_rebuild(monkeypatch):
+    """Форс-переобучение (крон) игнорирует отрицательный кэш."""
+    calls = {"n": 0}
+    real_build = _sm.build_dataset
+
+    def counting_build(db, limit=_sm.DATASET_LIMIT):
+        calls["n"] += 1
+        return real_build(db, limit=limit)
+
+    monkeypatch.setattr(_sm, "build_dataset", counting_build)
+    _sm.reset_cache()
+    db = SessionLocal()
+    try:
+        _seed_small()
+        assert _sm.get_model(db) is None
+        assert calls["n"] == 1
+        st = _sm.retrain(db)
+        assert calls["n"] == 2, "retrain обязан пересобрать датасет"
+        assert st["active"] is False  # данных мало — модели честно нет
+        assert st["neg_cached"] is True
+    finally:
+        db.close()
+        _sm.reset_cache()
+
+
+def test_skip_model_cron_is_seeded():
+    """Крон-задача обучения модели должна быть в списке дефолтных."""
+    from app.services import cron_jobs as _cj
+
+    kinds = [k for _n, k, _e in _cj.DEFAULTS]
+    assert "skip_model" in kinds
+
+
 def test_get_model_falls_back_gracefully():
     from datetime import datetime
 

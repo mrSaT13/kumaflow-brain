@@ -22,6 +22,7 @@ DEFAULTS: list[tuple[str, str, str]] = [
     ("Weekly discovery", "weekly", "0 6 * * 1"),
     ("Cover GC 7d", "covers_gc", "0 5 * * 0"),
     ("Auto-tune волны", "auto_tune", "20 5 * * *"),
+    ("Skip-модель", "skip_model", "0 * * * *"),
     ("Проверка обновлений", "check_updates", "0 8 * * *"),
 ]
 
