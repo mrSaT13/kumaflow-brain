@@ -162,11 +162,15 @@ def test_pills_from_web_ui_still_normalize():
 
 
 def test_wave_continue_falls_back_when_no_match():
-    """Нет ни одного трека под настроение — фильтр откатывается, пусто не отдаём."""
+    """Слово, под которое нет ни одного трека, — волна всё равно живая.
+
+    Раньше тут было 'peaceful': он попадал в семейство 'calm' и матчился.
+    Теперь проверяем настоящий фолбэк — слово, которого мозг не знает вовсе.
+    """
     db = SessionLocal()
     try:
         r = _wave.wave_continue(db, UID, queue=[], count=5,
-                                settings={"mood": "peaceful"})
+                                settings={"mood": "какая-то ерунда"})
         assert r["tracks"], "очередь не должна пустеть"
     finally:
         db.close()

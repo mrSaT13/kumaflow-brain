@@ -7,8 +7,11 @@ from typing import Any
 
 from app.core.logging import get_logger
 from app.services import ai
+from app.services.wave import MOOD_VOCAB
 
 logger = get_logger("lyrics_ai")
+
+_VOCAB_LINE = ', '.join(MOOD_VOCAB)
 
 _SYSTEM = (
     "Ты — музыкальный аналитик. Тебе дают текст песни. "
@@ -17,9 +20,14 @@ _SYSTEM = (
     ' "valence": 0.0-1.0,'
     ' "arousal": 0.0-1.0,'
     ' "energy": 0.0-1.0,'
-    ' "moods": ["3-5 short mood words in russian"],'
+    ' "moods": ["2-4 настроения ИЗ СПИСКА (см. ниже), без других слов"],'
     ' "themes": ["2-4 short theme words in russian"],'
-    ' "language": "ru|en|..."}'
+    ' "language": "ru|en|..."}\n'
+    "Настроения выбирай СТРОГО из этого списка (можно 2-4 штуки): "
+    f"{_VOCAB_LINE}.\n"
+    "Если ни одно не подходит — верни пустой список moods. "
+    "Свои слова не придумывай: они попадают в базу как отдельные пилюли, "
+    "и мозг о них ничего не знает."
 )
 
 

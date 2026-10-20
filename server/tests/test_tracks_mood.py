@@ -57,9 +57,17 @@ def test_mood_filter_and_catalog():
         assert r2["total"] == 1
         r3 = list_tracks(mood="тёмный", limit=100, offset=0, db=db)
         assert r3["total"] == 0
+        # Канонический код из каталога фильтр тоже понимает: каталог отдаёт
+        # коды ('energetic'), а в базе лежат сырые слова ('энергичный').
+        r4 = list_tracks(mood="energetic", limit=100, offset=0, db=db)
+        assert r4["total"] == 1, r4
         cat = list_moods(db=db)
         names = {m["name"] for m in cat["moods"]}
-        assert {"энергичный", "спокойный"} <= names
+        # Каталог сворачивает сырые слова в канонические коды: иначе каждое
+        # слово от LLM становилось отдельной пилюлей в плеере.
+        assert {"energetic", "calm"} <= names, names
+        labels = {m["label"] for m in cat["moods"]}
+        assert {"Бодрое", "Спокойное"} <= labels, labels
     finally:
         db.close()
         invalidate_moods_cache()

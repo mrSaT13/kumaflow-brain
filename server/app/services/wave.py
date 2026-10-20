@@ -11,6 +11,7 @@ random*0.12.
 """
 from __future__ import annotations
 
+import math
 import random
 from collections import Counter
 from datetime import datetime
@@ -100,26 +101,131 @@ MOOD_ALIASES: dict[str, str] = {
     'весёлое': 'happy', 'веселое': 'happy', 'счастливое': 'happy',
     'спокойное': 'calm', 'спокойный': 'calm',
     'расслабленное': 'relaxed', 'расслабленный': 'relaxed',
-    'мирное': 'peaceful', 'мирный': 'peaceful',
+    'мирное': 'calm', 'мирный': 'calm',
     'грустное': 'sad', 'грустный': 'sad', 'печальное': 'sad',
     'меланхоличное': 'melancholic', 'меланхоличный': 'melancholic',
     'тёмное': 'dark', 'темное': 'dark', 'тёмный': 'dark', 'темный': 'dark',
     'агрессивное': 'aggressive', 'агрессивный': 'aggressive',
+    'боевое': 'aggressive', 'боевой': 'aggressive',
     'танцевальное': 'dance', 'танцевальный': 'dance',
     'мечтательное': 'dreamy', 'мечтательный': 'dreamy',
     'тёплое': 'warm', 'теплое': 'warm', 'тёплый': 'warm', 'теплый': 'warm',
+    'тревожное': 'tense', 'тревожный': 'tense',
+    'романтичное': 'romantic', 'романтичный': 'romantic',
+    'эпичное': 'epic', 'эпичный': 'epic',
     # синонимы кодов, которые уже могли прийти из веба/настроек
-    'relaxed': 'relaxed', 'peaceful': 'peaceful', 'excited': 'excited',
-    'upbeat': 'upbeat', 'angry': 'aggressive', 'dreamy': 'dreamy',
-    'warm': 'warm', 'dance': 'dance',
+    'relaxed': 'relaxed', 'peaceful': 'calm', 'excited': 'energetic',
+    'upbeat': 'happy', 'angry': 'aggressive', 'dreamy': 'dreamy',
+    'warm': 'warm', 'dance': 'dance', 'happy': 'happy', 'calm': 'calm',
+    'sad': 'sad', 'dark': 'dark', 'energetic': 'energetic', 'tense': 'tense',
+    'romantic': 'romantic', 'epic': 'epic', 'melancholic': 'melancholic',
+    'chill': 'chill',
+    # ВАЖНО: каждый канонический код обязан быть тут identity-маппингом.
+    # Раньше коды не нормализовались вообще (norm_mood возвращал «как есть»),
+    # и это работало случайно: 'aggressive' -> 'aggressive'. Со строгим
+    # нормализатором без этой строки пилюля плеера 'aggressive' перестала бы
+    # узнаваться — пресет не находился, фильтр выключался.
+    'aggressive': 'aggressive',
 }
+
+# Подстрочки -> канонический код. Нужны потому, что слова настроения в БД
+# приходят из ДВУХ источников: librosa (9 фиксированных слов) и LLM по тексту
+# песни (lyrics_ai просит «3-5 short mood words in russian» — то есть любые
+# слова). Раньше незнакомое слово молча превращалось в себя же, пресет не
+# находился, а хард-фильтр вырождался в «оставь треки с этим словом» — и
+# откатывался целиком. Итог: пилюля «боевой» работала как «настроение не
+# выбрано». Порядок важен: первое совпадение выигрывает, поэтому специфичные
+# подстроки стоят выше общих.
+MOOD_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # тревога/напряжение — раньше sad, но «надрыв» и «тревога» это arousal
+    ('tense', ('тревож', 'тревог', 'напряж', 'нервн', 'насторож', 'тревожн',
+               'надрывн', 'гнетущ', 'изменчив', 'беспокой',
+               'anxious', 'anxiety', 'tense', 'nervous', 'worry', 'worried',
+               'stress', 'напряжен')),
+    # бой/агрессия
+    ('aggressive', ('агрессив', 'боев', 'боит', 'ярост', 'яро', 'злой', 'злоб',
+                    'злост', 'свиреп', 'напор', 'дерзк', 'вызов', 'хищн',
+                    'rage', 'angry', 'furious', 'hostile', 'combat', 'fight',
+                    'war', 'military', 'attack', 'heavy', 'hardcore',
+                    'hard rock', 'heavy metal', 'metal', 'punk', 'рок',
+                    'хип-хоп', 'hip-hop', 'hiphop', 'рэп', 'rap', 'гнев')),
+    # грусть
+    ('sad', ('груст', 'печал', 'тоск', 'меланхол', 'слезив', 'плак', 'страдан',
+             'одинок', 'депресс', 'подавлен', 'уныл', 'безнадёж', 'безнадеж',
+             'sad', 'melanchol', 'sorrow', 'grief', 'lonely')),
+    # тьма/мрачность
+    ('dark', ('тёмн', 'темн', 'мрачн', 'мрач', 'ночн', 'непрогляд',
+              'dark', 'somber', 'gothic', 'гроув')),
+    # эпик
+    ('epic', ('эпик', 'эпичн', 'монумент', 'торжеств', 'героик', 'масштабн',
+              'epic', 'grand', 'grandiose', 'triumph')),
+    # мечтательность
+    ('dreamy', ('мечтат', 'призрач', 'воздушн', 'невесом', 'облачн', 'речной',
+                'dream', 'dreamy', 'airy', 'ethereal')),
+    # тепло/нежность — раньше уходило в calm, но «нежный» это warm
+    ('warm', ('тёпл', 'тепл', 'уютн', 'ласк', 'нежн', 'золот', 'ностальг',
+              'душевн', 'светл', 'warm', 'nostalg', 'tender', 'cozy', 'golden',
+              'уют')),
+    # спокойствие
+    ('calm', ('спокой', 'умиротвор', 'безмятеж', 'медитац', 'шёпот', 'шепот',
+              'плавн', 'размерен', 'тих', 'покой', 'chillout', 'chill out',
+              'calm', 'peace', 'relax', 'meditat', 'ambient', 'serene',
+              'mellow', 'quiet')),
+    # расслабленность
+    ('relaxed', ('расслаб', 'ленив', 'неспешн', 'lazy', 'laid-back')),
+    # танец
+    ('dance', ('танц', 'клубн', 'диско', 'свинг', 'дэнс',
+               'dance', 'club', 'disco', 'groov', 'groove', 'bounce', 'swing')),
+    # счастье
+    ('happy', ('счастл', 'весел', 'весёл', 'радост', 'улыб', 'оптимиз',
+               'восторг', 'восторжен', 'весель',
+               'happy', 'joy', 'cheer', 'playful', 'uplift', 'bliss', 'upbeat',
+               'sunny', 'bright')),
+    # энергия
+    ('energetic', ('энергич', 'бодр', 'мощн', 'мощ', 'драйв', 'драйвов',
+                   'быстр', 'стремит', 'заводн', 'зажигат', 'активн', 'жизнен',
+                   'energetic', 'drive', 'driving', 'pump', 'powerful',
+                   'upbeat', 'fast')),
+    # романтика
+    ('romantic', ('романт', 'влюб', 'поцелуй', 'обним', 'чувств',
+                  'romantic', 'love', 'tender')),
+)
+
+# Канонический код -> русская подпись для пилюли (каталог /api/wave/options).
+MOOD_LABELS: dict[str, str] = {
+    'energetic': 'Бодрое',
+    'happy': 'Весёлое',
+    'calm': 'Спокойное',
+    'relaxed': 'Расслабленное',
+    'chill': 'Chill',
+    'sad': 'Грустное',
+    'melancholic': 'Меланхоличное',
+    'dark': 'Тёмное',
+    'aggressive': 'Боевое',
+    'dance': 'Танцевальное',
+    'dreamy': 'Мечтательное',
+    'warm': 'Тёплое',
+    'tense': 'Тревожное',
+    'romantic': 'Романтичное',
+    'epic': 'Эпичное',
+}
+
+# Словарь, который LLM обязан выбирать (lyrics_ai). Если LLM выдаёт слово
+# вне списка — оно всё равно нормализуется таблицей выше, но новые слова лучше
+# не плодить: пилюли в плеере строятся по словарю БД, и каждый выдуманный
+# лейбл превращается в отдельную пилюлю.
+MOOD_VOCAB: tuple[str, ...] = (
+    'энергичный', 'спокойный', 'танцевальный', 'счастливый', 'меланхоличный',
+    'агрессивный', 'мечтательный', 'тёплый', 'тёмный', 'тревожный',
+    'романтичный', 'эпичный',
+)
 # Пресеты «Моя волна». Ключ — канонический код (см. norm_mood).
 # 'moods' — семейство муд-лейблов: один и тот же набор и для ctx-бонуса,
 # и для жёсткого mood-фильтра (раньше фильтр брал только 1-й лейбл трека
 # и сравнивал его с кодом пилюли — то есть не срабатывал никогда).
 MOOD_PRESETS: dict[str, dict] = {
     'energetic': {'moods': {'energetic', 'excited', 'happy', 'dance'},
-                  'energy_min': 0.6, 'tempo_min': 110},
+                  'energy_min': 0.6, 'tempo_min': 110, 'valence_min': 0.4},
     'happy': {'moods': {'happy', 'upbeat', 'energetic', 'dance'},
               'valence_min': 0.55, 'dance_min': 0.5},
     'calm': {'moods': {'calm', 'relaxed', 'peaceful', 'dreamy', 'warm'},
@@ -134,7 +240,62 @@ MOOD_PRESETS: dict[str, dict] = {
               'tempo_max': 100},
     'relaxed': {'moods': {'calm', 'relaxed', 'peaceful', 'dreamy'},
                 'energy_max': 0.45, 'tempo_max': 100},
+    # --- пресеты, которых не было: каждый лейбл анализатора обязан иметь
+    # пресет, иначе пилюля «работает», но фильтр молча выключен. ---
+    'dance': {'moods': {'dance', 'energetic', 'happy'},
+              'dance_min': 0.45, 'energy_min': 0.45, 'tempo_min': 95},
+    'dreamy': {'moods': {'dreamy', 'calm', 'warm'},
+               'energy_max': 0.5, 'arousal_max': 0.55, 'tempo_max': 115},
+    'melancholic': {'moods': {'melancholic', 'sad', 'dark'},
+                    'valence_max': 0.45, 'energy_max': 0.6},
+    'warm': {'moods': {'warm', 'happy', 'romantic'},
+             'valence_min': 0.45, 'energy_max': 0.7},
+    'tense': {'moods': {'tense', 'sad', 'dark'},
+              'arousal_min': 0.5, 'energy_min': 0.45},
+    'romantic': {'moods': {'romantic', 'warm', 'calm'},
+                 'valence_min': 0.45, 'energy_max': 0.75},
+    'epic': {'moods': {'epic', 'energetic', 'dark'},
+             'energy_min': 0.55, 'tempo_min': 100},
 }
+# --- Числовое муд-пространство (этап 2) ----------------------------------
+# Пилюля — это ТОЧКА в 4-мерном пространстве звука + радиус вокруг неё.
+# Оси: valence (настроение), energy (энергия), arousal (возбуждение),
+# dance (танцевальность). Все 0..1 и уже лежат в TrackFeatures — отдельный
+# анализ не нужен.
+#
+# Раньше настроение было строкой («агрессивный»), и из этого следовало:
+#   * «счастливое» и «бодрое» — почти синонимы (обе про valence/energy);
+#   * градиент морфа был БИНАРНЫМ: трек либо «стартовое настроение»,
+#     либо «целевое» — трека «наполовину грустный, наполовину
+#     поднимающийся» не существовало вовсе;
+#   * слова от LLM — это про СЛОВА песни («боевая песня о любви»), а не
+#     про звук. Теперь звук (вектор) — главный свидетель, слово — нет.
+MOOD_AXES: tuple[str, ...] = ('valence', 'energy', 'arousal', 'dance')
+MOOD_AXIS_W: dict[str, float] = {'valence': 1.0, 'energy': 0.95,
+                                 'arousal': 0.85, 'dance': 0.6}
+# Радиус пилюли: взвешенное RMS-расстояние от центра, дальше — «не то».
+MOOD_RADIUS = 0.30
+# Центры пилюль в муд-пространстве. Расставлены вручную по тем формулам,
+# которыми анализатор считает лейблы (audio_analysis.mood_from_features),
+# чтобы «Боевое» означало звук, а не слово из текста песни.
+MOOD_TARGETS: dict[str, dict[str, float]] = {
+    'energetic': {'valence': 0.58, 'energy': 0.80, 'arousal': 0.72, 'dance': 0.58},
+    'happy': {'valence': 0.78, 'energy': 0.68, 'arousal': 0.62, 'dance': 0.68},
+    'calm': {'valence': 0.50, 'energy': 0.24, 'arousal': 0.20, 'dance': 0.30},
+    'relaxed': {'valence': 0.56, 'energy': 0.18, 'arousal': 0.14, 'dance': 0.24},
+    'chill': {'valence': 0.50, 'energy': 0.26, 'arousal': 0.22, 'dance': 0.38},
+    'sad': {'valence': 0.16, 'energy': 0.30, 'arousal': 0.28, 'dance': 0.24},
+    'melancholic': {'valence': 0.26, 'energy': 0.36, 'arousal': 0.30, 'dance': 0.24},
+    'dark': {'valence': 0.20, 'energy': 0.52, 'arousal': 0.44, 'dance': 0.30},
+    'aggressive': {'valence': 0.30, 'energy': 0.88, 'arousal': 0.88, 'dance': 0.55},
+    'dance': {'valence': 0.64, 'energy': 0.76, 'arousal': 0.70, 'dance': 0.85},
+    'dreamy': {'valence': 0.46, 'energy': 0.28, 'arousal': 0.24, 'dance': 0.30},
+    'warm': {'valence': 0.66, 'energy': 0.44, 'arousal': 0.40, 'dance': 0.40},
+    'tense': {'valence': 0.28, 'energy': 0.58, 'arousal': 0.76, 'dance': 0.34},
+    'romantic': {'valence': 0.64, 'energy': 0.40, 'arousal': 0.40, 'dance': 0.40},
+    'epic': {'valence': 0.46, 'energy': 0.76, 'arousal': 0.70, 'dance': 0.42},
+}
+
 # Занятие: мягкие бонусы (не жёсткие фильтры — очередь не должна пустеть).
 # Ключи-коды — контракт с плеером (GET /api/wave/options отдаёт каталог).
 # Русские пилюли старых клиентов — алиасы (ACTIVITY_ALIASES).
@@ -168,8 +329,13 @@ ACTIVITY_HARD: dict[str, dict] = {
     'rest': {'energy_max': 0.4, 'tempo_max': 100},
     'workout': {'energy_min': 0.65, 'tempo_min': 120},
 }
-# Жанр -> муд для треков без анализа (временный фолбек, пока нет TrackFeatures).
+# Жанр -> муд для треков без анализа (фолбек, пока нет TrackFeatures).
 # Точный звук всегда побеждает: как только трек проанализирован, решает аудио.
+# Таблица — только первый рубеж. Второй рубеж (важнее): муд жанра,
+# выведенный из ДАННЫХ — муд большинства проанализированных треков этого
+# жанра (см. _genre_mood). Без него треки жанра, которого тут нет, проходили
+# ЛЮБУЮ пилюлю: rap/hip-hop/pop/indie/lo-fi в таблицу не входили, и в
+# «Боевое» попадал лоу-фай рэп.
 GENRE_MOOD_FALLBACK: dict[str, str] = {
     'rock': 'aggressive', 'metal': 'aggressive', 'punk': 'aggressive',
     'hardcore': 'aggressive', 'hard rock': 'aggressive',
@@ -178,11 +344,37 @@ GENRE_MOOD_FALLBACK: dict[str, str] = {
     'sleep': 'calm', 'lullaby': 'calm', 'meditation': 'calm',
     'dance': 'energetic', 'electronic': 'energetic', 'techno': 'energetic',
     'house': 'energetic', 'trance': 'energetic',
+    'rap': 'aggressive', 'hip-hop': 'aggressive', 'hiphop': 'aggressive',
+    'trap': 'aggressive', 'drill': 'aggressive', 'grime': 'aggressive',
+    'punk rock': 'aggressive', 'industrial': 'aggressive', 'thrash': 'aggressive',
+    'pop': 'happy', 'k-pop': 'happy', 'synthpop': 'energetic',
+    'funk': 'energetic', 'disco': 'dance', 'boom bap': 'energetic',
+    'r&b': 'calm', 'soul': 'warm', 'neo-soul': 'warm', 'blues': 'sad',
+    'indie': 'dreamy', 'indie rock': 'dreamy', 'shoegaze': 'dreamy',
+    'lo-fi': 'calm', 'lofi': 'calm', 'chillhop': 'calm', 'chillhop beat': 'calm',
+    'downtempo': 'calm', 'trip-hop': 'calm', 'synthwave': 'dreamy',
+    'drum and bass': 'energetic', 'drum and bass/jungle': 'energetic',
+    'jungle': 'energetic', 'dubstep': 'aggressive', 'garage': 'dance',
+    'drum and bass': 'energetic', 'hardstyle': 'aggressive', 'metalcore': 'aggressive',
+    'folk': 'calm', 'acoustic': 'calm', 'singer-songwriter': 'warm',
+    'country': 'warm', 'bluegrass': 'warm', 'gospel': 'happy',
+    'orchestral': 'epic', 'cinematic': 'epic', 'soundtrack': 'dreamy',
+    'score': 'epic', 'classical crossover': 'epic',
+    'latin': 'dance', 'reggaeton': 'dance', 'salsa': 'dance',
+    'afrobeat': 'energetic', 'afrobeats': 'energetic', 'reggae': 'calm',
+    'ska': 'energetic', 'punk': 'aggressive', 'emo': 'sad', 'post-punk': 'dark',
+    'goth': 'dark', 'shoegaze': 'dreamy', 'trip-hop': 'calm',
+    'breakbeat': 'energetic', 'glitch': 'tense', 'industrial': 'aggressive',
 }
 
 
-def _genre_mood(genre: str | None) -> str | None:
-    """Муд по жанру для unknown-треков. Нет жанра/нет маппинга -> None (= пропуск)."""
+def _genre_mood(genre: str | None, auto: dict[str, str] | None = None) -> str | None:
+    """Муд по жанру для unknown-треков.
+
+    Порядок: таблица -> выведенный из данных (auto) -> None (= пропуск).
+    None означает «жанр неизвестен»: трек проходит фильтр, но в скоринге
+    получает штраф (см. score_candidates) — не наравне с тем, что мы знаем.
+    """
     try:
         g = (genre or '').strip().lower()
     except Exception:
@@ -192,6 +384,13 @@ def _genre_mood(genre: str | None) -> str | None:
     for key, mood in GENRE_MOOD_FALLBACK.items():
         if key in g:
             return mood
+    if auto:
+        # Подстрочное совпадение: жанр в БД может быть 'Hip-Hop/Rap'.
+        for key, mood in auto.items():
+            if key and key in g:
+                return mood
+        if g in auto:
+            return auto[g]
     return None
 # Каталог для плеера (код — то, что плеер шлёт обратно в settings.activity).
 ACTIVITY_CATALOG: list[dict] = [
@@ -229,14 +428,33 @@ def _norm_activity(v: str | None) -> str | None:
 def norm_mood(v: Any) -> str | None:
     """Любая форма настроения -> канонический код ('спокойное'/'спокойный'/'calm').
 
-    Пустая/неизвестная -> как есть в нижнем регистре (пресета нет = без
-    бонусов, очередь не пустеет). Неизвестное НЕ отбрасываем, чтобы
-    новые лейблы анализатора не ломали волну.
+    Строгий: неизвестное -> None (а НЕ «как есть»). Раньше неизвестное слово
+    возвращалось само по себе, и это ломало всё:
+      * пресет не находился -> ctx-бонусов за настроение ноль;
+      * хард-фильтр строил _want={слово} и оставлял только треки с этим
+        словом -> пул схлопывался -> фильтр откатывался целиком.
+    Итог: пилюля «боевой» (слово из LLM, не из канона) работала как
+    «настроение не выбрано». Теперь неизвестное -> None -> фильтр не
+    включается, но и не ломается: волна остаётся рабочей.
+
+    Порядок: точное совпадение -> таблица подстрок (MOOD_KEYWORDS).
     """
     s = str(v or '').strip().lower().replace('ё', 'е')
     if not s:
         return None
-    return MOOD_ALIASES.get(s, s)
+    c = MOOD_ALIASES.get(s)
+    if c:
+        return c
+    for code, keys in MOOD_KEYWORDS:
+        for k in keys:
+            if k in s:
+                return code
+    return None
+
+
+def norm_mood_raw(v: Any) -> str:
+    """Сырое слово в нижнем регистре — для показа и для каталога."""
+    return str(v or '').strip().lower().replace('ё', 'е')
 
 
 def _norm_mood(v: str | None) -> str | None:
@@ -404,8 +622,10 @@ def select_seeds(db, user_id: str, characteristic: str | None = None,
              'popular': (0.6, 0.3)}.get(characteristic or '', (0.5, 0.25))
     top_ratio = _tun_float(tun, 'playlists', f'seed_top_{_suffix}', _dflt[0])
     recent_ratio = _tun_float(tun, 'playlists', f'seed_recent_{_suffix}', _dflt[1])
-    top_n = round(limit * top_ratio)
-    rec_n = round(limit * recent_ratio)
+    # round() в питоне — банковское округление (round(2.5) == 2), поэтому
+    # «50 % топ» при limit=5 давало 2 сида вместо 3. Считаем по-человечески.
+    top_n = int(math.floor(limit * top_ratio + 0.5))
+    rec_n = int(math.floor(limit * recent_ratio + 0.5))
     out = [t['track_id'] for t in top[:top_n]]
     # Недавние: по last_played
     dated = [t for t in top if t.get('last_played')]
@@ -416,7 +636,10 @@ def select_seeds(db, user_id: str, characteristic: str | None = None,
         if t['track_id'] not in out:
             out.append(t['track_id'])
     rest = [t['track_id'] for t in top if t['track_id'] not in out]
-    random.shuffle(rest)
+    # Перемешивание — СЕЯННЫМ генератором (раньше глобальный random):
+    # иначе центроид «похоже на то, что ты любишь» гулял между двумя
+    # одинаковыми запросами, и одна и та же пилюля давала разную выдачу.
+    random.Random(f"{user_id}:{characteristic or ''}:{limit}").shuffle(rest)
     out.extend(rest[:max(0, limit - len(out))])
     return out[:limit]
 
@@ -544,6 +767,220 @@ def _mood_codes_of(feat) -> set[str]:
         if c:
             out.add(c)
     return out
+
+
+def mood_vector(feat) -> dict[str, float]:
+    """Аудио-вектор трека по 4 осям (0..1). Нет анализа -> пустой dict.
+
+    Оси: valence / energy / arousal / dance. Это ровно те числа, что
+    анализатор уже кладёт в TrackFeatures, поэтому ничего нового
+    считать не нужно.
+    """
+    out: dict[str, float] = {}
+    if feat is None:
+        return out
+    for axis, attr in (('valence', 'valence'), ('energy', 'energy'),
+                        ('arousal', 'arousal'), ('dance', 'danceability')):
+        try:
+            raw = getattr(feat, attr, None)
+            val = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            val = None
+        if val is None:
+            continue
+        out[axis] = min(max(val, 0.0), 1.0)
+    return out
+
+
+def mood_vec_dist(vec: dict[str, float], target: dict[str, float]) -> float:
+    """Взвешенное RMS-расстояние между вектором трека и центром пилюли.
+
+    Считаются только оси, которые есть и у вектора, и у цели: трек без
+    arousal не должен штрафоваться за отсутствие координаты.
+    """
+    num = 0.0
+    den = 0.0
+    for axis, w in MOOD_AXIS_W.items():
+        if axis not in vec or axis not in target:
+            continue
+        try:
+            d = float(vec[axis]) - float(target[axis])
+        except (TypeError, ValueError):
+            continue
+        num += w * d * d
+        den += w
+    if den <= 0:
+        return 1.0
+    return math.sqrt(num / den)
+
+
+def mood_fit(vec: dict[str, float], target: dict[str, float],
+             radius: float = MOOD_RADIUS) -> tuple[float, float]:
+    """(близость, расстояние): 1 — в центре пилюли, 0 — на радиусе."""
+    if not vec or not target:
+        return 0.0, 1.0
+    d = mood_vec_dist(vec, target)
+    r = max(float(radius or MOOD_RADIUS), 1e-6)
+    return max(0.0, 1.0 - d / r), d
+
+
+def genre_vector_map(feats: dict[str, Any], genres: dict[str, str]
+                      ) -> dict[str, dict[str, float]]:
+    """Средний аудио-вектор жанра по проанализированным трекам пула.
+
+    Это второй рубеж для треков БЕЗ анализа: своего вектора у них нет,
+    а жанр внутри библиотеки достаточно однороден по звуку. Без этого
+    трек, который ещё не проанализирован, вообще не мог соответствовать
+    ни одной пилюле — и волна на непроанализированной библиотеке
+    вырождалась в «всё, о чём мозг ничего не знает».
+    """
+    acc: dict[str, dict[str, float]] = {}
+    cnt: dict[str, int] = {}
+    for tid, f in (feats or {}).items():
+        g = str((genres or {}).get(tid) or '').strip().lower()
+        if not g or f is None:
+            continue
+        v = mood_vector(f)
+        if not v:
+            continue
+        a = acc.setdefault(g, {})
+        for k, val in v.items():
+            a[k] = a.get(k, 0.0) + val
+        cnt[g] = cnt.get(g, 0) + 1
+    out: dict[str, dict[str, float]] = {}
+    for g, a in acc.items():
+        n = cnt.get(g, 0)
+        if n <= 0:
+            continue
+        out[g] = {k: a[k] / n for k in a}
+    return out
+
+
+def mood_vectors_for(feats: dict[str, Any], genres: dict[str, str]
+                      ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    """(векторы треков, векторы жанров).
+
+    Трек без анализа получает вектор своего жанра: он НЕ исключается из
+    волны, пока идёт анализ, но и не притворяется проверенным — это
+    честная оценка «примерно так» с пониженной уверенностью.
+    """
+    gvecs = genre_vector_map(feats, genres)
+    out: dict[str, dict[str, float]] = {}
+    for tid, f in (feats or {}).items():
+        v = mood_vector(f)
+        if v:
+            out[tid] = v
+    for tid in (genres or {}):
+        if tid in out:
+            continue
+        gv = gvecs.get(str((genres or {}).get(tid) or '').strip().lower())
+        if gv:
+            out[tid] = dict(gv)
+    return out, gvecs
+
+
+def _wave_vectors(feats: dict[str, Any], meta: dict[str, Any]
+                  ) -> dict[str, dict[str, float]]:
+    """Векторы муд-пространства для треков пула: свой анализ, иначе жанр."""
+    genres: dict[str, str] = {}
+    for tid, t in (meta or {}).items():
+        try:
+            genres[tid] = (getattr(t, 'genre', '') or '')
+        except Exception:
+            genres[tid] = ''
+    vecs, _gvecs = mood_vectors_for(feats, genres)
+    return vecs
+
+
+def mood_filter_passes(feat, genre: str | None, want: set[str],
+                       target: dict[str, float] | None = None,
+                       radius: float = MOOD_RADIUS, limits: tuple = (),
+                       gvecs: dict[str, dict[str, float]] | None = None,
+                       genre_auto: dict[str, str] | None = None) -> bool:
+    """Проходит ли трек пилюлю настроения.
+
+    feat — TrackFeatures трека или None (анализа нет).
+    genre — жанр трека (может быть пустым).
+    want — семейство муд-лейблов пилюли; ПУСТОЕ = фильтр по настроению
+    выключен (пилюли нет или её код неизвестен мозгу).
+    target — центр пилюли в муд-пространстве; None = числовой части нет.
+    limits — наборы рамок: (пресет настроения, жёсткое занятие).
+
+    Правила:
+      * трек без анализа решает жанр (таблица, затем муд, выведенный из
+        данных); неизвестный жанр = пропуск — фильтр не знает, что сказать,
+        и выкидывать «немые» треки нельзя: пока идёт анализ, они должны
+        оставаться в игре;
+      * у трека с анализом слово от LLM (про текст песни) не важно, если по
+        ЗВУКУ он внутри пилюли: звук — главный свидетель;
+      * рамки (энергия/темп/valence/dance/arousal) проверяются всегда, когда
+        есть данные: coarse-фильтр, который не даёт «спокойному» треку
+        пройти пилюлю «Боевое».
+    """
+    if not want and not target:
+        return True
+    if feat is None:
+        if not want:
+            return True
+        gm = _genre_mood(genre, genre_auto)
+        if gm is None:
+            return True
+        return gm in want
+    if want and not (_mood_codes_of(feat) & want):
+        # Звук важнее слов: трек, у которого слово чужое, но звук ровно в
+        # пилюле, проходит.
+        v = mood_vector(feat)
+        if not v:
+            v = (gvecs or {}).get(str(genre or '').strip().lower()) or {}
+        if not (target and v and mood_vec_dist(v, target) <= radius):
+            return False
+    try:
+        en = float(feat.energy) if feat.energy is not None else 0.5
+    except (TypeError, ValueError):
+        en = 0.5
+    try:
+        bpm = float(feat.tempo_bpm) if feat.tempo_bpm else 0.0
+    except (TypeError, ValueError):
+        bpm = 0.0
+    try:
+        va = float(feat.valence) if feat.valence is not None else None
+    except (TypeError, ValueError):
+        va = None
+    try:
+        da = float(feat.danceability) if feat.danceability is not None else None
+    except (TypeError, ValueError):
+        da = None
+    try:
+        ar = float(feat.arousal) if feat.arousal is not None else None
+    except (TypeError, ValueError):
+        ar = None
+    for lim in (limits or ()):
+        if not lim:
+            continue
+        if 'energy_min' in lim and en < lim['energy_min']:
+            return False
+        if 'energy_max' in lim and en > lim['energy_max']:
+            return False
+        if 'tempo_min' in lim and bpm and bpm < lim['tempo_min']:
+            return False
+        if 'tempo_max' in lim and bpm and bpm > lim['tempo_max']:
+            return False
+        if va is not None:
+            if 'valence_min' in lim and va < lim['valence_min']:
+                return False
+            if 'valence_max' in lim and va > lim['valence_max']:
+                return False
+        if da is not None:
+            if 'dance_min' in lim and da < lim['dance_min']:
+                return False
+            if 'dance_max' in lim and da > lim['dance_max']:
+                return False
+        if ar is not None:
+            if 'arousal_min' in lim and ar < lim['arousal_min']:
+                return False
+            if 'arousal_max' in lim and ar > lim['arousal_max']:
+                return False
+    return True
 
 
 def _clap_weight(tun: dict | None = None) -> float:
@@ -829,7 +1266,11 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                      clap_map: dict | None = None,
                      clap_weight: float | None = None,
                      mood_arm: dict[str, float] | None = None,
-                     cur_energy: float | None = None) -> list[dict]:
+                     cur_energy: float | None = None,
+                     mood_target: dict[str, float] | None = None,
+                     mood_radius: float | None = None,
+                     genre_vecs: dict[str, dict[str, float]] | None = None
+                     ) -> list[dict]:
     """Порт TrackScorer.scoreAndRankTracks на наших таблицах.
 
     jitter_seed: детерминированный per-user джиттер вместо глобального random
@@ -870,7 +1311,19 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     _mood_preset = MOOD_PRESETS.get(mood or '', {})
     _act_code = _norm_activity(settings.get('activity'))
     _act_preset = ACTIVITY_PRESETS.get(_act_code or '', {})
-    _mood_family = set(_mood_preset.get('moods') or ({mood} if mood else set()))
+    # Семейство мудов пилюли. Если пресета нет — семейства нет (НЕ {mood}):
+    # вырожденное семейство превращало фильтр в «оставь треки с этим словом»
+    # и откатывалось целиком. Пустое семейство = фильтр по настроению выключен.
+    _mood_family = set(_mood_preset.get('moods') or set())
+    # Числовая пилюля: центр в муд-пространстве + радиус. Если пилюли нет —
+    # числовой вклад выключен (всё как было).
+    _mood_target = (mood_target if mood_target is not None
+                    else (MOOD_TARGETS.get(mood or '') or None))
+    try:
+        _mood_radius = float(mood_radius) if mood_radius else MOOD_RADIUS
+    except (TypeError, ValueError):
+        _mood_radius = MOOD_RADIUS
+    _mood_fit_w = _tun_float(tun, 'character', 'mood_fit_weight', 0.18)
 
     prof = _taste.user_profile(db, user_id, top_n=0)
     likes_total = int((prof.get('counts') or {}).get('likes', 0) or 0)
@@ -1035,11 +1488,35 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     tracks = {str(t.id): t for t in
               db.query(Track).filter(Track.id.in_(candidate_ids)).all()} \
         if candidate_ids else {}
+    # Векторы жанров (для треков без анализа) — считаем по пулу, без
+    # дополнительного запроса: это среднее по уже загруженным фичам.
+    if genre_vecs is None:
+        try:
+            _gm_ = {tid: (getattr(tracks.get(tid), 'genre', '') or '')
+                    for tid in candidate_ids if tid in tracks}
+            genre_vecs = genre_vector_map(feats, _gm_)
+        except Exception:
+            genre_vecs = {}
     for tid in candidate_ids:
         t = tracks.get(tid)
         if not t:
             continue
         f = feats.get(tid)
+        # Муд-пространство: вектор трека. Свой анализ — уверенно; нет
+        # анализа — вектор жанра (примерно, с пониженной уверенностью).
+        # Трек без анализа НЕ исключается: пока идёт анализ, он может
+        # попасть в волну, но и не вытесняет проверенные треки.
+        _own_vec = mood_vector(f) if f is not None else {}
+        _vec = _own_vec
+        _vec_conf = 1.0
+        if not _vec:
+            _vec = (genre_vecs or {}).get(
+                str(t.genre or '').strip().lower()) or {}
+            _vec_conf = 0.85
+        _mfit, _mdist = (0.0, 1.0)
+        if _mood_target and _vec:
+            _mfit, _mdist = mood_fit(_vec, _mood_target, _mood_radius)
+            _mfit *= _vec_conf
         # audio: косинус к центроиду сидов + 0.4 сессионного fingerprint
         # (порт mobile: audio*0.6 + fingerprint*0.4).
         audio = 0.0
@@ -1250,6 +1727,13 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             _tshift = float(_dr.get("tempo_shift") or 0)
             if _tshift and bpm > 110:
                 ctx += (_tshift / -30.0) * -0.15 * min(max((bpm - 110) / 50.0, 0.0), 1.0)
+        # Числовая близость к пилюле: трек внутри радиуса получает бонус,
+        # трек вне — ноль (не минус: радиус — это «свой диапазон», а не
+        # запрет). Трек без анализа (вектор выведен из жанра) получает
+        # бонус с пониженной уверенностью — он может попасть в волну,
+        # пока идёт анализ, но не вытесняет проверенные треки.
+        if _mfit > 0:
+            ctx += _mood_fit_w * _mfit
         # diversity
         pen = 0.0
         if t.artist_name and t.artist_name in used_artists:
@@ -1315,16 +1799,52 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         # Предикт скипа <30с: обученная модель, иначе эвристика.
         skip_p = _skip_prob(_skip_pipe, t, f, pref_g, cur_energy, drift,
                             fatigue, agg.get(tid), hour, _dow)
+        # Штраф за трек, который НЕ подтверждает выбранное настроение.
+        # Раньше трек без анализа проходил наравне с проверенным: звука мы
+        # о нём не знаем, а жанр (если известен) мог прямо противоречить
+        # пилюле. Поэтому «Боевое» звучало вполсилы — в очереди оказывался
+        # лоу-фай рэп, потому что для него просто не было цифр.
+        mood_pen = 0.0
+        if _mood_family:
+            try:
+                if f is None:
+                    if _mood_target and _vec:
+                        # Вектор выведен из жанра: оцениваем по расстоянию.
+                        # Внутри радиуса — трек подходит (штрафа нет);
+                        # снаружи — штраф растёт с расстоянием.
+                        if _mdist > _mood_radius:
+                            mood_pen = min(
+                                0.15, 0.05 + 0.5 * (_mdist - _mood_radius))
+                    else:
+                        _gm = _genre_mood(t.genre)
+                        mood_pen = 0.15 if (_gm is not None and
+                                            _gm not in _mood_family) else 0.05
+                elif not (_mood_codes_of(f) & _mood_family):
+                    # Слова от LLM — про ТЕКСТ песни, а не про звук. Если трек
+                    # по звуку внутри пилюли — слово не важно.
+                    if _mood_target and _mdist <= _mood_radius:
+                        mood_pen = 0.0
+                    else:
+                        mood_pen = 0.10
+            except Exception:
+                mood_pen = 0.0
+        _jit_v = _rng.random() * _jitter
         total = (w['audio'] * audio + w['genre'] * genre_s +
                  w['artist'] * artist_s + w['behavior'] * behavior +
                  w['collab'] * collab + w['novelty'] * novelty +
                  _nov_extra * novelty + ctx + bonus.get(tid, 0.0) -
-                 pen - neg_pen + srv_bonus + time_b + arm_b + assoc_b +
+                 pen - neg_pen - mood_pen + srv_bonus + time_b + arm_b + assoc_b +
                  _cw * clap_s + mood_b - _skip_w * skip_p +
-                 _rng.random() * _jitter +
+                 _jit_v +
                  _key_w * key_c + _cluster_w * cluster_c + _lyr_w * lyr_c)
         total = min(max(total, 0.0), 1.0)
-        if collab >= 0.7:
+        # Причина: сначала — прямое попадание в настроение (его выбрал
+        # пользователь, это самое точное объяснение), потом остальные.
+        _mood_hit = bool(_mood_family and f is not None and
+                         (_mood_codes_of(f) & _mood_family))
+        if _mood_hit and mood:
+            reason = f'Под настроение: {MOOD_LABELS.get(mood, mood)}'
+        elif collab >= 0.7:
             reason = 'Loved by friends'
         elif audio > 0.8:
             reason = 'Similar to what you love'
@@ -1341,6 +1861,9 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                     'artist_name': t.artist_name, 'album_name': t.album_name,
                     'genre': t.genre, 'score': round(total, 4),
                     'audio': round(audio, 3), 'reason': reason,
+                    # Канонический код настроения трека — по нему считаются
+                    # капы разнообразия при отборе пачки.
+                    'mood_code': _cm,
                     'comp': {'audio': round(audio, 3),
                              'genre': round(genre_s, 3),
                              'artist': round(artist_s, 3),
@@ -1357,7 +1880,10 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                              'assoc': round(assoc_b, 3),
                              'clap': round(clap_s, 3),
                              'skip': round(skip_p, 3),
-                             'mood_arm': round(mood_b, 3)}})
+                             'mood_arm': round(mood_b, 3),
+                             'mood_pen': round(mood_pen, 3),
+                             'mood_fit': round(_mfit, 3),
+                             'mood_dist': round(_mdist, 3)}})
         if t.artist_name:
             used_artists[t.artist_name] = used_artists.get(t.artist_name, 0) + 1
         if t.genre:
@@ -1597,7 +2123,9 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
         arm_genre=arm_genre or None, assoc=assoc or None,
         clap_map=clap_map or None, clap_weight=None,
         mood_arm=mood_arm_map or None, cur_energy=cur_energy)
-    top = ranked[:n]
+    # Разнообразие пачки — как в волне: кап артиста/жанра, но качество
+    # важнее (кап не тащит в плейлист заведомо худшие треки).
+    top = select_diverse(ranked, n, artist_cap=2)
     try:
         from app.services import rec_feedback as _rfb
 
@@ -1844,6 +2372,294 @@ def adaptive_count(requested: int, drift: dict | None,
     if eff >= n:
         return n, None
     return eff, " + ".join(bits) or None
+
+
+def select_diverse(ranked: list[dict], n: int, *, artist_cap: int = 2,
+                   genre_cap: int | None = None, mood_cap: int | None = None,
+                   vec_map: dict[str, dict[str, float]] | None = None,
+                   spread_min: float = 0.0) -> list[dict]:
+    """Отбор пачки с разнообразием вместо «просто топ по скору».
+
+    Скоринг умеет штрафовать повтор артиста/жанра, но штраф — это мягко:
+    если в библиотеке 40 треков одного артиста и они все «подходят», пачка
+    всё равно собиралась из них. Отсюда и жалоба «настроение одно, и
+    скучно»: волна звучит как один трек на повторе.
+
+    Правила отбора:
+      * кап артиста (по умолчанию 2 трека от одного артиста в пачке);
+      * кап жанра (половина пачки);
+      * кап кода настроения (60 % пачки) — только когда пилюля НЕ выбрана:
+        с выбранной пилюлей одно настроение в пачке это как раз замысел
+        пользователя, а не монотония;
+      * разброс по муд-пространству (расстояние < spread_min — «почти дубль»
+        по звуку). По умолчанию выключен: признаки valence/energy грубые,
+        и близкие значения ещё не означают одинаковый звук.
+
+    ГЛАВНОЕ правило: разнообразие НЕ УХУДШАЕТ пачку. Трек под капом
+    пропускается, только если есть альтернатива сопоставимого качества
+    (разница по скору — в пределах floor). Иначе кап вытащил бы в пачку
+    заведомо худшие треки — «разнообразие» не должно превращаться в мусор.
+    """
+    if not ranked:
+        return []
+    try:
+        n = int(n or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return []
+    if not artist_cap or artist_cap <= 0:
+        artist_cap = 2
+    if not genre_cap or genre_cap <= 0:
+        genre_cap = max(2, int(math.ceil(n * 0.5)))
+    if mood_cap is not None and mood_cap <= 0:
+        mood_cap = None
+    vec_map = vec_map or {}
+    idx_of = {id(r): i for i, r in enumerate(ranked)}
+
+    def _score(r: dict) -> float:
+        try:
+            return float(r.get('score') or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Порог качества: заменять трек в пачке можно только на сопоставимый
+    # по скору. floor = 90 % от скора последнего трека обычного топа.
+    base = ranked[:n]
+    best = _score(base[0]) if base else 0.0
+    thr = _score(base[-1]) if base else 0.0
+    floor = max(thr * 0.9, best - 0.25)
+    window = ranked[:max(n * 8, 60)]
+    pool = [r for r in window if _score(r) >= floor] or window[:n]
+
+    chosen: list[dict] = []
+    seen: set[int] = set()
+    used_a: Counter = Counter()
+    used_g: Counter = Counter()
+    used_m: Counter = Counter()
+    chosen_vecs: list[dict[str, float]] = []
+
+    def _violates(r: dict) -> bool:
+        a = str(r.get('artist_name') or '')
+        g = str(r.get('genre') or '').strip().lower()
+        m = str(r.get('mood_code') or '')
+        if a and used_a[a] >= artist_cap:
+            return True
+        if g and used_g[g] >= genre_cap:
+            return True
+        if mood_cap and m and used_m[m] >= mood_cap:
+            return True
+        return False
+
+    def _too_close(r: dict) -> bool:
+        if not (spread_min and spread_min > 0 and chosen_vecs):
+            return False
+        v = vec_map.get(str(r.get('track_id') or '')) or {}
+        if not v:
+            return False
+        return any(mood_vec_dist(v, cv) < spread_min for cv in chosen_vecs)
+
+    def _alts(start: int, need: int) -> int:
+        """Сколько в остатке треков, которые капы не нарушают."""
+        cnt = 0
+        for j in range(start, len(pool)):
+            r2 = pool[j]
+            if _violates(r2) or _too_close(r2):
+                continue
+            cnt += 1
+            if cnt >= need:
+                break
+        return cnt
+
+    for i, r in enumerate(pool):
+        if len(chosen) >= n:
+            break
+        if _violates(r) or _too_close(r):
+            need = n - len(chosen) - 1
+            if need > 0 and _alts(i + 1, need) >= need:
+                continue
+        chosen.append(r)
+        seen.add(id(r))
+        a = str(r.get('artist_name') or '')
+        g = str(r.get('genre') or '').strip().lower()
+        m = str(r.get('mood_code') or '')
+        if a:
+            used_a[a] += 1
+        if g:
+            used_g[g] += 1
+        if m:
+            used_m[m] += 1
+        v = vec_map.get(str(r.get('track_id') or '')) or {}
+        if v:
+            chosen_vecs.append(v)
+    if len(chosen) < n:
+        for r in ranked:
+            if len(chosen) >= n:
+                break
+            if id(r) in seen:
+                continue
+            chosen.append(r)
+            seen.add(id(r))
+    # Порядок — по исходному скору (выбор шёл по ranked, но добор мог
+    # вставить трек с более высоким скором — возвращаем порядок честно).
+    chosen.sort(key=lambda r: idx_of.get(id(r), 0))
+    return chosen
+
+
+def _ramp_desired(start_vec: dict[str, float], target_vec: dict[str, float],
+                  t: float) -> dict[str, float]:
+    """Желаемая точка муд-пространства на доле t пути от старта к цели."""
+    out: dict[str, float] = {}
+    for axis, tv in (target_vec or {}).items():
+        try:
+            sv = float(start_vec.get(axis, tv))
+            tv = float(tv)
+        except (TypeError, ValueError):
+            continue
+        out[axis] = sv * (1.0 - t) + tv * t
+    return out
+
+
+def _ramp_error(order: list[dict], start_vec: dict[str, float],
+                target_vec: dict[str, float],
+                vec_map: dict[str, dict[str, float]]) -> float:
+    """Сумма квадратов расстояний треков до их места на лестнице."""
+    n = len(order)
+    if n < 2:
+        return 0.0
+    err = 0.0
+    for i, r in enumerate(order):
+        v = (vec_map or {}).get(str(r.get('track_id') or '')) or {}
+        if not v:
+            continue
+        desired = _ramp_desired(start_vec, target_vec, i / float(n - 1))
+        d = mood_vec_dist(v, desired)
+        err += d * d
+    return err
+
+
+def order_by_mood_ramp(items: list[dict], start_vec: dict[str, float],
+                       target_vec: dict[str, float],
+                       vec_map: dict[str, dict[str, float]] | None = None
+                       ) -> list[dict]:
+    """Лестница перехода в муд-пространстве.
+
+    Раньше градиент морфа был БИНАРНЫМ: «голова — стартовое настроение,
+    хвост — целевое». Трека «наполовину грустный, наполовину
+    поднимающийся» не существовало: либо грустный, либо весёлый, а
+    переход — скачком. Теперь на позиции i стоит трек, ближайший к
+    интерполяции от звука текущего трека к центру целевой пилюли.
+
+    Треки без вектора (нет анализа и неизвестен жанр) в лестницу не
+    встают — они уходят в хвост, порядок исходный.
+    """
+    n = len(items)
+    if n < 2 or not target_vec:
+        return items
+    vec_map = vec_map or {}
+    pool = list(items)
+    out: list[dict] = []
+    used: set[int] = set()
+    for i in range(n):
+        desired = _ramp_desired(start_vec, target_vec, i / float(n - 1))
+        best_i = -1
+        best_key = None
+        for i2, r in enumerate(pool):
+            if i2 in used:
+                continue
+            v = vec_map.get(str(r.get('track_id') or '')) or {}
+            if not v:
+                continue
+            d = mood_vec_dist(v, desired)
+            try:
+                en = float(r.get('energy')
+                           if r.get('energy') is not None else 0.5)
+            except (TypeError, ValueError):
+                en = 0.5
+            de = abs(en - float(desired.get('energy', en)))
+            key = (round(d, 6), round(de, 6))
+            if best_key is None or key < best_key:
+                best_key = key
+                best_i = i2
+        if best_i < 0:
+            break
+        used.add(best_i)
+        out.append(pool[best_i])
+    for i2, r in enumerate(pool):
+        if i2 not in used:
+            out.append(r)
+    return out
+
+
+def _smooth_ramp_order(items: list[dict], start_vec: dict[str, float],
+                       target_vec: dict[str, float],
+                       vec_map: dict[str, dict[str, float]] | None = None,
+                       passes: int = 6) -> list[dict]:
+    """Локальная доводка лестницы: обмен соседей, если он уменьшает
+    ошибку перехода. Глобальный порядок не переставляет — только чинит
+    стыки (как _smooth_keys_order, но по муд-пространству)."""
+    items = list(items)
+    if len(items) < 3:
+        return items
+    vec_map = vec_map or {}
+    for _ in range(max(0, int(passes))):
+        improved = False
+        for i in range(len(items) - 1):
+            cur = _ramp_error(items, start_vec, target_vec, vec_map)
+            items[i], items[i + 1] = items[i + 1], items[i]
+            if _ramp_error(items, start_vec, target_vec, vec_map) < cur - 1e-9:
+                improved = True
+            else:
+                items[i], items[i + 1] = items[i + 1], items[i]
+        if not improved:
+            break
+    return items
+
+
+def _smooth_energy_local(items: list[dict], max_step: float = 0.18,
+                         passes: int = 8) -> list[dict]:
+    """Локальное сглаживание энергии БЕЗ глобальной сортировки.
+
+    smooth_energy_order сортирует весь набор по энергии — на морфе это
+    ломало лестницу перехода (valence шёл своей дорогой). Здесь только
+    обмены соседей, уменьшающие рваность: порядок лестницы сохраняется,
+    а провалы по энергии сглаживаются.
+    """
+    items = list(items)
+    if len(items) < 3:
+        return items
+
+    def _en(r: dict) -> float:
+        try:
+            v = r.get("energy")
+            return float(v) if v is not None else 0.5
+        except (TypeError, ValueError):
+            return 0.5
+
+    def _ragged(seq: list[float]) -> float:
+        s = 0.0
+        for a, b in zip(seq, seq[1:]):
+            d = abs(a - b)
+            s += d
+            if d > max_step:
+                s += (d - max_step) * 3.0
+        return s
+
+    for _ in range(max(0, int(passes))):
+        improved = False
+        seq = [_en(r) for r in items]
+        for i in range(len(items) - 1):
+            cur = _ragged(seq)
+            seq[i], seq[i + 1] = seq[i + 1], seq[i]
+            items[i], items[i + 1] = items[i + 1], items[i]
+            if _ragged(seq) < cur - 1e-9:
+                improved = True
+            else:
+                seq[i], seq[i + 1] = seq[i + 1], seq[i]
+                items[i], items[i + 1] = items[i + 1], items[i]
+        if not improved:
+            break
+    return items
 
 
 def _smooth_energy_pass(items: list[dict], max_step: float = 0.18,
@@ -2139,6 +2955,14 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             pass
         cand = [str(r[0]) for r in q.limit(2000 + skip_n).all()]
     cand = [c for c in cand if c not in played and c not in dis][:2000]
+    # Порядок пула — ДЕТЕРМИНИРОВАННЫЙ. Пул выше собран через ORDER BY
+    # random() (это нужно, чтобы мозг постепенно изучал всю библиотеку), но
+    # дальше по пулу идут решения, которые зависят от ПОРЯДКА:
+    #   * дедуп «та же песня под другим row id» — оставляет ПЕРВОГО;
+    #   * штрафы за повтор артиста/жанра/настроения — считаются по обходу.
+    # При случайном порядке побеждал случайный дубль, а одна и та же пилюля
+    # давала разную выдачу от вызова к вызову. Порядок по id стабилен.
+    cand = sorted(cand)
     # Гарантируем, что коллаборативные треки в пуле есть: если библиотека
     # больше 2000 и limit без ORDER BY отсёк нужные строки, добавляем их явно.
     # Без этого collab-вес просто не участвовал бы в скоре части треков.
@@ -2162,6 +2986,21 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             try:
                 for t in db.query(Track).filter(Track.id.in_(chunk)).all():
                     meta[str(t.id)] = t
+            except Exception:
+                pass
+    # Фичи кандидатов — одним проходом чанками. Нужны ДО дедупа: когда у
+    # одной песни два row id, побеждает тот, у которого есть анализ. Иначе
+    # дедуп оставлял непроанализированный дубль, а жёсткий mood-фильтр его
+    # выкидывал — и песня выпадала из волны целиком.
+    fm: dict[str, Any] = {}
+    if cand:
+        from app.db.models import TrackFeatures as _TF
+
+        for i in range(0, len(cand[:2000]), 500):
+            chunk = cand[i:i + 500]
+            try:
+                for f in db.query(_TF).filter(_TF.track_id.in_(chunk)).all():
+                    fm[str(f.track_id)] = f
             except Exception:
                 pass
     # Баны режем по мета (нужен artist) — батчем.
@@ -2207,7 +3046,11 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         if excluded_keys or cand:
             seen_keys: set[tuple] = set()
             deduped: list[str] = []
-            for c in cand:
+            # Победитель дубля — тот, у кого есть анализ (иначе его выкинет
+            # жёсткий mood-фильтр и песня выпадет из волны). Порядок
+            # детерминированный: пул уже отсортирован по id.
+            _order = sorted(cand, key=lambda c: (0 if c in fm else 1, c))
+            for c in _order:
                 tm = meta.get(c)
                 k = _song_key(tm.artist_name, tm.title) if tm is not None else None
                 if k and (k in excluded_keys or k in seen_keys):
@@ -2215,6 +3058,10 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 if k:
                     seen_keys.add(k)
                 deduped.append(c)
+            # Возвращаем дедуп в исходный (отсортированный) порядок пула —
+            # иначе порядок выдачи снова зависит от того, кто выиграл дедуп.
+            _pos = {c: i for i, c in enumerate(cand)}
+            deduped.sort(key=lambda c: _pos.get(c, 0))
             if len(deduped) != len(cand):
                 from app.core.logging import get_logger as _gl
 
@@ -2269,53 +3116,60 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     _act_code = target_activity
     _hard_act = ACTIVITY_HARD.get(_act_code or '', {})
     if (mood or _hard_act) and cand:
-        from app.db.models import TrackFeatures
-        fm = {str(f.track_id): f for f in
-              db.query(TrackFeatures).filter(
-                  TrackFeatures.track_id.in_(cand[:2000])).all()}
+        # Фичи уже загружены выше (для дедупа) — второй запрос не делаем.
         try:
             _gm2 = {str(t.id): (t.genre or '') for t in
                     db.query(Track).filter(Track.id.in_(cand[:2000])).all()}
         except Exception:
             _gm2 = {}
-        _want = set((MOOD_PRESETS.get(mood) or {}).get('moods') or {mood}) if mood else set()
+        _want = set((MOOD_PRESETS.get(mood) or {}).get('moods') or set())
         if mood and morphing and start_mood:
             _want = _want | set((MOOD_PRESETS.get(start_mood) or {})
-                                .get('moods') or {start_mood})
+                                .get('moods') or set())
+        # Числовая пилюля: центр в муд-пространстве и радиус.
+        _mood_target = MOOD_TARGETS.get(mood or '') or None
+        # Векторы пула: свой анализ, а для треков без анализа — средний
+        # вектор их жанра (по проанализированным трекам этого жанра).
+        # Трек без анализа не выкидывается: он получает оценку «примерно
+        # так» и может попасть в волну, пока идёт анализ.
+        # Векторы жанров: средний по проанализированным трекам жанра в пуле.
+        # Нужен трекам без анализа: своего вектора у них нет, и без него они
+        # вообще не могли соответствовать ни одной пилюле (а должны — пока
+        # идёт анализ, они остаются в игре).
+        _gvecs = genre_vector_map(fm, _gm2)
+        # Муд жанра, выведенный из ДАННЫХ: муд большинства уже
+        # проанализированных треков этого жанра внутри пула. Нужен, потому
+        # что таблица жанр->настроение покрывает меньшинство жанров
+        # (rap/hip-hop/pop/indie/lo-fi в неё не входили), и трек такого
+        # жанра проходил ЛЮБУЮ пилюлю: фильтр его не отсекал, и в «Боевое»
+        # попадал лоу-фай рэп. Считаем по пулу — это бесплатно, отдельного
+        # запроса не нужно.
+        _genre_auto: dict[str, str] = {}
+        try:
+            from collections import Counter as _Ctr
+
+            _votes: dict[str, _Ctr] = {}
+            for _c, _f in fm.items():
+                _g = (_gm2.get(_c) or '').strip().lower()
+                if not _g:
+                    continue
+                _codes = _mood_codes_of(_f)
+                if not _codes:
+                    continue
+                _v = _votes.setdefault(_g, _Ctr())
+                for _code in _codes:
+                    _v[_code] += 1
+            _genre_auto = {g: v.most_common(1)[0][0] for g, v in _votes.items() if v}
+        except Exception:
+            _genre_auto = {}
 
         def _passes(c: str) -> bool:
             f = fm.get(c)
-            if f is None:
-                # unknown: пробуем жанр-фолбек, иначе пропуск (как раньше).
-                if _want:
-                    _gmood = _genre_mood(_gm2.get(c))
-                    if _gmood is not None:
-                        return _gmood in _want
-                return True
-            if _want and not (_mood_codes_of(f) & _want):
-                return False
-            # Жёсткие рамки настроения (пресет) + занятия: энергия/темп.
             _preset = MOOD_PRESETS.get(mood) or {} if mood else {}
-            try:
-                en = float(f.energy) if f.energy is not None else 0.5
-            except (TypeError, ValueError):
-                en = 0.5
-            try:
-                bpm = float(f.tempo_bpm) if f.tempo_bpm else 0.0
-            except (TypeError, ValueError):
-                bpm = 0.0
-            for _lim in (_preset, _hard_act):
-                if not _lim:
-                    continue
-                if 'energy_min' in _lim and en < _lim['energy_min']:
-                    return False
-                if 'energy_max' in _lim and en > _lim['energy_max']:
-                    return False
-                if 'tempo_min' in _lim and bpm and bpm < _lim['tempo_min']:
-                    return False
-                if 'tempo_max' in _lim and bpm and bpm > _lim['tempo_max']:
-                    return False
-            return True
+            return mood_filter_passes(
+                f, _gm2.get(c), _want, _mood_target, MOOD_RADIUS,
+                limits=(_preset, _hard_act), gvecs=_gvecs,
+                genre_auto=_genre_auto)
 
         _before_mood = len(cand)
         _mood_backup = list(cand)
@@ -2585,6 +3439,14 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         _extra = [t for t in collab_scores if t in cand and t not in _in_pool]
         if _extra:
             _score_pool = _score_pool + _extra[:200]
+    # Порядок обхода пула — ДЕТЕРМИНИРОВАННЫЙ (по id). Пул выше собран
+    # через ORDER BY random() (это нужно, чтобы мозг постепенно изучал всю
+    # библиотеку), но скоринг идёт по нему в порядке выборки, а штрафы за
+    # повтор артиста/жанра/настроения считаются именно по порядку обхода.
+    # Из-за случайного порядка штраф получал СЛУЧАЙНЫЙ трек из пары, и одна
+    # и та же пилюля давала разную выдачу от запроса к запросу. Теперь
+    # порядок стабилен — разнообразие обеспечивает сам джиттер (seeded).
+    _score_pool = sorted(_score_pool)
     ranked = score_candidates(db, user_id, _score_pool, seeds, settings_eff,
                               norm_events, collab_scores,
                               current_hour=_cur_hour,
@@ -2611,9 +3473,28 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     ranked = [r for r in ranked if r['track_id'] not in played]
     # Адаптивная пачка: при смене настроения — меньше, чтобы новый вайб
     # было слышно через 4-5 треков, а не через 10. Капы — личные.
-    eff_count, adapt_reason = adaptive_count(count, drift, morphing,
-                                            _tun_all(db, user_id))
-    top = ranked[:eff_count]
+    _sel_tun = _tun_all(db, user_id)
+    eff_count, adapt_reason = adaptive_count(count, drift, morphing, _sel_tun)
+    # Разнообразие пачки. Раньше брался просто топ по скору, и в него
+    # могли попасть 8 треков одного артиста или одного жанра: волна
+    # звучала монотонно, даже если скоринг был «правильным». Теперь капы
+    # артиста/жанра/настроения + разброс по муд-пространству.
+    _a_cap = _tun_int(_sel_tun, 'character', 'wave_artist_cap', 2)
+    _g_cap = _tun_int(_sel_tun, 'character', 'wave_genre_cap', 0)
+    # Кап кода настроения — только когда пилюля НЕ выбрана. С пилюлей одно
+    # настроение в пачке это замысел пользователя, а не монотония.
+    _m_cap = (_tun_int(_sel_tun, 'character', 'wave_mood_cap', 0)
+              if not _eff_mood_norm else None)
+    _spread = _tun_float(_sel_tun, 'character', 'wave_spread_min', 0.0)
+    # Для разброса берём ТОЛЬКО собственные векторы (реальный анализ):
+    # выведенный по жанру вектор одинаков для всех треков жанра, и по нему
+    # второй трек того же жанра выглядел бы «дублем» первого.
+    _vecs_own = {tid: mood_vector(f) for tid, f in fm.items()
+                 if f is not None}
+    _vecs_all = _wave_vectors(fm, meta)
+    top = select_diverse(ranked, eff_count, artist_cap=_a_cap,
+                         genre_cap=_g_cap, mood_cap=_m_cap,
+                         vec_map=_vecs_own, spread_min=_spread)
     # Финальная страховка на ответе: id + баны артистов + «та же песня».
     # Ловит всё, что просочилось через срез пула (cand[:800]/топ).
     if top and (dis or ban_names):
@@ -2663,10 +3544,29 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 moods = []
             r["mood"] = str(moods[0]).lower() if moods else None
             r["moods"] = [str(m).lower() for m in moods[:3]]
+            # Канонический код настроения — для СРАВНЕНИЙ (градиент морфа,
+            # мостик). Раньше сравнивали сырой лейбл ('спокойный') с
+            # каноническим кодом ('calm') — сравнение всегда было False,
+            # обе группы градиента пусты, и «голова — стартовое, хвост —
+            # целевое» не строилось НИ РАЗУ, хотя API рапортовал morph.
+            try:
+                r["mood_code"] = _mood_of(f)
+            except Exception:
+                r["mood_code"] = None
             try:
                 r["energy"] = float(f.energy) if f is not None and f.energy is not None else None
             except (TypeError, ValueError):
                 r["energy"] = None
+            # Остальные оси муд-пространства — чтобы клиент видел, где
+            # трек стоит относительно выбранной пилюли.
+            for _axis, _attr in (("valence", "valence"), ("arousal", "arousal"),
+                                 ("dance", "danceability")):
+                try:
+                    r[_axis] = (float(getattr(f, _attr))
+                                if f is not None and getattr(f, _attr, None) is not None
+                                else None)
+                except (TypeError, ValueError):
+                    r[_axis] = None
             try:
                 r["tempo"] = float(f.tempo_bpm) if f is not None and f.tempo_bpm else None
             except (TypeError, ValueError):
@@ -2693,24 +3593,46 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         except (TypeError, ValueError):
             _cur_en = None
     if morphing and top:
-        # Градиент: голова — стартовое настроение, хвост — целевое,
-        # середина — лучшее остальное. Плавный уход в выбранный муд.
-        g_start = [r for r in top if (r.get("mood") or None) == start_mood]
-        g_target = [r for r in top if (r.get("mood") or None) == target_mood]
+        # Переход по муд-пространству: ЛЕСТНИЦА от звука текущего трека к
+        # центру целевой пилюли. Раньше градиент был бинарным («голова —
+        # стартовое настроение, хвост — целевое»), и трека «наполовину
+        # грустный, наполовину поднимающийся» не существовало: переход был
+        # скачком между двумя состояниями.
         _mtun = _tun_all(db, user_id)
-        head = _smooth_keys_order(g_start[:3], _mtun)
-        tail = _smooth_keys_order(g_target[:4], _mtun)
-        used = {str(r.get("track_id")) for r in head + tail}
-        mid_n = max(0, len(top) - len(head) - len(tail))
-        mid = _smooth_keys_order(
-            [r for r in top if str(r.get("track_id")) not in used][:mid_n],
-            _mtun)
-        top = head + mid + tail
-        morph = {"from": start_mood, "to": target_mood}
-        # Раньше здесь энергетическая дуга не применялась вовсе: ветка morph
-        # шла вместо неё, то есть при ВЫБРАННОМ настроении (главный сценарий)
-        # переходов по энергии не было. Теперь дуга есть в обеих ветках.
-        top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
+        _sv = mood_vector(_cf) if _cf is not None else {}
+        if not _sv and start_mood:
+            _sv = dict(MOOD_TARGETS.get(start_mood) or {})
+        _tv = MOOD_TARGETS.get(target_mood or '') or {}
+        if _sv and _tv:
+            top = order_by_mood_ramp(top, _sv, _tv, _vecs_all)
+            top = _smooth_ramp_order(top, _sv, _tv, _vecs_all)
+            # Глобальная сортировка по энергии тут НЕ годится: она ломала
+            # лестницу перехода (valence шёл своей дорогой). Поэтому
+            # энергия сглаживается локально, порядок лестницы сохраняется.
+            top = _smooth_energy_local(top, max_step=0.18)
+            top = _smooth_keys_order(top, _mtun)
+            morph = {"from": start_mood, "to": target_mood, "ramp": True}
+        else:
+            # Векторов нет (нет анализа у текущего трека и у цели) —
+            # старый бинарный градиент по кодам настроения.
+            g_start = [r for r in top
+                       if (r.get("mood_code") or None) == start_mood]
+            g_target = [r for r in top
+                        if (r.get("mood_code") or None) == target_mood]
+            head = _smooth_keys_order(g_start[:3], _mtun)
+            tail = _smooth_keys_order(g_target[:4], _mtun)
+            used = {str(r.get("track_id")) for r in head + tail}
+            mid_n = max(0, len(top) - len(head) - len(tail))
+            mid = _smooth_keys_order(
+                [r for r in top if str(r.get("track_id")) not in used][:mid_n],
+                _mtun)
+            top = head + mid + tail
+            morph = {"from": start_mood, "to": target_mood}
+            # Раньше здесь энергетическая дуга не применялась вовсе: ветка
+            # morph шла вместо неё, то есть при ВЫБРАННОМ настроении (главный
+            # сценарий) переходов по энергии не было. Теперь дуга есть в обеих
+            # ветках.
+            top = _smooth_energy_pass(top, start_energy=_cur_en, tun=_mtun)
     elif len(top) > 3:
         # Без целевого настроения — раскладываем оркестратором: плавные
         # переходы по энергии, затем key-сглаживание.
@@ -2741,8 +3663,8 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                                       r.get("key"), r.get("scale")))
                 except Exception:
                     _kk = 0.5
-                _mm = 1.0 if (r.get("mood") and start_mood and
-                              r.get("mood") == start_mood) else 0.5
+                _mm = 1.0 if (r.get("mood_code") and start_mood and
+                              r.get("mood_code") == start_mood) else 0.5
                 return _kk * 0.5 + (1.0 - min(_de, 1.0)) * 0.3 + _mm * 0.2
 
             _b0 = _bridge(top[0])
@@ -2772,6 +3694,9 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             _gl("wave").warning("rec_feedback mark_served failed: {}", e)
         except Exception:
             pass
+    # Целевая точка пилюли в муд-пространстве (если пилюля выбрана) —
+    # плеер и разборы видят, ЧТО именно означает выбранное настроение.
+    _eff_target = MOOD_TARGETS.get(_eff_mood_norm or '') or None
     return {'tracks': top, 'seeds': seeds,
             'applied': applied,
             'current_mood': start_mood,
@@ -2782,6 +3707,8 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
             'auto_mood': _auto_mood,
             'mood_source': mood_source,
             'mood_effective': settings_eff.get('mood') or None,
+            'mood_target': _eff_target,
+            'mood_radius': MOOD_RADIUS,
             'drift': {k: drift.get(k) for k in
                       ("severity", "consecutive_skips", "temp_banned_genres",
                        "warmth", "positive_streak")}

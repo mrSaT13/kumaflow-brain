@@ -185,10 +185,17 @@ def invalidate_moods_cache() -> None:
 
 @router.get("/moods")
 def list_moods(db: Session = Depends(get_db)):
-    """Все настроения библиотеки + counts (для фильтра).
+    """Настроения библиотеки + counts (для фильтра и для пилюль плеера).
 
     Источник — TrackFeatures.mood_labels (акустика + AI). Список обновляется
     сам по мере анализа: TTL-кэш 120с, SWR на фронте дотягивает остальное.
+
+    СЛОВА СВОРАЧИВАЮТСЯ В КАНОНИЧЕСКИЕ КОДЫ: в mood_labels попадают и
+    librosa-лейблы ('спокойный'), и слова от LLM по тексту песни
+    ('боевой', 'тоска'). Если отдавать их как есть, плеер строит по ним
+    пилюли — и каждое выдуманное слово становится отдельной пилюлью, а
+    мозг о ней ничего не знает (пресета нет, фильтр молча выключен).
+    Поэтому отдаём код + подпись: 'aggressive' -> 'Боевое'.
     """
     import time as _t
 
@@ -201,8 +208,10 @@ def list_moods(db: Session = Depends(get_db)):
     from collections import Counter
 
     from app.db.models import TrackFeatures
+    from app.services.wave import MOOD_LABELS, MOOD_TARGETS, norm_mood
 
     c: Counter = Counter()
+    unknown: Counter = Counter()
     try:
         for (labels,) in db.query(TrackFeatures.mood_labels).yield_per(5000):
             if not labels:
@@ -213,13 +222,34 @@ def list_moods(db: Session = Depends(get_db)):
                 # иначе цифра в дропдауне расходится с выдачей.
                 for m in labels or []:
                     s = str(m or "").strip().lower()
-                    if s:
-                        c[s] += 1
+                    if not s:
+                        continue
+                    code = None
+                    try:
+                        code = norm_mood(s)
+                    except Exception:
+                        code = None
+                    if code:
+                        c[code] += 1
+                    else:
+                        # Слово не опознано — показываем отдельной группой,
+                        # чтобы было видно, что словарь надо расширять.
+                        unknown[s] += 1
             except Exception:
                 continue
     except Exception:
         pass
-    moods = [{"name": m, "count": n} for m, n in c.most_common()]
+    moods = [{"code": code,
+              "name": code,
+              "label": MOOD_LABELS.get(code, code),
+              # Числовой центр пилюли в муд-пространстве (valence/energy/
+              # arousal/dance). Клиенту видно, ЧТО означает пилюля в числах —
+              # иначе «Боевое» и «Бодрое» выглядят синонимами.
+              "target": MOOD_TARGETS.get(code),
+              "count": n}
+             for code, n in c.most_common()]
+    for s, n in unknown.most_common(10):
+        moods.append({"code": s, "name": s, "label": s, "count": n})
     _moods_cache["at"] = now
     _moods_cache["moods"] = moods
     return {"moods": moods}

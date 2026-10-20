@@ -78,7 +78,7 @@ def list_tracks(
     if artist:
         query = query.filter(Track.artist_name == artist)
     if mood:
-        # Настроение из TrackFeatures.mood_labels. Сравнение — точное, по
+        # Настроение из TrackFeatures.mood_labels. Сравнение — по
         # нормализованным меткам (strip + lower) в Python, а не JSON-LIKE:
         # LIKE с кавычками ломался на метках с пробелами (« агрессивный »),
         # регистре (sqlite lower() — только ASCII) и \uXXXX-экранировании
@@ -86,21 +86,42 @@ def list_tracks(
         # strip().lower(), а фильтр искал подстроку в кавычках — цифра в
         # дропдауне была, а выдача давала 0. Так чинятся и старые грязные
         # строки без миграции данных.
+        #
+        # Каталог отдаёт КАНОНИЧЕСКИЕ коды ('aggressive'), а в базе лежат
+        # сырые слова ('агрессивный', 'боевой'). Поэтому сравниваем и по
+        # сырому слову (как было), и по нормализованному коду — иначе
+        # выбор из дропдауна давал бы 0, а счётчик в дропдауне — нет.
         from app.db.models import TrackFeatures as _TF
+        from app.services.wave import norm_mood as _norm_mood
 
         _m = str(mood).strip().lower()
         # LIKE-инъекция/кавычки из запроса — режем, иначе ломается фильтр
         _m = "".join(c for c in _m if c not in ("\"", "%", "_", "\\"))[:64]
         if not _m:
             raise HTTPException(400, "invalid mood")
+        try:
+            _mq = _norm_mood(_m) or _m
+        except Exception:
+            _mq = _m
         _hit_ids: list[str] = []
         try:
             for (tid, labels) in db.query(_TF.track_id, _TF.mood_labels).yield_per(5000):
                 if not labels:
                     continue
                 try:
-                    if any(str(m or "").strip().lower() == _m for m in (labels or [])):
-                        _hit_ids.append(tid)
+                    for m in (labels or []):
+                        s = str(m or "").strip().lower()
+                        if not s:
+                            continue
+                        if s == _m:
+                            _hit_ids.append(tid)
+                            break
+                        try:
+                            if (_norm_mood(s) or "") == _mq:
+                                _hit_ids.append(tid)
+                                break
+                        except Exception:
+                            continue
                 except Exception:
                     continue
         except Exception:

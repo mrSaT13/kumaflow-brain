@@ -58,10 +58,14 @@ def test_mood_filter_matches_catalog_despite_dirty_labels():
 
         cat = list_moods(db=db)
         counts = {m["name"]: m["count"] for m in cat["moods"]}
-        # каталог считает те же нормализованные метки по всем позициям
-        assert counts.get("агрессивный", 0) >= 2, counts
-        assert counts.get("танцевальный", 0) >= 1, counts
-        assert counts.get("тёплый", 0) >= 1, counts
+        # каталог считает те же нормализованные метки по всем позициям и
+        # сворачивает их в канонические коды
+        assert counts.get("aggressive", 0) >= 2, counts
+        assert counts.get("dance", 0) >= 1, counts
+        assert counts.get("warm", 0) >= 1, counts
+        # счётчик в дропдауне == выдаче фильтра по тому же коду
+        r3 = list_tracks(mood="aggressive", limit=100, offset=0, db=db)
+        assert r3["total"] == counts.get("aggressive", 0), (r3["total"], counts)
     finally:
         db.close()
         invalidate_moods_cache()
