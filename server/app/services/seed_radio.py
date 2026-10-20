@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from sqlalchemy import func
 
+from typing import Any
+
 
 def _log_warning(msg: str, *args) -> None:
     try:
@@ -150,6 +152,12 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
 
     Упрощённый вариант `/api/library/artists/similar` без серверной добивки —
     сервер идёт отдельно целыми треками (см. ниже), а не именами.
+
+    Жанры сравниваем МЯГКО: точное совпадение (+2), иначе пересечение
+    токенов («alternative metal» ~ «nu metal» через «metal», +1).
+    Раньше было только точное `genre IN (...)` — при рваных тегах
+    («Metal» vs «Alternative Metal» vs «metal») похожих находилось 1-2,
+    и радио вырождалось в «2 артиста по кругу».
     """
     from collections import Counter
 
@@ -169,7 +177,15 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
         .limit(3)
         .all()
     )
-    genres = [g for g, _ in grows]
+    genres = [g for g, _ in grows if g]
+    # Нормализованные жанры сида + их токены для мягкого матча.
+    _seed_g: set[str] = {str(g).strip().lower() for g in genres if str(g).strip()}
+    _seed_toks: set[str] = set()
+    for _g in _seed_g:
+        for _t in str(_g).replace("/", " ").replace("-", " ").split():
+            _t = _t.strip().lower()
+            if len(_t) >= 3:
+                _seed_toks.add(_t)
     own_ids = [
         str(r[0])
         for r in db.query(Track.id).filter(cmp_col == self_norm).limit(2000).all()
@@ -194,20 +210,224 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
             .limit(5000)
             .all()
         }
-    cand_q = db.query(Track.artist_name, Track.genre, Track.id).filter(
-        Track.artist_name.isnot(None), cmp_col != self_norm
-    )
-    if genres:
-        cand_q = cand_q.filter(Track.genre.in_(genres))
+    # Кандидатов берём ШИРЕ: без жёсткого фильтра по жанру (он и резал
+    # похожих), скоринг сам разберёт. Случайный порядок — чтобы не есть
+    # один и тот же кусок таблицы при каждом запросе.
+    try:
+        cand_rows = (db.query(Track.artist_name, Track.genre, Track.id)
+                     .filter(Track.artist_name.isnot(None), cmp_col != self_norm)
+                     .order_by(func.random()).limit(8000).all())
+    except Exception:
+        cand_rows = (db.query(Track.artist_name, Track.genre, Track.id)
+                     .filter(Track.artist_name.isnot(None), cmp_col != self_norm)
+                     .limit(8000).all())
     scores: Counter = Counter()
-    for aname, g, tid in cand_q.limit(5000).all():
+    for aname, g, tid in cand_rows:
         if not aname:
             continue
-        if g in genres:
+        _gl = str(g or "").strip().lower()
+        if _gl and _gl in _seed_g:
             scores[aname] += 2
+        elif _gl and _seed_toks:
+            _ct = {t for t in _gl.replace("/", " ").replace("-", " ").split()
+                   if len(t.strip()) >= 3}
+            if _ct & _seed_toks:
+                scores[aname] += 1
+        elif not _seed_g:
+            # У сида жанра нет вовсе — не штрафуем, решает кластер.
+            pass
         if str(tid) in in_cluster:
             scores[aname] += 3
-    return [n for n, _ in scores.most_common(limit)]
+    ranked = [n for n, _ in scores.most_common(limit)]
+    # Добивка: если похожих мало (рваные жанры, нет кластеров) — добираем
+    # самыми играемыми артистами с тем же жанр-токеном, иначе радио
+    # схлопывается в 2 артиста. Без жанра у сида — топ по plays.
+    if len(ranked) < limit:
+        try:
+            _have = {norm_name(n) for n in ranked} | {self_norm}
+            _q = (db.query(Track.artist_name, func.count(Track.id))
+                  .filter(Track.artist_name.isnot(None), cmp_col != self_norm)
+                  .group_by(Track.artist_name)
+                  .order_by(func.sum(Track.play_count).desc().nullslast()))
+            for _an, _c in _q.limit(200).all():
+                if not _an or norm_name(_an) in _have:
+                    continue
+                if _seed_g or _seed_toks:
+                    # Принимаем только с жанровым пересечением, иначе
+                    # в «похожие» попадёт попса из топа библиотеки.
+                    _grow = (db.query(Track.genre).filter(
+                        func.lower(func.trim(Track.artist_name)) == norm_name(_an),
+                        Track.genre.isnot(None)).limit(3).all())
+                    _ok = False
+                    for (_gg,) in _grow:
+                        _ggl = str(_gg or "").strip().lower()
+                        if _ggl in _seed_g:
+                            _ok = True
+                            break
+                        _ct2 = {t for t in _ggl.replace("/", " ").replace("-", " ").split()
+                                if len(t.strip()) >= 3}
+                        if _ct2 & _seed_toks:
+                            _ok = True
+                            break
+                    if not _ok:
+                        continue
+                ranked.append(_an)
+                _have.add(norm_name(_an))
+                if len(ranked) >= limit:
+                    break
+        except Exception:
+            pass
+    return ranked[:limit]
+
+
+def _similar_2hop(db, hop1: list[str], seed_artist: str,
+                  per: int = 2, max_hop1: int = 3) -> list[str]:
+    """2-й хоп: похожие на похожих (FFDP → Slipknot → соседи Slipknot).
+
+    Раскрываем только первые `max_hop1` артистов 1-го хопа (самые релевантные),
+    с каждого берём до `per` имён. Дедпу: сид и 1-й хоп исключены.
+    0 на любом из лимитов = выключено (поведение 1в1 как раньше).
+    Best-effort: ошибка одного хопа не валит остальных.
+    """
+    if not hop1 or per <= 0 or max_hop1 <= 0:
+        return []
+    from app.services.artist_names import norm_name
+
+    seed_norm = norm_name(seed_artist)
+    have = {seed_norm} | {norm_name(a) for a in hop1 if a}
+    out: list[str] = []
+    for _h1 in list(hop1)[:max(1, max_hop1)]:
+        try:
+            for _n in _similar_artist_names(db, _h1, limit=max(1, per)):
+                if not _n:
+                    continue
+                if norm_name(_n) in have:
+                    continue
+                have.add(norm_name(_n))
+                out.append(_n)
+        except Exception:
+            continue
+    return out
+
+
+def _vector_neighbor_pool(db, seed_ids: list[str], limit: int = 60,
+                          exclude: set[str] | None = None) -> list[str]:
+    """Векторный добор: соседи сидов по ЗВУКУ, а не по имени жанра.
+
+    Что считается: 9-D вектор librosa (темп/энергия/валентность/спектр) через
+    k-NN к конкретным сидам + тембр (chroma 12-D + форма MFCC c1..c12).
+    Это «ноты» трека: гармоника и материал. Текст/лирика в доборе не участвуют —
+    их вес (`lyrics_weight`) уже работает в ранжировании пула.
+
+    Как дёшево: смотрим не всю библиотеку, а случайную выборку играбельных
+    (2000), сходство считаем в памяти (numpy, фолбэк — чистый Python).
+    Нет анализа у сидов → []. Любая ошибка → [] (радио не должно падать).
+    """
+    if not seed_ids or limit <= 0:
+        return []
+    try:
+        from app.db.models import Track, TrackFeatures
+        from app.services import flow as _flow
+
+        _seed_ids = [str(s) for s in seed_ids if s][:24]
+        if not _seed_ids:
+            return []
+        _feats = {str(f.track_id): f for f in
+                  db.query(TrackFeatures).filter(
+                      TrackFeatures.track_id.in_(_seed_ids)).all()}
+        if not _feats:
+            return []
+        try:
+            from app.services.ml import _feature_vector as _fv
+        except Exception:
+            _fv = None  # type: ignore
+        _ref_9d: dict[str, Any] = {}
+        _ref_timbre: list[Any] = []
+        if _fv is not None:
+            for _sid in _seed_ids:
+                _f = _feats.get(_sid)
+                if _f is None:
+                    continue
+                try:
+                    _v = _fv(None, _f)
+                except Exception:
+                    _v = None
+                if _v is not None:
+                    try:
+                        _ref_9d[_sid] = [float(x) for x in list(_v)]
+                    except Exception:
+                        pass
+                try:
+                    _tv = _flow.timbre_vector(_f)
+                except Exception:
+                    _tv = None
+                if _tv:
+                    _ref_timbre.append(_tv)
+        if not _ref_9d and not _ref_timbre:
+            return []
+        try:
+            _cent_timbre = _flow.timbre_centroid(_ref_timbre) if _ref_timbre else None
+        except Exception:
+            _cent_timbre = None
+        _excl = set(exclude or set()) | set(_seed_ids)
+        try:
+            _q = _playable_query(db, Track.id).filter(~Track.id.in_(list(_excl)[:500] or [""]))
+        except Exception:
+            _q = db.query(Track.id)
+        try:
+            _sample = [str(r[0]) for r in _q.order_by(func.random()).limit(2000).all()]
+        except Exception:
+            _sample = [str(r[0]) for r in _q.limit(2000).all()]
+        _sample = [s for s in _sample if s not in _excl]
+        if not _sample:
+            return []
+        _cfeats = {str(f.track_id): f for f in
+                   db.query(TrackFeatures).filter(
+                       TrackFeatures.track_id.in_(_sample)).all()}
+        if not _cfeats:
+            return []
+        _cand_9d: dict[str, Any] = {}
+        _cand_timbre: dict[str, Any] = {}
+        if _fv is not None:
+            for _tid, _f in _cfeats.items():
+                try:
+                    _v = _fv(None, _f)
+                except Exception:
+                    _v = None
+                if _v is not None:
+                    try:
+                        _cand_9d[_tid] = [float(x) for x in list(_v)]
+                    except Exception:
+                        pass
+                try:
+                    _tv2 = _flow.timbre_vector(_f)
+                except Exception:
+                    _tv2 = None
+                if _tv2:
+                    _cand_timbre[_tid] = _tv2
+        _scores: dict[str, float] = {}
+        if _ref_9d and _cand_9d:
+            try:
+                _knn = _flow.knn_scores(_cand_9d, _ref_9d, list(_ref_9d))
+            except Exception:
+                _knn = {}
+            for _tid, _s in _knn.items():
+                _scores[_tid] = _scores.get(_tid, 0.0) + 0.6 * float(_s or 0.0)
+        if _cent_timbre and _cand_timbre:
+            for _tid, _tv in _cand_timbre.items():
+                try:
+                    _ts = float(_flow.timbre_similarity(_tv, _cent_timbre) or 0.0)
+                except Exception:
+                    _ts = 0.0
+                if _ts > 0:
+                    _scores[_tid] = _scores.get(_tid, 0.0) + 0.4 * _ts
+        if not _scores:
+            return []
+        _ranked = sorted(_scores.items(), key=lambda kv: kv[1], reverse=True)
+        return [str(t) for t, _ in _ranked[:max(1, limit)]]
+    except Exception as e:  # noqa: BLE001 — добор не должен валить радио
+        _log_warning("vector pool не собрался: {}", e)
+        return []
 
 
 def track_radio(db, user_id: str, track_ref: str, n: int = 30) -> dict:
@@ -276,6 +496,20 @@ def track_radio(db, user_id: str, track_ref: str, n: int = 30) -> dict:
                     base.append(tid)
         except Exception as e:  # noqa: BLE001
             _log_warning("track_radio: резервный пул по кластеру не собрался: {}", e)
+
+    # Векторный добор по звуку (9-D + тембр): ловит то, что cold_start
+    # и кластер пропустили. Сид уже есть — ищем его соседей напрямую.
+    try:
+        _n_vec = _tuning_int(db, user_id, "radio_vector", 60, 0, 500)
+        if _n_vec > 0:
+            _vseen = set(base) | {seed_id}
+            for _tid in _vector_neighbor_pool(db, [seed_id], limit=_n_vec,
+                                              exclude=_vseen):
+                if _tid != seed_id and _tid not in _vseen:
+                    _vseen.add(_tid)
+                    base.append(_tid)
+    except Exception:
+        pass
 
     # Дизлайки/баны — мимо. Раньше это делал только artist_radio, и волна по
     # треку могла подсунуть забаненного артиста.
@@ -461,6 +695,39 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
                 seen.add(tid)
                 pool.append(tid)
 
+    # 2-й хоп: похожие на похожих. Раскрываем топ-3 хопа-1, с каждого до 2 имён,
+    # треков с каждого — вдвое меньше, чем с хопа-1 (дальше от сида = тише).
+    # 0 в любой ручке = выключено.
+    similar_2hop: list[str] = []
+    try:
+        _n_h1 = _tuning_int(db, user_id, "radio_second_hop_artists", 3, 0, 10)
+        _n_h2 = _tuning_int(db, user_id, "radio_second_hop", 2, 0, 10)
+        if _n_h1 > 0 and _n_h2 > 0:
+            similar_2hop = _similar_2hop(db, similar, artist_name,
+                                         per=_n_h2, max_hop1=_n_h1)
+            _per2 = max(1, _n_per // 2)
+            for aname in similar_2hop:
+                for t in _artist_top_tracks(db, aname, limit=_per2):
+                    tid = str(t.id)
+                    if tid not in seen:
+                        seen.add(tid)
+                        pool.append(tid)
+    except Exception:
+        similar_2hop = []
+
+    # Векторный добор: соседи сидов по звуку (9-D + тембр), а не по имени жанра.
+    # Ловит то, что жанровый матч пропустил: тот же материал при рваных тегах.
+    try:
+        _n_vec = _tuning_int(db, user_id, "radio_vector", 60, 0, 500)
+        if _n_vec > 0:
+            for _tid in _vector_neighbor_pool(db, seed_ids, limit=_n_vec,
+                                              exclude=seen):
+                if _tid not in seen:
+                    seen.add(_tid)
+                    pool.append(_tid)
+    except Exception:
+        pass
+
     server_used = False
     seed_ext: str | None = None
     for t in own:
@@ -494,8 +761,28 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
         db, user_id, pool, seed_ids, settings,
         jitter_seed=f"{user_id}:seed:{artist_name}",
     )
+    # Скоринг может отсеять часть пула (баны/дизлайки/фильтры): добиваем
+    # тем, что он не видел, иначе при рваных жанрах очередь короче заказа.
+    _got_ids = {str(r.get("track_id") or r.get("id")) for r in ranked if r.get("track_id") or r.get("id")}
+    for _tid in pool:
+        if _tid not in _got_ids:
+            ranked.append({"track_id": _tid})
     ordered = [str(r.get("track_id") or r.get("id")) for r in ranked[: max(n * 3, n)]]
-    ordered = [t for t in ordered if t][:n]
+    ordered = [t for t in ordered if t]
+    # Опорный трек — ПЕРВЫМ номером: радио начинается с выбранного артиста,
+    # уже после идут похожие. Раньше первый трек решал скоринг/дуга и очередь
+    # могла стартовать с чужого артиста («в стиле FFDP», а играет Clawfinger).
+    _seed_first = ""
+    for _sid in seed_ids:
+        if _sid in ordered:
+            _seed_first = _sid
+            break
+        if _sid in pool:
+            _seed_first = _sid
+            break
+    if _seed_first:
+        ordered = [_seed_first] + [t for t in ordered if t != _seed_first]
+    ordered = ordered[:n]
 
     # Мета заказанных треков — нужна артистам для перетасовки ниже.
     artist_of: dict[str, str] = {}
@@ -536,10 +823,18 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
         )
     except Exception:
         pass
+    # Финальный guard: опорный трек — первым, даже после дуги и круга.
+    if _seed_first and ordered:
+        if _seed_first in ordered:
+            ordered = [_seed_first] + [t for t in ordered if t != _seed_first]
+        else:
+            ordered = [_seed_first] + ordered
+        ordered = ordered[:n]
     return {
         "tracks": ordered,
         "seed_ids": seed_ids,
         "similar_artists": similar,
+        "similar_artists_2hop": similar_2hop,
         "server_used": server_used,
         "label": artist_name,
     }

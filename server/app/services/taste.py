@@ -314,6 +314,11 @@ def _maybe_autoban(db, user_id: str, artist_name: str | None, extra: int = 0) ->
     """Правило mobile: 3 дизлайка треков артиста = бан. Возвращает True если только что забанен.
 
     extra: дизлайки этого же пакета, ещё не видимые в committed (autoflush=False).
+
+    Защита от бана любимых: если у артиста есть лайки/плейлист-вес
+    (любимый артист с парой пропущенных треков) — автобан не стреляет.
+    Только явный ручной бан через API. Это чинит «любимые артисты
+    постоянно банятся».
     """
     if not artist_name:
         return False
@@ -325,6 +330,27 @@ def _maybe_autoban(db, user_id: str, artist_name: str | None, extra: int = 0) ->
     if exists:
         return False
     if artist_dislike_count(db, user_id, artist_name) + extra >= 3:
+        # Любимый артист: есть лайки треков этого артиста — не баним автоматом.
+        # Иначе 3 пропущенных/незашедших трека банят весь топ (17 ♥ / 400+ plays).
+        try:
+            _fav_n = (
+                db.query(Favorite)
+                .join(Track, Track.id == Favorite.track_id)
+                .filter(Favorite.user_id == user_id,
+                        Track.artist_name == artist_name)
+                .count()
+            )
+        except Exception:
+            _fav_n = 0
+        if _fav_n:
+            try:
+                _dis_n = artist_dislike_count(db, user_id, artist_name) + extra
+            except Exception:
+                _dis_n = 3
+            # Баним автоматом только если дизлайков явно больше, чем любви:
+            # минимум 5 дизлайков и их больше, чем лайков. Иначе — нет.
+            if _dis_n < 5 or _dis_n <= _fav_n:
+                return False
         # ID подтягиваем сразу (точный матч в волне), имя — как раньше.
         _aid = None
         try:
@@ -335,8 +361,26 @@ def _maybe_autoban(db, user_id: str, artist_name: str | None, extra: int = 0) ->
             _aid = str((_h[0] if _h else "") or "")[:128] or None
         except Exception:
             pass
-        db.add(ArtistBan(user_id=user_id, artist_name=artist_name,
-                         artist_external_id=_aid, reason="auto3"))
+        try:
+            with db.begin_nested():
+                db.add(ArtistBan(user_id=user_id, artist_name=artist_name,
+                                 artist_external_id=_aid, reason="auto3"))
+                db.flush()
+        except Exception:
+            # Гонка/дубль в том же пакете (autoflush=False не видит pending) —
+            # это не ошибка синка, бан уже есть.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # Проверяем, что строка действительно есть (мог быть откат savepoint)
+            try:
+                if db.query(ArtistBan).filter_by(
+                        user_id=user_id, artist_name=artist_name).first() is None:
+                    db.add(ArtistBan(user_id=user_id, artist_name=artist_name,
+                                     artist_external_id=_aid, reason="auto3"))
+            except Exception:
+                pass
         logger.info("autoban artist '{}' for user {}", artist_name, user_id[:8])
         return True
     return False
@@ -1056,6 +1100,27 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
         # Баны: мобила шлёт имена строками, десктоп — пары {id, name}
         # (у него в bannedArtists лежат Navidrome-ID). Принимаем оба формата;
         # старые именные строки резолвим в ID через backfill ниже.
+        #
+        # Идемпотентность (сессия autoflush=False, проверки не видят pending):
+        # без pend-множества дубль "Linkin Park" дважды в одном пакете давал
+        # двойной INSERT → UniqueViolation artist_bans_pkey → вся сессия
+        # в rollback и все следующие синки падали с
+        # "This Session's transaction has been rolled back".
+        # Плюс уважаем надгробия: разбанённый артист не должен воскресать
+        # от старого списка с другого устройства.
+        try:
+            _have_bans = {str(r.artist_name) for r in
+                          db.query(ArtistBan).filter_by(user_id=user_id).all()}
+        except Exception:
+            _have_bans = set()
+        pend_bans: set[str] = set(_have_bans)
+        pend_bans_lower: set[str] = {str(b).strip().lower() for b in pend_bans}
+        try:
+            from app.db.models import TasteTombstone as _TTb
+            _ban_tombs = {str(r.key or "").strip().lower() for r in
+                          db.query(_TTb).filter_by(user_id=user_id, kind="ban").all()}
+        except Exception:
+            _ban_tombs = set()
         for _ban in (prof.get("bannedArtists") or [])[:1000]:
             _bname, _bid = "", ""
             if isinstance(_ban, dict):
@@ -1089,15 +1154,51 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
                     _bname = _bid
             if not _bname:
                 continue
-            _row = db.query(ArtistBan).filter_by(
-                user_id=user_id, artist_name=_bname[:512]).first()
-            if _row is None:
-                db.add(ArtistBan(user_id=user_id, artist_name=_bname[:512],
-                                 artist_external_id=(_bid[:128] or None),
-                                 reason="mobile"))
+            _bkey = _bname[:512]
+            _blow = _bkey.strip().lower()
+            # Дубль в том же пакете (включая разный регистр) — пропускаем.
+            if _bkey in pend_bans or _blow in pend_bans_lower:
+                # ID всё равно подтягиваем, если его не было.
+                if _bid:
+                    try:
+                        _ex = db.query(ArtistBan).filter_by(
+                            user_id=user_id, artist_name=_bkey).first()
+                        if _ex is not None and not getattr(
+                                _ex, "artist_external_id", None):
+                            _ex.artist_external_id = _bid[:128]
+                    except Exception:
+                        pass
+                continue
+            # Разбанённый ранее: старый список с другого устройства
+            # не должен воскрешать бан. Клиент подтянет removed по курсору
+            # и вычистит у себя; серверная истина — надгробие.
+            if _blow in _ban_tombs:
+                continue
+            try:
+                with db.begin_nested():
+                    db.add(ArtistBan(user_id=user_id, artist_name=_bkey,
+                                     artist_external_id=(_bid[:128] or None),
+                                     reason="mobile"))
+                    db.flush()
+                pend_bans.add(_bkey)
+                pend_bans_lower.add(_blow)
                 m_banned += 1
-            elif _bid and not getattr(_row, "artist_external_id", None):
-                _row.artist_external_id = _bid[:128]
+            except Exception:
+                # Дубль/гонка — бан уже есть, это не ошибка синка.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                pend_bans.add(_bkey)
+                pend_bans_lower.add(_blow)
+                try:
+                    _ex2 = db.query(ArtistBan).filter_by(
+                        user_id=user_id, artist_name=_bkey).first()
+                    if _ex2 is not None and _bid and not getattr(
+                            _ex2, "artist_external_id", None):
+                        _ex2.artist_external_id = _bid[:128]
+                except Exception:
+                    pass
         try:
             from app.services.artist_names import backfill_ban_ids as _bb
             _bb(db, user_id)

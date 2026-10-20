@@ -377,7 +377,22 @@ def import_taste(db, user_id: str, client=None, max_tracks: int = 400) -> dict:
     for alb in liked_albums:
         for a in _ym_artists(alb):
             pref_a[a] += 1
-    banned = sorted({a.strip() for a in disliked_artists if a.strip()})[:1000]
+    # Дизлайк в Яндексе ≠ бан: раньше каждый disliked-артист из Яндекса
+    # становился жёстким ArtistBan — так любимые локально артисты (17 ♥,
+    # сотни plays) оказывались в бане после импорта. Баним только тех,
+    # у кого локально нет ни одного лайка (явной любви).
+    try:
+        from app.db.models import Favorite as _FavY
+        from app.db.models import Track as _TY
+        _loved = {str(r[0]).strip().lower() for r in
+                  db.query(_TY.artist_name).join(
+                      _FavY, _FavY.track_id == _TY.id).filter(
+                      _FavY.user_id == user_id).all()
+                  if r[0]}
+    except Exception:
+        _loved = set()
+    banned = sorted({a.strip() for a in disliked_artists
+                     if a.strip() and a.strip().lower() not in _loved})[:1000]
 
     res = _taste.sync_from_mobile(db, user_id, {
         "ratings": ratings,

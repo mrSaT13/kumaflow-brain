@@ -552,7 +552,16 @@ def sync_from_mobile(user_id: str, payload: dict, db: Session = Depends(get_db))
         from app.core.logging import get_logger as _gl
 
         _gl("api.users").exception("sync-from-mobile failed")
-        return {"ok": False, "error": f"Синк не удался: {str(e)[:400]}"}
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        # Чистая ошибка без «This Session's transaction has been rolled back»:
+        # показываем первопричину, а не состояние сессии после неё.
+        msg = str(e)
+        if "has been rolled back" in msg and getattr(e, "__cause__", None):
+            msg = str(getattr(e, "__cause__"))
+        return {"ok": False, "error": f"Синк не удался: {msg[:400]}"}
 
 
 @router.get("/{user_id}/sync-to-mobile")

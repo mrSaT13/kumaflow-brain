@@ -3069,6 +3069,7 @@ def wave_limits(db, user_id: str | None = None) -> dict[str, int]:
         "fatigue_days": _tun_int(tun, 'repeats', 'fatigue_days', 7),
         "radio_cluster_pool": _tun_int(tun, 'playlists', 'radio_cluster_pool',
                                        300),
+        "radio_vector": _tun_int(tun, 'playlists', 'radio_vector', 60),
     }
 
 
@@ -3478,8 +3479,25 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 if t not in played and t not in dis and t != _radio_anchor]
         except Exception:
             _radio_pool = []
-    _rand_limit = max(1, _pool_limit - len(_radio_pool))
-    cand = list(_radio_pool)
+    # Векторные соседи якоря — вторым слоем после кластерных: тот же звук
+    # (9-D + тембр), даже если кластеризация грубая или анализ свежий.
+    _vec_pool: list[str] = []
+    if _radio_anchor:
+        try:
+            _n_vec = int(_lim.get("radio_vector", 60) or 0)
+        except Exception:
+            _n_vec = 60
+        if _n_vec > 0:
+            try:
+                from app.services.seed_radio import _vector_neighbor_pool as _vpool
+                _vexcl = set(played) | set(dis) | set(_radio_pool) | {_radio_anchor}
+                _vec_pool = [t for t in _vpool(
+                    db, [_radio_anchor], limit=_n_vec, exclude=_vexcl)
+                    if t not in played and t not in dis and t != _radio_anchor]
+            except Exception:
+                _vec_pool = []
+    _rand_limit = max(1, _pool_limit - len(_radio_pool) - len(_vec_pool))
+    cand = list(_radio_pool) + list(_vec_pool)
     try:
                 cand += [str(r[0]) for r in
                          q.order_by(func.random()).limit(_rand_limit + skip_n).all()]

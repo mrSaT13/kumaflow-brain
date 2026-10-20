@@ -154,6 +154,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "radio_similar": 6,
         "radio_per_similar": 15,
         "radio_server": 20,
+        # 2-й хоп: похожие на похожих (FFDP → Slipknot → его соседи).
+        # radio_second_hop_artists: сколько артистов 1-го хопа раскрывать,
+        # radio_second_hop: сколько похожих брать с каждого из них.
+        # 0 = выключено, поведение 1в1 как раньше.
+        "radio_second_hop_artists": 3,
+        "radio_second_hop": 2,
+        # векторный добор: соседи сидов по звуку (тембр + 9-D + CLAP),
+        # а не только по имени жанра. 0 = выключено.
+        "radio_vector": 60,
         # радио-якорь в волне: сколько соседей сида добирать в пул
         "radio_cluster_pool": 300,
     },
@@ -192,7 +201,9 @@ for _k, _lo, _hi in (
         ("arc_on", 0, 1),
         ("flow_passes", 0, 50), ("flow_tempo_window", 5, 200),
         ("radio_similar", 1, 20), ("radio_per_similar", 1, 100),
-        ("radio_server", 0, 100), ("radio_cluster_pool", 0, 2000)):
+        ("radio_server", 0, 100), ("radio_cluster_pool", 0, 2000),
+        ("radio_second_hop_artists", 0, 10), ("radio_second_hop", 0, 10),
+        ("radio_vector", 0, 500)):
     _g2 = ("repeats" if _k in ("fatigue_days", "artist_cap")
            else "character" if _k == "likes_threshold"
            else "skips" if _k in ("behavior_window", "play_long_sec",

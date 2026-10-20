@@ -922,6 +922,7 @@ def wave_seed_start(payload: dict, request: Request, db: Session = Depends(get_d
     return {'ok': True, 'user_id': str(u.id), 'seed': _seed_to_dict(s),
             'playlist_id': str(pl.id), 'tracks': tids, 'items': _items,
             'similar_artists': res.get('similar_artists') or [],
+            'similar_artists_2hop': res.get('similar_artists_2hop') or [],
             'server_used': bool(res.get('server_used')), 'pushed': pushed}
 
 
