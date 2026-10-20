@@ -22,6 +22,7 @@ from app.db.models import (
 )
 from app.services import lyrics as lyrics_svc
 from app.services import lyrics_ai
+from app.services.genre_canon import canon_genre as _canon_genre
 
 logger = get_logger("workers.tasks")
 
@@ -387,7 +388,7 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
             if b_ext not in seen_albums:
                 db.add(Album(server_id=server_id, external_id=b_ext, title=album_name[:512],
                              artist_external_id=a_ext, artist_name=artist_name[:512],
-                             year=tags["year"], genre=(tags["genre"] or "")[:256] or None))
+                             year=tags["year"], genre=_canon_genre(tags["genre"])))
                 seen_albums.add(b_ext)
                 batch_seen.append((seen_albums, b_ext))
                 albums_new += 1
@@ -408,7 +409,7 @@ def _scan_disk_music(run_id: str, server_id: str) -> dict:
                 db.add(Track(id=str(uuid.uuid4()), server_id=server_id, external_id=t_ext,
                              title=title[:1024], artist_external_id=a_ext, artist_name=artist_name[:512],
                              album_external_id=b_ext, album_name=album_name[:512],
-                             genre=(tags["genre"] or "")[:256] or None,
+                             genre=_canon_genre(tags["genre"]),
                              duration_sec=tags["duration_sec"], year=tags["year"],
                              track_no=tags["track_no"], disc_no=tags["disc_no"],
                              bitrate=tags["bitrate"], suffix=suffix, size_bytes=size,
@@ -606,7 +607,7 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                         artist_external_id=base_aid,
                                         artist_name=base_aname,
                                         year=_to_int(alb.get("year")),
-                                        genre=alb.get("genre"),
+                                        genre=_canon_genre(alb.get("genre")),
                                         cover_art_id=alb.get("coverArt"),
                                     )
                                     db2.add(exa)
@@ -614,7 +615,7 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                     exa.title = alname
                                     exa.artist_name = base_aname
                                     exa.year = _to_int(alb.get("year")) or exa.year
-                                    exa.genre = alb.get("genre") or exa.genre
+                                    exa.genre = _canon_genre(alb.get("genre")) or exa.genre
                                     exa.cover_art_id = alb.get("coverArt") or exa.cover_art_id
                             except IntegrityError:
                                 db2.rollback()
@@ -642,7 +643,7 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                         artist_name=aname,
                                         album_external_id=s.get("albumId") or alid,
                                         album_name=s.get("album") or alname,
-                                        genre=s.get("genre"),
+                                        genre=_canon_genre(s.get("genre")),
                                         duration_sec=_to_int(s.get("duration")),
                                         year=_to_int(s.get("year")),
                                         track_no=_to_int(s.get("track")),
@@ -767,7 +768,7 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                             artist_external_id=aid,
                                             artist_name=aname,
                                             year=_to_int(alb.get("year")),
-                                            genre=alb.get("genre"),
+                                            genre=_canon_genre(alb.get("genre")),
                                             cover_art_id=alb.get("coverArt"),
                                         )
                                         db2.add(exa)
@@ -775,7 +776,7 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                         exa.title = alname
                                         exa.artist_name = aname
                                         exa.year = _to_int(alb.get("year")) or exa.year
-                                        exa.genre = alb.get("genre") or exa.genre
+                                        exa.genre = _canon_genre(alb.get("genre")) or exa.genre
                                         exa.cover_art_id = alb.get("coverArt") or exa.cover_art_id
                                 except IntegrityError:
                                     db2.rollback()
@@ -801,7 +802,7 @@ def library_scan(run_id: str, *args, **kwargs) -> dict:
                                             artist_name=s.get("artist") or aname,
                                             album_external_id=s.get("albumId") or alid,
                                             album_name=s.get("album") or alname,
-                                            genre=s.get("genre"),
+                                            genre=_canon_genre(s.get("genre")),
                                             duration_sec=_to_int(s.get("duration")),
                                             year=_to_int(s.get("year")),
                                             track_no=_to_int(s.get("track")),

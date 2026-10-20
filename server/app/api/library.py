@@ -449,30 +449,35 @@ def similar_artists(name: str, limit: int = Query(6, le=12), db: Session = Depen
     """Похожие артисты (раскрытие под кружком как в мобильном).
 
     Порядок как в mobile _fetchSimilarArtists:
-    1) локально по жанрам;
-    2) добивка серверным getSimilarSongs2 (сид — топ-трек артиста);
-    3) fallback — топ по числу треков.
-    Серверный хит по артисту из нашей библиотеки даёт +6, артисты
-    только с сервера прикладываются с cover_art_id (обложка через /api/covers).
+    1) локально по жанрам/кластерам (общая логика с радио — seed_radio);
+    2) добивка серверным getSimilarSongs2 (сид — топ-трек артиста, +6).
+    Фолбека «топ по числу треков» больше нет: он выдавал самых жирных
+    артистов библиотеки за «похожих» (Coldplay у Drowning Pool). Нет
+    сигнала — честно пусто/только серверные, а не враньё.
     """
-    from app.db.models import TrackCluster
-
     if not name:
         return {"items": [], "server_used": False}
-    # топ-жанры артиста
-    grows = (
-        db.query(Track.genre, func.count(Track.id))
-        .filter(Track.artist_name == name, Track.genre.isnot(None))
-        .group_by(Track.genre)
-        .order_by(func.count(Track.id).desc())
-        .limit(3)
-        .all()
-    )
-    genres = [g for g, _ in grows]
-    # сид для серверного similar: топ-трек артиста из Navidrome (не disk/demo)
+    try:
+        from app.services.seed_radio import _similar_artist_names as _sim
+        local = _sim(db, name, limit=limit)
+    except Exception:
+        local = []
+    scores: dict[str, float] = {}
+    for _ln in local:
+        if _ln:
+            scores[_ln] = scores.get(_ln, 0.0) + 10.0
+    # сид для серверного similar: топ-трек артиста из Navidrome (не disk/demo).
+    # Имя — нормализованно: в PG `=` регистрозависим, «drowning pool» иначе
+    # давал пусто и уходил в топ-фолбек.
+    try:
+        from app.services.artist_names import norm_name as _nn
+        _want = _nn(name)
+    except Exception:
+        _want = (name or "").strip().lower()
+    _cmp = func.lower(func.trim(Track.artist_name))
     seed_track = (
         db.query(Track)
-        .filter(Track.artist_name == name)
+        .filter(_cmp == _want)
         .order_by(Track.play_count.desc().nullslast())
         .limit(20)
         .all()
@@ -483,48 +488,10 @@ def similar_artists(name: str, limit: int = Query(6, le=12), db: Session = Depen
         if ext and not ext.startswith(("disk:", "demo-")):
             seed_ext = ext
             break
-    # частые кластеры артиста
-    track_ids = [str(t.id) for t in seed_track]
-    if not track_ids:
-        track_ids = [r[0] for r in db.query(Track.id).filter(Track.artist_name == name).limit(2000).all()]
-        track_ids = [str(x) for x in track_ids]
-    cluster_ids: list[int] = []
-    if track_ids:
-        crows = (
-            db.query(TrackCluster.cluster_id, func.count(TrackCluster.track_id))
-            .filter(TrackCluster.track_id.in_(track_ids))
-            .group_by(TrackCluster.cluster_id)
-            .order_by(func.count(TrackCluster.track_id).desc())
-            .limit(2)
-            .all()
-        )
-        cluster_ids = [c for c, _ in crows]
-    cluster_track_ids: set[str] = set()
-    if cluster_ids:
-        cluster_track_ids = {
-            str(r[0])
-            for r in db.query(TrackCluster.track_id)
-            .filter(TrackCluster.cluster_id.in_(cluster_ids))
-            .limit(5000)
-            .all()
-        }
-    # кандидаты: артисты тех же жанров
-    cand_q = db.query(Track.artist_name, Track.genre, Track.id).filter(
-        Track.artist_name.isnot(None), Track.artist_name != name
-    )
-    if genres:
-        cand_q = cand_q.filter(Track.genre.in_(genres))
-    cand_rows = cand_q.limit(5000).all()
-    from collections import Counter
-
-    scores: Counter = Counter()
-    for aname, g, tid in cand_rows:
-        if not aname:
-            continue
-        if g in genres:
-            scores[aname] += 2
-        if str(tid) in cluster_track_ids:
-            scores[aname] += 3
+    # Локальный скоринг — из общей функции (seed_radio): мягкий матч жанра
+    # по токенам + кластеры + честный пусто-фолбек. Свой велосипед тут
+    # дублировал её баги (точный регистр, точный IN по жанру).
+    # (scores уже набраны выше из local с весом 10.)
 
     # 2) серверный getSimilarSongs2 (как mobile: сид — первый трек жанра)
     server_used = False
@@ -572,17 +539,8 @@ def similar_artists(name: str, limit: int = Query(6, le=12), db: Session = Depen
 
     scored = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     if not scored and not server_only:
-        # 3) fallback: топ по числу треков
-        fb = (
-            db.query(Track.artist_name, func.count(Track.id))
-            .filter(Track.artist_name.isnot(None), Track.artist_name != name)
-            .group_by(Track.artist_name)
-            .order_by(func.count(Track.id).desc())
-            .limit(limit)
-            .all()
-        )
-        names = [r[0] for r in fb if r[0]]
-        return {"items": _artist_entries(db, names), "server_used": False}
+        # Фолбека «топ по числу треков» больше нет — см. докстринг.
+        return {"items": [], "server_used": bool(server_used)}
     names = [n for n, _ in scored[:limit]]
     items = _artist_entries(db, names)
     # добить серверными (которых нет у нас) до limit

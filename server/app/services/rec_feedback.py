@@ -248,18 +248,82 @@ def _pct(num: int, den: int) -> float:
     return round(100.0 * num / den, 1) if den else 0.0
 
 
+def _window_rates(rows: list) -> dict[str, Any]:
+    """Ставки исходов по выборке строк (для тренда: текущее окно vs прошлое)."""
+    total = len(rows)
+    counts: dict[str, int] = {}
+    for r in rows:
+        key = r.outcome or "no_signal"
+        counts[key] = counts.get(key, 0) + 1
+    decided = total - counts.get("no_signal", 0)
+    early = counts.get("early_skip", 0)
+    skip_all = early + counts.get("skipped", 0)
+    by_source: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        b = by_source.setdefault(r.source, {"served": 0, "decided": 0,
+                                            "early_skip": 0, "completed": 0,
+                                            "liked": 0})
+        b["served"] += 1
+        if r.outcome:
+            b["decided"] += 1
+            if r.outcome == "early_skip":
+                b["early_skip"] += 1
+            elif r.outcome == "completed":
+                b["completed"] += 1
+            elif r.outcome == "liked":
+                b["liked"] += 1
+    for b in by_source.values():
+        d = b["decided"]
+        b["early_skip_rate"] = _pct(b["early_skip"], d)
+        b["completion_rate"] = _pct(b["completed"], d)
+        b["like_rate"] = _pct(b["liked"], d)
+    return {"served": total, "decided": decided,
+            "early_skip_rate": _pct(early, decided),
+            "skip_rate": _pct(skip_all, decided),
+            "completion_rate": _pct(counts.get("completed", 0), decided),
+            "like_rate": _pct(counts.get("liked", 0), decided),
+            "by_source": by_source}
+
+
+def _trend_delta(cur: float, prev: float | None) -> float | None:
+    """Дельта в процентных пунктах. Без прошлого окна — None, а не 0."""
+    if prev is None:
+        return None
+    try:
+        return round(float(cur) - float(prev), 1)
+    except (TypeError, ValueError):
+        return None
+
+
 def summary(db, user_id: str | None = None, days: int = 7, source: str | None = None) -> dict[str, Any]:
-    """Агрегаты для дашборда: скипы, дослушивания, лайки + разбивка по причинам."""
+    """Агрегаты для дашборда: скипы, дослушивания, лайки + разбивка по причинам.
+
+    Плюс тренд: то же окно длиной days прямо перед текущим. Дельты — в
+    процентных пунктах (минус = скипов стало меньше = хорошо). Прошлого
+    окна нет (мало истории) — trend None, а не нули: ноль соврал бы,
+    что «всё по нулям».
+    """
     from app.db.models import RecommendationFeedback as _RF
 
     days = max(1, min(365, int(days or 7)))
     since = _utcnow() - timedelta(days=days)
-    q = db.query(_RF).filter(_RF.served_at >= since)
-    if user_id:
-        q = q.filter(_RF.user_id == str(user_id))
-    if source:
-        q = q.filter(_RF.source == str(source))
-    rows = q.all()
+    prev_since = since - timedelta(days=days)
+
+    def _rows(gte, lt=None):
+        q = db.query(_RF).filter(_RF.served_at >= gte)
+        if lt is not None:
+            q = q.filter(_RF.served_at < lt)
+        if user_id:
+            q = q.filter(_RF.user_id == str(user_id))
+        if source:
+            q = q.filter(_RF.source == str(source))
+        try:
+            return q.all()
+        except Exception:
+            return []
+
+    rows = _rows(since)
+    prev_rows = _rows(prev_since, since)
     total = len(rows)
     counts: dict[str, int] = {}
     for r in rows:
@@ -337,7 +401,46 @@ def summary(db, user_id: str | None = None, days: int = 7, source: str | None = 
         "by_source": sorted(by_source.values(), key=lambda x: -x["served"]),
         "by_reason": sorted(by_reason.values(), key=lambda x: -x["served"])[:12],
         "by_score": by_score,
+        # Тренд vs прошлое окно той же длины (п.п.; минус у скипов = лучше).
+        "trend": _build_trend(rows, prev_rows),
     }
+
+
+def _build_trend(rows: list, prev_rows: list) -> dict[str, Any] | None:
+    """Дельты текущего окна к прошлому. Мало истории — None."""
+    try:
+        if not prev_rows:
+            return None
+        cur = _window_rates(rows)
+        prev = _window_rates(prev_rows)
+        if not prev.get("decided"):
+            return None
+        trend: dict[str, Any] = {
+            "served": cur["served"], "prev_served": prev["served"],
+            "decided": cur["decided"], "prev_decided": prev["decided"],
+            "early_skip_rate": _trend_delta(cur["early_skip_rate"],
+                                            prev["early_skip_rate"]),
+            "skip_rate": _trend_delta(cur["skip_rate"], prev["skip_rate"]),
+            "completion_rate": _trend_delta(cur["completion_rate"],
+                                            prev["completion_rate"]),
+            "like_rate": _trend_delta(cur["like_rate"], prev["like_rate"]),
+        }
+        by_src: dict[str, dict[str, Any]] = {}
+        for src, cb in cur["by_source"].items():
+            pb = prev["by_source"].get(src)
+            if not pb or not pb.get("decided"):
+                continue
+            by_src[src] = {
+                "early_skip_rate": _trend_delta(cb["early_skip_rate"],
+                                                pb["early_skip_rate"]),
+                "completion_rate": _trend_delta(cb["completion_rate"],
+                                                pb["completion_rate"]),
+                "like_rate": _trend_delta(cb["like_rate"], pb["like_rate"]),
+            }
+        trend["by_source"] = by_src
+        return trend
+    except Exception:
+        return None
 
 
 def prune(db, keep_days: int = RETENTION_DAYS) -> int:

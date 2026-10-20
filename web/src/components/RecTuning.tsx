@@ -125,6 +125,9 @@ const GROUPS: { id: string; title: string; desc: string; fields: F[] }[] = [
       { key: "neg_weight", label: "Штраф за похожее на дизлайки", kind: "float" },
       { key: "timbre_weight", label: "Вес тембра", hint: "материал трека: гармоника + форма", kind: "float" },
       { key: "knn_weight", label: "Вес k-NN", hint: "похожесть на конкретные играющие треки", kind: "float" },
+      { key: "mood_profile_weight", label: "Вес mood-профиля", hint: "твой звук за 30 дней; пилюля побеждает", kind: "float" },
+      { key: "era_weight", label: "Вес эпохи", hint: "бонус за любимое десятилетие", kind: "float" },
+      { key: "depth", label: "Хиты ↔ дип-каты", hint: "+1 хиты, −1 редкое, 0 нейтрально", kind: "float" },
     ],
   },
   {
@@ -180,6 +183,7 @@ const GROUPS: { id: string; title: string; desc: string; fields: F[] }[] = [
       { key: "radio_second_hop_artists", label: "Радио: раскрыть хоп-1", hint: "сколько похожих раскрывать во 2-й хоп", kind: "int" },
       { key: "radio_second_hop", label: "Радио: 2-й хоп с каждого", hint: "похожие на похожих", kind: "int" },
       { key: "radio_vector", label: "Радио: соседей по звуку", hint: "добор по тембру и 9-D вектору", kind: "int" },
+      { key: "mmr_lambda", label: "MMR: торг за разнообразие", hint: "0 выкл, выше — непохожее выигрывает у сильного дубля", kind: "float" },
       { key: "radio_cluster_pool", label: "Радио: соседей сида в пул", hint: "стиль держится после очереди радио", kind: "int" },
     ],
   },

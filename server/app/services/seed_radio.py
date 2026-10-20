@@ -18,6 +18,10 @@ from sqlalchemy import func
 
 from typing import Any
 
+# Кэш векторного добора: {(сиды, лимит): (ts, [track_id])}, TTL 15 минут
+# (см. _vector_neighbor_pool). Процесс-локально, best-effort.
+_VEC_POOL_CACHE: dict[tuple, tuple[float, list[str]]] = {}
+
 
 def _log_warning(msg: str, *args) -> None:
     try:
@@ -147,6 +151,38 @@ def _artist_top_tracks(db, artist_name: str, limit: int = 200) -> list:
     )
 
 
+def _genre_tokens(g: str) -> set[str]:
+    """Токены жанра для мягкого матча (длина ≥3, мусор вроде «nu» отлетает)."""
+    return {t.strip().lower() for t in
+            str(g or "").replace("/", " ").replace("-", " ").split()
+            if len(t.strip()) >= 3}
+
+
+def _genre_score(seed_g: set[str], seed_toks: set[str], cand: str) -> int:
+    """Вес жанрового совпадения: точное = 2, токен/сабстринг = 1, мимо = 0.
+
+    Сабстринг нужен рваным тегам без пробела: сид «numetal» одним словом
+    иначе не матчится ни с «nu metal», ни с «alternative metal»
+    (токен «metal» ⊂ «numetal»).
+    Порог длины 4 — чтобы «pop» не цеплял «popular», а «rock» — «brock».
+    """
+    _gl = str(cand or "").strip().lower()
+    if not _gl:
+        return 0
+    if _gl in seed_g:
+        return 2
+    if seed_toks:
+        _ct = _genre_tokens(_gl)
+        if _ct & seed_toks:
+            return 1
+        for _t in seed_toks:
+            if len(_t) < 4:
+                continue
+            if _t in _gl or _gl in _t:
+                return 1
+    return 0
+
+
 def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     """Похожие артисты локально: те же жанры (+2), общие кластеры (+3).
 
@@ -182,10 +218,7 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     _seed_g: set[str] = {str(g).strip().lower() for g in genres if str(g).strip()}
     _seed_toks: set[str] = set()
     for _g in _seed_g:
-        for _t in str(_g).replace("/", " ").replace("-", " ").split():
-            _t = _t.strip().lower()
-            if len(_t) >= 3:
-                _seed_toks.add(_t)
+        _seed_toks |= _genre_tokens(_g)
     own_ids = [
         str(r[0])
         for r in db.query(Track.id).filter(cmp_col == self_norm).limit(2000).all()
@@ -225,17 +258,7 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     for aname, g, tid in cand_rows:
         if not aname:
             continue
-        _gl = str(g or "").strip().lower()
-        if _gl and _gl in _seed_g:
-            scores[aname] += 2
-        elif _gl and _seed_toks:
-            _ct = {t for t in _gl.replace("/", " ").replace("-", " ").split()
-                   if len(t.strip()) >= 3}
-            if _ct & _seed_toks:
-                scores[aname] += 1
-        elif not _seed_g:
-            # У сида жанра нет вовсе — не штрафуем, решает кластер.
-            pass
+        scores[aname] += _genre_score(_seed_g, _seed_toks, g)
         if str(tid) in in_cluster:
             scores[aname] += 3
     ranked = [n for n, _ in scores.most_common(limit)]
@@ -243,8 +266,29 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     # самыми играемыми артистами с тем же жанр-токеном, иначе радио
     # схлопывается в 2 артиста. Без жанра у сида — топ по plays.
     if len(ranked) < limit:
+        # Нет вообще никакого сигнала (ни жанра у сида, ни общих кластеров) —
+        # честно возвращаем то, что есть (часто пусто), а не топ библиотеки.
+        # Иначе Linkin Park / Scooter / Coldplay выдавались за «похожих» на
+        # всё подряд, и радио «в стиле Drowning Pool» играло Coldplay.
+        if not _seed_g and not _seed_toks and not in_cluster:
+            _log_warning("similar: у «{}» нет жанра и кластеров — "
+                         "похожих не знаем, топ библиотеки не подсовываем",
+                         artist_name)
+            return ranked[:limit]
         try:
             _have = {norm_name(n) for n in ranked} | {self_norm}
+            # Артисты, делящие кластеры сида: второй шанс после жанра.
+            # Одним запросом, а не N: кто вообще стоит в тех же «полках».
+            _cluster_artists: set[str] = set()
+            if in_cluster:
+                try:
+                    _cluster_artists = {
+                        norm_name(r[0]) for r in
+                        db.query(Track.artist_name).filter(
+                            Track.id.in_(list(in_cluster)[:2000])).all()
+                        if r[0] and norm_name(r[0]) not in _have}
+                except Exception:
+                    _cluster_artists = set()
             _q = (db.query(Track.artist_name, func.count(Track.id))
                   .filter(Track.artist_name.isnot(None), cmp_col != self_norm)
                   .group_by(Track.artist_name)
@@ -252,25 +296,19 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
             for _an, _c in _q.limit(200).all():
                 if not _an or norm_name(_an) in _have:
                     continue
-                if _seed_g or _seed_toks:
-                    # Принимаем только с жанровым пересечением, иначе
-                    # в «похожие» попадёт попса из топа библиотеки.
+                # Принимаем только с жанровым пересечением ИЛИ общим кластером,
+                # иначе в «похожие» попадёт топ библиотеки (LP/Scooter/Coldplay).
+                _ok = norm_name(_an) in _cluster_artists
+                if not _ok and (_seed_g or _seed_toks):
                     _grow = (db.query(Track.genre).filter(
                         func.lower(func.trim(Track.artist_name)) == norm_name(_an),
                         Track.genre.isnot(None)).limit(3).all())
-                    _ok = False
                     for (_gg,) in _grow:
-                        _ggl = str(_gg or "").strip().lower()
-                        if _ggl in _seed_g:
+                        if _genre_score(_seed_g, _seed_toks, _gg) > 0:
                             _ok = True
                             break
-                        _ct2 = {t for t in _ggl.replace("/", " ").replace("-", " ").split()
-                                if len(t.strip()) >= 3}
-                        if _ct2 & _seed_toks:
-                            _ok = True
-                            break
-                    if not _ok:
-                        continue
+                if not _ok:
+                    continue
                 ranked.append(_an)
                 _have.add(norm_name(_an))
                 if len(ranked) >= limit:
@@ -322,9 +360,22 @@ def _vector_neighbor_pool(db, seed_ids: list[str], limit: int = 60,
     Как дёшево: смотрим не всю библиотеку, а случайную выборку играбельных
     (2000), сходство считаем в памяти (numpy, фолбэк — чистый Python).
     Нет анализа у сидов → []. Любая ошибка → [] (радио не должно падать).
+    Кэш по сидам 15 минут: волну докручивают часто, а соседи якоря за
+    четверть часа не протухают — иначе каждый continue это seq-scan + sort.
     """
     if not seed_ids or limit <= 0:
         return []
+    import time as _t
+    _ckey = (tuple(sorted(str(s) for s in seed_ids)[:24]), int(limit))
+    try:
+        _ts, _ids = _VEC_POOL_CACHE.get(_ckey, (0.0, []))
+        if _ts and _t.time() - _ts < 900 and _ids:
+            _ex = set(exclude or set())
+            _hit = [i for i in _ids if i not in _ex]
+            if _hit:
+                return _hit[:max(1, limit)]
+    except Exception:
+        pass
     try:
         from app.db.models import Track, TrackFeatures
         from app.services import flow as _flow
@@ -424,7 +475,17 @@ def _vector_neighbor_pool(db, seed_ids: list[str], limit: int = 60,
         if not _scores:
             return []
         _ranked = sorted(_scores.items(), key=lambda kv: kv[1], reverse=True)
-        return [str(t) for t, _ in _ranked[:max(1, limit)]]
+        _out = [str(t) for t, _ in _ranked[:max(1, limit)]]
+        try:
+            import time as _t2
+            _VEC_POOL_CACHE[_ckey] = (_t2.time(), _out)
+            if len(_VEC_POOL_CACHE) > 200:
+                _old = sorted(_VEC_POOL_CACHE, key=lambda k: _VEC_POOL_CACHE[k][0])[:100]
+                for _k in _old:
+                    _VEC_POOL_CACHE.pop(_k, None)
+        except Exception:
+            pass
+        return _out
     except Exception as e:  # noqa: BLE001 — добор не должен валить радио
         _log_warning("vector pool не собрался: {}", e)
         return []
@@ -830,6 +891,9 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
         else:
             ordered = [_seed_first] + ordered
         ordered = ordered[:n]
+    _log_info("artist_radio: «{}» пул={} итог={} похожие={} хоп2={} srv={}",
+              artist_name, len(pool), len(ordered), similar,
+              similar_2hop, server_used)
     return {
         "tracks": ordered,
         "seed_ids": seed_ids,

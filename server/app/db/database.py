@@ -132,3 +132,22 @@ def init_db() -> None:
         import logging as _lg
 
         _lg.getLogger("db").warning("schema patch не отработал", exc_info=True)
+    # Канон жанров для старых строк: distinct-жанров сотни, UPDATE только
+    # по изменившимся (идемпотентно). Без этого рваные теги прошлых сканов
+    # («numetal» vs «nu metal») вечно ломают похожих артистов.
+    try:
+        from app.services.genre_canon import backfill_genres as _bfg
+
+        db = SessionLocal()
+        try:
+            n = _bfg(db)
+            if n:
+                import logging as _lg2
+
+                _lg2.getLogger("db").info("genre canon backfill: %d правок", n)
+        finally:
+            db.close()
+    except Exception:
+        import logging as _lg3
+
+        _lg3.getLogger("db").warning("genre canon backfill не отработал", exc_info=True)

@@ -15,6 +15,11 @@ MVP-правила (ключи repeats + forgotten_days):
 - forgotten_days (только при auto.playlists): любят старое -> окно уже,
   скипают -> окно шире.
 
+Характер (только при auto.character, шаги маленькие):
+- скипов много -> разболтать (jitter +0.02) и меньше залипать в тот же
+  звук (timbre/knn ×0.9);
+- всё хорошо -> jitter −0.01 (пол не ниже 0, дальше кламп схемы).
+
 Шаги маленькие, кламп — схемой rec_tuning при записи. Холодный старт
 (decided < MIN_DECIDED) -> молчим, пишем skip-причину в историю.
 История per-user — `AppSetting(rec_tuning_auto_log:<id>)`, последние 20:
@@ -167,6 +172,43 @@ def _rules(signals: dict[str, Any], eff: dict[str, dict[str, Any]],
     return patch, reasons
 
 
+def _rules_character(signals: dict[str, Any],
+                     eff: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Патч character-группы + причины. Только jitter и тембр/k-NN.
+
+    Остальные веса характера (clap/skip/era/…) по сигналам недели честно
+    не атрибутируются: непонятно, скипнули из-за звука или из-за трека.
+    Их крутит пользователь руками, авто туда не лезет.
+    """
+    patch: dict[str, dict[str, Any]] = {}
+    reasons: list[str] = []
+    ch = eff.get("character", {})
+
+    def _put(key: str, value: Any) -> None:
+        patch.setdefault("character", {})[key] = value
+
+    early = float(signals.get("early_skip_rate") or 0.0)
+    comp = float(signals.get("completion_rate") or 0.0)
+    if early >= SKIP_HIGH:
+        try:
+            _put("jitter", round(float(ch.get("jitter", 0.12)) + 0.02, 3))
+        except (TypeError, ValueError):
+            pass
+        for k in ("timbre_weight", "knn_weight"):
+            try:
+                _put(k, round(float(ch.get(k, 0.05)) * 0.9, 4))
+            except (TypeError, ValueError):
+                pass
+        reasons.append(f"ранних скипов {early:.0f}%: случайность +, залипание −")
+    elif early <= SKIP_LOW and comp >= COMPLETE_HIGH:
+        try:
+            _put("jitter", round(max(0.0, float(ch.get("jitter", 0.12)) - 0.01), 3))
+            reasons.append(f"всё хорошо (скипы {early:.0f}%): случайность −")
+        except (TypeError, ValueError):
+            pass
+    return patch, reasons
+
+
 def get_log(db, user_id: str) -> list[dict[str, Any]]:
     """История авто-правок юзера (новые первые, до LOG_KEEP)."""
     try:
@@ -213,9 +255,10 @@ def tune_user(db, user_id: str) -> dict[str, Any]:
 
         auto_rep = _rt.is_auto("repeats", db)
         auto_pl = _rt.is_auto("playlists", db)
-        if not auto_rep and not auto_pl:
+        auto_ch = _rt.is_auto("character", db)
+        if not auto_rep and not auto_pl and not auto_ch:
             return {"user_id": uid, "tuned": False,
-                    "skip": "авто выключено (группы repeats/playlists)"}
+                    "skip": "авто выключено (группы repeats/playlists/character)"}
         signals = _signals(db, uid)
         decided = int(signals.get("decided") or 0)
         if decided < MIN_DECIDED:
@@ -241,6 +284,11 @@ def tune_user(db, user_id: str) -> dict[str, Any]:
             if _p:
                 patch["playlists"] = _p
             reasons.extend([x for x in r2 if "забытое" in x])
+        if auto_ch:
+            p3, r3 = _rules_character(signals, eff)
+            for g, sub in p3.items():
+                patch.setdefault(g, {}).update(sub)
+            reasons.extend(r3)
         if not patch:
             entry = {"at": _utcnow().isoformat() + "Z", "tuned": False,
                      "skip": "сигналы в норме — менять нечего",

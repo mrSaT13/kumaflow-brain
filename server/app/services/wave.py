@@ -1338,6 +1338,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
               (prof.get('preferredGenres') or {}).items()}
     pref_a = {str(k): float(v) for k, v in
               (prof.get('preferredArtists') or {}).items()}
+    pref_d = {str(k): float(v) for k, v in
+              (prof.get('preferredDecades') or {}).items()}
 
     # Агрегаты поведения (playCount/replay для novelty, score для behavior)
     agg = _taste._user_track_aggregates(db, user_id)
@@ -1414,6 +1416,30 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             clap_sess = None
     else:
         _cw = 0.0
+
+    # ---- Mood-профиль юзера: его звук за 30 дней (мягкий приор) --------
+    # Треки ближе к центроиду вкуса — чуть выше. Нет истории/анализа —
+    # None, вклад 0, волна 1в1. Пилюля побеждает всегда: она режет пул
+    # жёстким фильтром, профиль лишь выбирает оттенок внутри него.
+    _mpw = _tun_float(tun, 'character', 'mood_profile_weight', 0.04)
+    _prof_cent: dict[str, float] | None = None
+    _prof_rad = MOOD_RADIUS
+    if _mpw > 0:
+        try:
+            from app.services import mood_profile as _mprof
+            _prof = _mprof.get_profile(db, user_id)
+            _pc = (_prof.get("centroid") if isinstance(_prof, dict) else None) or {}
+            if _pc and int(_prof.get("tracks") or 0) >= 5:
+                _prof_cent = {str(k): float(v) for k, v in _pc.items()}
+                try:
+                    _prof_rad = min(max(float(_prof.get("spread") or 0.0) * 2.0,
+                                        0.15), 0.5)
+                except (TypeError, ValueError):
+                    _prof_rad = MOOD_RADIUS
+        except Exception:
+            _prof_cent, _prof_rad = None, MOOD_RADIUS
+    else:
+        _mpw = 0.0
 
     # ---- ПОТОК (этап 3, часть 2): тембр и k-NN ---------------------------
     # Тембр (chroma + форма MFCC) и косинус к КОНКРЕТНЫМ опорным трекам
@@ -1551,6 +1577,9 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
     _srv_star = _tun_float(tun, 'character', 'srv_starred', 0.05)
     _srv_rate = _tun_float(tun, 'character', 'srv_rating', 0.10)
     _neg_w = _tun_float(tun, 'character', 'neg_weight', 0.15)
+    _era_w = _tun_float(tun, 'character', 'era_weight', 0.05)
+    _depth = _tun_float(tun, 'character', 'depth', 0.0)
+    _depth = min(max(_depth, -1.0), 1.0)
     _arm_min = _tun_float(tun, 'character', 'arm_min', -0.16)
     _arm_max = _tun_float(tun, 'character', 'arm_max', 0.16)
     if _arm_min > _arm_max:
@@ -1622,6 +1651,25 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         artist_s = 0.0
         if t.artist_name:
             artist_s = min(max(pref_a.get(str(t.artist_name), 0.0) / 10.0, 0.0), 1.0)
+        # Эпоха: бонус за любимое десятилетие (вес из профиля, как жанр).
+        # Без года у трека — 0, а не штраф: дыры метаданных не наказываем.
+        decade_s = 0.0
+        try:
+            _yr = getattr(t, "year", None)
+            if _yr:
+                _dec = f"{(int(float(_yr)) // 10) * 10}s"
+                decade_s = min(max(pref_d.get(_dec, 0.0) / 10.0, 0.0), 1.0)
+        except (TypeError, ValueError):
+            decade_s = 0.0
+        # Хиты vs дип-каты: depth +1 тянет к заигранному, −1 — к редкому.
+        # Шкала ±0.1: ручка вкуса, а не перекрытие скоринга.
+        depth_c = 0.0
+        if _depth:
+            try:
+                _pop = min(max(float(getattr(t, "play_count", 0) or 0) / 500.0, 0.0), 1.0)
+            except (TypeError, ValueError):
+                _pop = 0.0
+            depth_c = _depth * (_pop - 0.5) * 0.2
         a = agg.get(tid, {})
         behavior = 0.0
         if a:
@@ -1702,6 +1750,15 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         # Настроение лирики (lyrics-AI sentiment): к целевому муд-пресету,
         # иначе — к текущему треку (держать вайб).
         lyr_c = 0.5
+        # Mood-профиль: близость трека к звуку, в котором живёт юзер.
+        # _vec уже учитывает уверенность (свой анализ 1.0, жанровый 0.85).
+        mood_prof_c = 0.0
+        if _prof_cent is not None and _mpw > 0 and _vec:
+            try:
+                _pfit, _ = mood_fit(_vec, _prof_cent, _prof_rad)
+                mood_prof_c = _pfit * _vec_conf
+            except Exception:
+                mood_prof_c = 0.0
         try:
             mv = (f.mood_vector if f is not None and isinstance(
                 getattr(f, "mood_vector", None), dict) else {}) or {}
@@ -1937,7 +1994,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                      _cw * clap_s + mood_b - _skip_w * skip_p +
                      _jit_v +
                      _key_w * key_c + _cluster_w * cluster_c + _lyr_w * lyr_c +
-                     _tw * timbre_c + _knn_w * knn_c)
+                     _tw * timbre_c + _knn_w * knn_c +
+                     _era_w * decade_s + depth_c + _mpw * mood_prof_c)
         # Кламп 0..1 — ТОЛЬКО для показа. Раньше он же был и рангом: сумма
         # потолков (~2.6) упирает в 1.0 почти всю пачку, и порядок решался
         # остатками (то есть порядком обхода пула), а не моделью. Теперь
@@ -1994,7 +2052,10 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                              'mood_arm': round(mood_b, 3),
                              'mood_pen': round(mood_pen, 3),
                              'mood_fit': round(_mfit, 3),
-                             'mood_dist': round(_mdist, 3)}})
+                             'mood_dist': round(_mdist, 3),
+                             'era': round(decade_s, 3),
+                             'depth': round(depth_c, 3),
+                             'mood_prof': round(mood_prof_c, 3)}})
         if t.artist_name:
             used_artists[t.artist_name] = used_artists.get(t.artist_name, 0) + 1
         if t.genre:
@@ -2508,7 +2569,8 @@ def adaptive_count(requested: int, drift: dict | None,
 def select_diverse(ranked: list[dict], n: int, *, artist_cap: int = 2,
                    genre_cap: int | None = None, mood_cap: int | None = None,
                    vec_map: dict[str, dict[str, float]] | None = None,
-                   spread_min: float = 0.0) -> list[dict]:
+                   spread_min: float = 0.0,
+                   mmr_lambda: float = 0.0) -> list[dict]:
     """Отбор пачки с разнообразием вместо «просто топ по скору».
 
     Скоринг умеет штрафовать повтор артиста/жанра, но штраф — это мягко:
@@ -2525,6 +2587,12 @@ def select_diverse(ranked: list[dict], n: int, *, artist_cap: int = 2,
       * разброс по муд-пространству (расстояние < spread_min — «почти дубль»
         по звуку). По умолчанию выключен: признаки valence/energy грубые,
         и близкие значения ещё не означают одинаковый звук.
+      * MMR (`mmr_lambda` 0..1, дефолт 0 = выключен): жадный добор
+        `скор − λ·похожесть_на_уже_выбранные` (артист 0.5 / жанр 0.3 /
+        муд-код 0.2, муд — только без пилюли). В отличие от жёстких капов
+        это мягкий торг: чуть слабый, но непохожий трек выигрывает у чуть
+        сильного дубля. Капы и floor при этом остаются жёсткими рамками —
+        MMR выбирает ВНУТРИ них, а не вместо них.
 
     ГЛАВНОЕ правило: разнообразие НЕ УХУДШАЕТ пачку. Трек под капом
     пропускается, только если есть альтернатива сопоставимого качества
@@ -2602,13 +2670,7 @@ def select_diverse(ranked: list[dict], n: int, *, artist_cap: int = 2,
                 break
         return cnt
 
-    for i, r in enumerate(pool):
-        if len(chosen) >= n:
-            break
-        if _violates(r) or _too_close(r):
-            need = n - len(chosen) - 1
-            if need > 0 and _alts(i + 1, need) >= need:
-                continue
+    def _take(r: dict) -> None:
         chosen.append(r)
         seen.add(id(r))
         a = str(r.get('artist_name') or '')
@@ -2623,6 +2685,63 @@ def select_diverse(ranked: list[dict], n: int, *, artist_cap: int = 2,
         v = vec_map.get(str(r.get('track_id') or '')) or {}
         if v:
             chosen_vecs.append(v)
+
+    try:
+        _lam = min(max(float(mmr_lambda or 0.0), 0.0), 1.0)
+    except (TypeError, ValueError):
+        _lam = 0.0
+
+    if _lam > 0:
+        # MMR-ветка: жадно `скор − λ·похожесть_на_выбранные`. Капы, floor
+        # и guard от тупиков — те же, что в обычном проходе; меняется только
+        # критерий выбора (мягкий торг вместо первого годного по скору).
+        # Муд-член — только без пилюли (mood_cap), как у капов.
+        def _mmr_sim(r: dict) -> float:
+            a = str(r.get('artist_name') or '')
+            g = str(r.get('genre') or '').strip().lower()
+            m = str(r.get('mood_code') or '')
+            s = 0.0
+            for c in chosen:
+                v = 0.0
+                if a and a == str(c.get('artist_name') or ''):
+                    v += 0.5
+                if g and g == str(c.get('genre') or '').strip().lower():
+                    v += 0.3
+                if mood_cap and m and m == str(c.get('mood_code') or ''):
+                    v += 0.2
+                if v > s:
+                    s = v
+            return s
+
+        remaining = list(pool)
+        while len(chosen) < n and remaining:
+            best: dict | None = None
+            best_val = 0.0
+            for r in remaining:
+                if _violates(r) or _too_close(r):
+                    need = n - len(chosen) - 1
+                    if need <= 0:
+                        pass
+                    elif sum(1 for r2 in remaining
+                             if r2 is not r and not _violates(r2)
+                             and not _too_close(r2)) >= need:
+                        continue
+                val = _score(r) - _lam * _mmr_sim(r)
+                if best is None or val > best_val:
+                    best, best_val = r, val
+            if best is None:
+                break
+            remaining.remove(best)
+            _take(best)
+    else:
+        for i, r in enumerate(pool):
+            if len(chosen) >= n:
+                break
+            if _violates(r) or _too_close(r):
+                need = n - len(chosen) - 1
+                if need > 0 and _alts(i + 1, need) >= need:
+                    continue
+            _take(r)
     if len(chosen) < n:
         for r in ranked:
             if len(chosen) >= n:
@@ -3496,8 +3615,42 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                     if t not in played and t not in dis and t != _radio_anchor]
             except Exception:
                 _vec_pool = []
-    _rand_limit = max(1, _pool_limit - len(_radio_pool) - len(_vec_pool))
-    cand = list(_radio_pool) + list(_vec_pool)
+    # Треки артиста якоря — третьим слоем. Без них «В стиле: Drowning Pool»
+    # играло Linkin Park / Scooter / Coldplay: пул (кластер + случайные)
+    # самого артиста мог не содержать вообще, а скоринг по вкусу поднимал топ
+    # библиотеки. Кап 50 — стиль держит, а не топит очередь одним артистом.
+    _anchor_artist_pool: list[str] = []
+    if _radio_anchor:
+        try:
+            _arow = db.query(Track.artist_name).filter(
+                Track.id == _radio_anchor).first()
+            _aname = str((_arow[0] if _arow else "") or "").strip()
+            if _aname:
+                _arows = (db.query(Track.id).filter(
+                    Track.artist_name == _aname)
+                    .order_by(Track.play_count.desc().nullslast())
+                    .limit(50).all())
+                if not _arows:
+                    # Регистр/пробелы: в PG `=` чувствителен, якорь мог прийти
+                    # нормализованным — добираем lower(trim) как в сиде.
+                    try:
+                        from app.services.artist_names import norm_name as _nn2
+                        _awant = _nn2(_aname)
+                        _arows = (db.query(Track.id).filter(
+                            func.lower(func.trim(Track.artist_name)) == _awant)
+                            .order_by(Track.play_count.desc().nullslast())
+                            .limit(50).all())
+                    except Exception:
+                        _arows = []
+                _aexcl = set(played) | set(dis) | set(_radio_pool) | set(_vec_pool)
+                _anchor_artist_pool = [
+                    str(r[0]) for r in _arows
+                    if str(r[0]) not in _aexcl and str(r[0]) != _radio_anchor]
+        except Exception:
+            _anchor_artist_pool = []
+    _rand_limit = max(1, _pool_limit - len(_radio_pool) - len(_vec_pool)
+                     - len(_anchor_artist_pool))
+    cand = list(_radio_pool) + list(_vec_pool) + list(_anchor_artist_pool)
     try:
                 cand += [str(r[0]) for r in
                          q.order_by(func.random()).limit(_rand_limit + skip_n).all()]
@@ -4055,7 +4208,9 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
     _vecs_all = _wave_vectors(fm, meta)
     top = select_diverse(ranked, eff_count, artist_cap=_a_cap,
                          genre_cap=_g_cap, mood_cap=_m_cap,
-                         vec_map=_vecs_own, spread_min=_spread)
+                         vec_map=_vecs_own, spread_min=_spread,
+                         mmr_lambda=_tun_float(_sel_tun, 'playlists',
+                                               'mmr_lambda', 0.1))
     # Финальная страховка на ответе: id + баны артистов + «та же песня».
     # Ловит всё, что просочилось через срез пула (cand[:_score_win]/топ).
     if top and (dis or ban_names):

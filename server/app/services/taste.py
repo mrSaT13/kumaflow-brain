@@ -279,6 +279,17 @@ def _artist_of(db, track_id: str) -> str | None:
     return (t.artist_name or "").strip() or None if t else None
 
 
+def _decade_of(year) -> str | None:
+    """Год -> «2020s». Мусор/пусто/вне диапазона 1930–2030 -> None."""
+    try:
+        y = int(float(year))
+    except (TypeError, ValueError):
+        return None
+    if y < 1930 or y > 2030:
+        return None
+    return f"{(y // 10) * 10}s"
+
+
 def _write_tombstone(db, user_id: str, kind: str, key: str,
                      aux: str | None = None) -> None:
     """Надгробие удаления (разбан/анлайк/снятие дизлайка).
@@ -729,6 +740,11 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
     artist_likes: Counter = Counter()
     artist_plays: Counter = Counter()
     mood_c: Counter = Counter()
+    # Эпоха: любимые десятилетия (по году трека). Без года — мимо счётчиков:
+    # «—»-ведро собрало бы все дыры метаданных и задавило реальные декады.
+    decade_w: Counter = Counter()
+    decade_likes: Counter = Counter()
+    decade_plays: Counter = Counter()
     # Часы/дни уже посчитаны в _user_track_aggregates по тем же строкам
     # PlayEvent, что и aggregate counters. Раньше ради них шёл ещё полный
     # скан PlayEvent. Фолбэк на PlayHistory — если событий нет вовсе.
@@ -754,19 +770,27 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
         # иначе 'Jazz' и 'jazz' не сливаются ни в облаке, ни в обмене
         genre = ((t.genre or "").strip().lower() or "—") if t else "—"
         artist = (t.artist_name or "—") if t else "—"
+        decade = _decade_of(t.year if t else None)
         if a["fav"]:
             genre_w[genre] += 1.0
             artist_w[artist] += 1.0
             genre_likes[genre] += 1
             artist_likes[artist] += 1
             liked_ids.append(tid)
+            if decade:
+                decade_w[decade] += 1.0
+                decade_likes[decade] += 1
         if a["dislike"]:
             genre_w[genre] -= 0.3
             artist_w[artist] -= 0.5
             disliked_ids.append(tid)
+            if decade:
+                decade_w[decade] -= 0.3
         plays = a["plays"] + a["completes"]
         genre_plays[genre] += plays
         artist_plays[artist] += plays
+        if decade:
+            decade_plays[decade] += plays
         genre_w[genre] += a["seek_backs"] * 0.2 - a["abandons"] * 0.1
         artist_w[artist] += a["seek_backs"] * 0.3 - a["abandons"] * 0.2
         f = feat_map.get(tid)
@@ -804,6 +828,9 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
                 "dislikes": artist_dislike_counts.get(an, 0),
                 "banned": an in set(bans)}
                for an, w in artist_w.most_common(40)]
+    decades = [{"name": d, "weight": round(w, 2), "likes": decade_likes.get(d, 0),
+                "plays": decade_plays.get(d, 0)}
+               for d, w in decade_w.most_common(12)]
 
     # подмешиваем слепок с мобилы ×0.5 (волна и плейлисты точнее)
     mobile_snap: dict = {}
@@ -875,12 +902,14 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
         "username": u.username,
         "preferredGenres": {g["name"]: g["weight"] for g in genres},
         "preferredArtists": {a["name"]: a["weight"] for a in artists},
+        "preferredDecades": {d["name"]: d["weight"] for d in decades},
         "likedSongs": liked_ids,
         "dislikedSongs": disliked_ids,
         "bannedArtists": bans,
         "artistDislikeCounts": artist_dislike_counts,
         "genres": genres,
         "artists": artists,
+        "decades": decades,
         "moods": [{"name": m, "count": c} for m, c in mood_c.most_common(12)],
         "hours": hours,
         "days": days,

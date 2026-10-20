@@ -89,6 +89,14 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # ПОТОК (этап 3, часть 2): тембр (chroma+MFCC) и k-NN по эмбеддингам
         "timbre_weight": 0.05,
         "knn_weight": 0.08,
+        # Mood-профиль (services/mood_profile): близость трека к звуку,
+        # в котором живёт юзер за 30 дней. Пилюля побеждает всегда.
+        "mood_profile_weight": 0.04,
+        # Эпоха: бонус за любимое десятилетие (decade-affinity из профиля).
+        "era_weight": 0.05,
+        # Хиты vs дип-каты: +1 тянет к заигранному (высокий play_count),
+        # −1 — к нераскрученному. 0 = нейтрально.
+        "depth": 0.0,
     },
     "skips": {
         # session_drift: N скипов подряд -> mild/moderate/strong
@@ -165,6 +173,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "radio_vector": 60,
         # радио-якорь в волне: сколько соседей сида добирать в пул
         "radio_cluster_pool": 300,
+        # MMR-финал отбора пачки: 0 = выключен (только капы), выше —
+        # сильнее торг «скор vs непохожесть на выбранные». Дефолт мягкий.
+        "mmr_lambda": 0.1,
     },
     "auto": {
         "repeats": False,
@@ -203,7 +214,7 @@ for _k, _lo, _hi in (
         ("radio_similar", 1, 20), ("radio_per_similar", 1, 100),
         ("radio_server", 0, 100), ("radio_cluster_pool", 0, 2000),
         ("radio_second_hop_artists", 0, 10), ("radio_second_hop", 0, 10),
-        ("radio_vector", 0, 500)):
+        ("radio_vector", 0, 500), ("mmr_lambda", 0.0, 1.0)):
     _g2 = ("repeats" if _k in ("fatigue_days", "artist_cap")
            else "character" if _k == "likes_threshold"
            else "skips" if _k in ("behavior_window", "play_long_sec",
@@ -221,6 +232,8 @@ for _k, _lo, _hi in (
         ("mood_arm_min", -1.0, 1.0), ("mood_arm_max", -1.0, 1.0),
         ("neg_weight", 0.0, 1.0), ("bonus_like", -1.0, 1.0),
         ("timbre_weight", 0.0, 1.0), ("knn_weight", 0.0, 1.0),
+        ("mood_profile_weight", 0.0, 1.0),
+        ("era_weight", 0.0, 1.0), ("depth", -1.0, 1.0),
         ("bonus_replay", -1.0, 1.0), ("bonus_complete", -1.0, 1.0),
         ("bonus_play_long", -1.0, 1.0), ("penalty_abandon", -1.0, 1.0),
         ("penalty_skip_early", -1.0, 1.0), ("penalty_skip_late", -1.0, 1.0),
