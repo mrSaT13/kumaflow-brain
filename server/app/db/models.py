@@ -286,6 +286,35 @@ class ArtistBan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ArtistSubscription(Base):
+    """Подписка пользователя на артиста (Library Sync).
+
+    Игрок присылает «следи за артистом» → мозг ретранслирует во внешний
+    сервис-поставщик треков; когда тот сообщает о новых релизах — шлём
+    уведомление подписавшимся.
+    user_id NULL = глобальная подписка (уведомить всех пользователей).
+    artist_external_id — artistId в Navidrome (если известен);
+    provider_artist_id — id артиста на стороне поставщика (для отписки).
+    Матчинг входящих событий — по имени (нормализовано), затем по id.
+    Новая таблица — create_all создаёт сам.
+    """
+
+    __tablename__ = "artist_subscriptions"
+
+    id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
+    user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    artist_name: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    artist_external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    provider_artist_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "artist_name", name="uq_artist_sub"),
+    )
+
+
 class TasteTombstone(Base):
     """Надгробие удалённого вкуса: разбан/анлайк/снятие дизлайка.
 

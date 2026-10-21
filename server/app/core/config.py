@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "KumaFlow Brain"
-    app_version: str = "0.3.26"
+    app_version: str = "0.3.27"
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
     # Часовой пояс «домашнего» времени: границы суток для daily-плейлистов,
@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     # (Настройки → Мост) и хранится в БД; env — только дефолт.
     bridge_url: str = ""
     bridge_enabled: bool = False
+
+    # Library Sync — внешний сервис-поставщик треков (адрес + токен).
+    # Задаётся из веб-UI (Настройки → Library Sync) и хранится в БД;
+    # env — только дефолт для первого запуска.
+    library_sync_url: str = ""
+    library_sync_token: str = ""
 
     # Настоящий аудио-анализ (worker): где лежат файлы и сколько брать за прогон.
     # MUSIC_DIR — та же папка музыки, что у Navidrome (только чтение).

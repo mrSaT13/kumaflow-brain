@@ -98,6 +98,7 @@ export default function SettingsPage() {
   const { data, mutate } = useSWR("/api/settings", () => api.settings());
   const { data: media, mutate: mutateMedia } = useSWR("/api/settings/media-server", () => api.getMediaServer());
   const { data: bridge, mutate: mutateBridge } = useSWR("/api/settings/bridge", () => api.getBridge());
+  const { data: syncCfg, mutate: mutateSync } = useSWR("/api/library-sync/config", () => api.getLibrarySync());
   // Диагностика крона: «работает ли планировщик». Раньше ответ на этот вопрос
   // приходилось искать в логах docker — здесь он сразу на странице.
   const { data: cronHealth } = useSWR("/api/cron/health", () => api.cronHealth(), {
@@ -141,6 +142,11 @@ export default function SettingsPage() {
   const [bridgeEnabled, setBridgeEnabled] = useState(false);
   const [bridgeResult, setBridgeResult] = useState<string | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [syncUrl, setSyncUrl] = useState("");
+  const [syncToken, setSyncToken] = useState("");
+  const [syncEnabled, setSyncEnabled] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
   const toast = useToast();
 
   useEffect(() => {
@@ -157,6 +163,12 @@ export default function SettingsPage() {
     if (bridge.url) setBridgeUrl(bridge.url);
     setBridgeEnabled(Boolean(bridge.enabled));
   }, [bridge]);
+
+  useEffect(() => {
+    if (!syncCfg) return;
+    if (syncCfg.url) setSyncUrl(syncCfg.url);
+    setSyncEnabled(Boolean(syncCfg.enabled));
+  }, [syncCfg]);
 
   useEffect(() => {
     if (!aiCfg?.saved) return;
@@ -300,7 +312,46 @@ export default function SettingsPage() {
     }
   }
 
-  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "tokens" | "auto" | "wave" | "diag" | "yandex" | "about">("connections");
+  async function saveSync() {
+    if (syncEnabled && !syncUrl.trim()) { toast("Укажите адрес сервиса или выключите его", "info"); return; }
+    setSyncBusy(true);
+    setSyncResult(null);
+    try {
+      const body: { url: string; enabled: boolean; token?: string } =
+        { url: syncUrl.trim(), enabled: syncEnabled };
+      if (syncToken.trim()) body.token = syncToken.trim();
+      const r = await api.saveLibrarySync(body);
+      if (!r.ok) { toast(r.error ?? "Ошибка сохранения", "err"); return; }
+      setSyncToken("");
+      await mutateSync();
+      toast("Сохранено ✓", "ok");
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  async function testSync() {
+    setSyncBusy(true);
+    setSyncResult(null);
+    try {
+      const body: { url: string; token?: string } | undefined =
+        syncUrl.trim() ? { url: syncUrl.trim(), ...(syncToken.trim() ? { token: syncToken.trim() } : {}) } : undefined;
+      const r = await api.testLibrarySync(body);
+      if (r.ok) {
+        setSyncResult(`✓ Сервис отвечает${r.version ? ` (v${r.version})` : ""}`);
+      } else {
+        setSyncResult(`✗ Ошибка: ${r.error ?? "неизвестная ошибка"}`);
+      }
+    } catch (e: unknown) {
+      setSyncResult(`✗ Ошибка: ${String(e)}`);
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  const [tab, setTab] = useState<"connections" | "ai" | "bridge" | "sync" | "tokens" | "auto" | "wave" | "diag" | "yandex" | "about">("connections");
   const rt = (data?.runtime ?? {}) as Record<string, unknown>;
 
   return (
@@ -314,9 +365,9 @@ export default function SettingsPage() {
       {(!whoami || whoami.is_admin) && (
       <>
       <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
-        {(["connections", "yandex", "ai", "bridge", "tokens", "auto", "wave", "diag", "about"] as const).map((t) => (
+        {(["connections", "yandex", "ai", "bridge", "sync", "tokens", "auto", "wave", "diag", "about"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm border-b-2 -mb-px whitespace-nowrap ${tab === t ? "border-accent text-text" : "border-transparent text-muted hover:text-text"}`}>
-            {t === "connections" ? "Подключения" : t === "yandex" ? "Яндекс" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : t === "tokens" ? "Токены" : t === "auto" ? "Автоматизация" : t === "wave" ? "Волна" : t === "about" ? "О программе" : "Диагностика"}
+            {t === "connections" ? "Подключения" : t === "yandex" ? "Яндекс" : t === "ai" ? "AI" : t === "bridge" ? "Мост" : t === "sync" ? "Library Sync" : t === "tokens" ? "Токены" : t === "auto" ? "Автоматизация" : t === "wave" ? "Волна" : t === "about" ? "О программе" : "Диагностика"}
           </button>
         ))}
       </div>
@@ -680,6 +731,54 @@ export default function SettingsPage() {
             локально — <code className="kuma-pill">http://localhost:8001</code>.
             Ключ Last.fm задаётся на стороне моста (<code className="kuma-pill">LASTFM_API_KEY</code>),
             без него мост работает только через MusicBrainz.
+          </div>
+        </Card>
+      </Section>
+      }
+
+      {tab === "sync" && <Section title="Library Sync — внешний сервис-поставщик треков">
+        <Card>
+          <div className="text-sm text-muted mb-3">
+            Статус:{" "}
+            <Badge tone={syncCfg?.enabled && syncCfg?.url ? "ok" : "warn"}>
+              {syncCfg?.enabled && syncCfg?.url ? "включён" : "выключен"}
+            </Badge>{" "}
+            {syncCfg?.url && <span className="text-xs">· {syncCfg.url}</span>}
+            {syncCfg?.token_configured && <span className="text-xs"> · токен задан</span>}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Field label="Адрес сервиса *" value={syncUrl} onChange={setSyncUrl} placeholder="http://192.168.1.10:3000" />
+            <Field label="Токен доступа" value={syncToken} onChange={setSyncToken} type="password" placeholder="выпущен на стороне сервиса" />
+            <label className="block">
+              <div className="text-xs text-muted mb-1">Состояние</div>
+              <select
+                className="kuma-input"
+                value={syncEnabled ? "on" : "off"}
+                onChange={(e) => setSyncEnabled(e.target.value === "on")}
+              >
+                <option value="on">Включён</option>
+                <option value="off">Выключен</option>
+              </select>
+            </label>
+          </div>
+          <div className="mt-4 flex gap-2 flex-wrap">
+            <Button onClick={saveSync} disabled={syncBusy}>
+              <Check className="w-4 h-4" /> {syncBusy ? "Сохранение…" : "Сохранить"}
+            </Button>
+            <Button variant="ghost" onClick={testSync} disabled={syncBusy}>
+              <Wifi className="w-4 h-4" /> {syncBusy ? "Проверяю…" : "Проверить сервис"}
+            </Button>
+          </div>
+          {syncResult && (
+            <div className={`mt-3 text-sm p-3 rounded-lg border ${syncResult.startsWith("✓") ? "border-emerald-300 text-emerald-700 bg-emerald-50 dark:bg-emerald-950" : "border-rose-300 text-rose-700 bg-rose-50 dark:bg-rose-950"}`}>
+              {syncResult}
+            </div>
+          )}
+          <div className="text-xs text-muted mt-3">
+            Игрок присылает сюда подписки на артистов — мозг ретранслирует их сервису,
+            а когда тот сообщает о скачанном, мозг добирает треки в библиотеку
+            и уведомляет подписавшихся. Токен вводится один раз и наружу
+            не отдаётся (видно только «задан / не задан»).
           </div>
         </Card>
       </Section>

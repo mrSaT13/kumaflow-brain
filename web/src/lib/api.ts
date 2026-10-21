@@ -782,6 +782,19 @@ export const api = {
   bridgeStatus: () =>
     http<{ enabled: boolean; url: string; reachable: boolean; error?: string }>(`/api/bridge/status`),
 
+  getLibrarySync: () =>
+    http<{ url: string; enabled: boolean; token_configured: boolean }>(`/api/library-sync/config`),
+  saveLibrarySync: (body: { url: string; token?: string; enabled: boolean }) =>
+    http<{ ok: boolean; saved?: Record<string, unknown>; error?: string }>(
+      `/api/library-sync/config`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  testLibrarySync: (body?: { url: string; token?: string }) =>
+    http<{ ok: boolean; error?: string; status?: number; version?: string }>(`/api/library-sync/config/test`, {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
+
   notifications: (limit = 50, all = true) =>
     http<{ notifications: { id: string; user_id?: string | null; kind: string; title: string; body?: string | null; link?: string | null; created_at?: string | null; read_at?: string | null }[] }>(
       `/api/notifications/?limit=${limit}${all ? "&all=true" : ""}`,

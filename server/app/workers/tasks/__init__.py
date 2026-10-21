@@ -2918,3 +2918,224 @@ def weekly_discovery_all(*args, **kwargs):
             _append_log(run_id, "error", str(e))
             _finish_run(run_id, "failure", str(e))
         return {"status": "failure", "error": str(e)}
+
+
+def library_sync_event(payload: dict | None = None) -> dict:
+    """Обработка события от сервиса-поставщика треков (Library Sync).
+
+    download.completed → быстрый скан Navidrome → точечный апсерт треков
+    в БД мозга → уведомления подписавшимся пользователям.
+    Тяжёлая часть (startScan + ожидание + search3) — здесь, в воркере light.
+    """
+    from app.services import library_sync as _ls
+
+    payload = dict(payload or {})
+    event = str(payload.get("event") or "")
+    if event == "test":
+        return {"status": "ok", "echo": "test"}
+    if event != "download.completed":
+        logger.warning("library_sync: неизвестное событие {}", event)
+        return {"status": "ignored", "event": event}
+
+    job_id = str(payload.get("jobId") or "")
+    incoming = payload.get("tracks") or []
+    if not isinstance(incoming, list):
+        incoming = []
+
+    with session_scope() as db:
+        cfg = _ls.get_config(db)
+        if not cfg["enabled"] or not cfg["url"]:
+            return {"status": "disabled"}
+        if job_id and not _ls.record_event(db, job_id):
+            return {"status": "duplicate", "job_id": job_id}
+
+    from app.db.models import Artist, Album
+    from app.services.media_server import get_media_server_config, resolve_active_server
+
+    with session_scope() as db:
+        mcfg = get_media_server_config(db)
+        server_row = resolve_active_server(db)
+        server_id = str(server_row.id)
+    url = (mcfg.get("url") or "").strip()
+    user = (mcfg.get("user") or "").strip()
+    password = (mcfg.get("password") or "")
+    if not url or url in ("http://localhost", "https://localhost"):
+        return {"status": "no_media_server"}
+
+    matched: list[dict] = []
+
+    async def _do():
+        from app.services.navidrome.client import SubsonicClient, SubsonicAuth
+
+        auth = SubsonicAuth(user=user, password=password)
+        async with SubsonicClient(url, auth, timeout=30.0) as client:
+            ok = await client.ping()
+            if not ok:
+                raise RuntimeError("ping failed — проверьте URL/логин/пароль")
+            # быстрый (инкрементальный) скан Navidrome: только изменённые папки
+            try:
+                await client.start_scan(full=False)
+            except Exception as e:
+                logger.warning("library_sync: startScan failed: {}", e)
+            # ждём конца его сканирования (SMB-монт: watcher мог не сработать)
+            import time as _t
+
+            deadline = _t.monotonic() + 180
+            while _t.monotonic() < deadline:
+                try:
+                    st = await client.get_scan_status()
+                except Exception:
+                    break  # старый Navidrome без getScanStatus — идём дальше
+                if not st or str(st.get("scanning")).lower() != "true":
+                    break
+                await _sleep(5)
+            for t in incoming:
+                artist = str(t.get("artist") or "").strip()
+                title = str(t.get("title") or "").strip()
+                if not title:
+                    continue
+                try:
+                    res = await client.search3(f"{artist} {title}".strip(), song_count=10)
+                except Exception as e:
+                    logger.warning("library_sync: search3 failed: {}", e)
+                    continue
+                songs = res.get("song") or []
+                if isinstance(songs, dict):
+                    songs = [songs]
+                song = _pick_song(songs, artist, title)
+                if not song:
+                    logger.warning("library_sync: не найден в библиотеке: {} — {}", artist, title)
+                    continue
+                _upsert_song(server_id, song)
+                matched.append({
+                    "artist": song.get("artist") or artist,
+                    "title": song.get("title") or title,
+                })
+        return matched
+
+    async def _sleep(sec: int):
+        import asyncio as _aio
+
+        await _aio.sleep(sec)
+
+    def _pick_song(songs: list, artist: str, title: str) -> dict | None:
+        want_t = _ls.norm_name(title).replace(" - ", " ")
+        want_a = _ls.norm_name(artist)
+        fallback = None
+        for s in songs:
+            if not isinstance(s, dict) or not s.get("id"):
+                continue
+            if fallback is None:
+                fallback = s
+            st = _ls.norm_name(str(s.get("title") or "")).replace(" - ", " ")
+            sa = _ls.norm_name(str(s.get("artist") or ""))
+            if st == want_t and (not want_a or want_a in sa or sa in want_a):
+                return s
+        return fallback
+
+    def _upsert_song(server_id: str, s: dict) -> None:
+        sid = str(s.get("id"))
+        aid = str(s.get("artistId") or "")
+        aname = str(s.get("artist") or "Unknown")
+        alid = str(s.get("albumId") or "")
+        alname = str(s.get("album") or "Unknown Album")
+        with session_scope() as db2:
+            from sqlalchemy.exc import IntegrityError
+
+            try:
+                if aid:
+                    ex = db2.query(Artist).filter_by(server_id=server_id, external_id=aid).first()
+                    if not ex:
+                        db2.add(Artist(server_id=server_id, external_id=aid, name=aname[:512]))
+                    elif aname:
+                        ex.name = aname[:512]
+                if alid:
+                    exa = db2.query(Album).filter_by(server_id=server_id, external_id=alid).first()
+                    if not exa:
+                        db2.add(Album(
+                            server_id=server_id, external_id=alid, title=alname,
+                            artist_external_id=aid or None, artist_name=aname,
+                            year=_to_int(s.get("year")),
+                            genre=_canon_genre(s.get("genre")),
+                            cover_art_id=s.get("coverArt"),
+                        ))
+                    else:
+                        exa.title = alname
+                        exa.artist_name = aname
+                        exa.year = _to_int(s.get("year")) or exa.year
+                        exa.genre = _canon_genre(s.get("genre")) or exa.genre
+                        exa.cover_art_id = s.get("coverArt") or exa.cover_art_id
+                vals = dict(
+                    title=str(s.get("title") or "Unknown"),
+                    artist_external_id=aid or None,
+                    artist_name=aname,
+                    album_external_id=alid or None,
+                    album_name=alname,
+                    genre=_canon_genre(s.get("genre")),
+                    duration_sec=_to_int(s.get("duration")),
+                    year=_to_int(s.get("year")),
+                    track_no=_to_int(s.get("track")),
+                    disc_no=_to_int(s.get("discNumber")),
+                    bitrate=_to_int(s.get("bitRate")),
+                    suffix=s.get("suffix"),
+                    size_bytes=_to_int(s.get("size")),
+                    content_type=s.get("contentType"),
+                    path=s.get("path"),
+                    cover_art_id=s.get("coverArt"),
+                    starred=_to_bool(s.get("starred")),
+                    play_count=_to_int(s.get("playCount"), 0),
+                    rating=_to_int(s.get("userRating") or s.get("rating")),
+                    last_played_at=_parse_dt(s.get("played") or s.get("lastPlayed")),
+                )
+                ex_t = db2.query(Track).filter_by(server_id=server_id, external_id=sid).first()
+                if not ex_t:
+                    ex_t = Track(id=str(uuid.uuid4()), server_id=server_id, external_id=sid, **vals)
+                    db2.add(ex_t)
+                else:
+                    for k, v in vals.items():
+                        if v is not None:
+                            setattr(ex_t, k, v)
+            except IntegrityError:
+                db2.rollback()
+
+    try:
+        import asyncio
+
+        asyncio.run(_do())
+    except RuntimeError as e:
+        return {"status": "failure", "error": str(e)}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("library_sync_event failed: {}", e)
+        return {"status": "failure", "error": str(e)[:300]}
+
+    # уведомления подписавшимся — группируем по артисту
+    notified = 0
+    try:
+        with session_scope() as db:
+            from app.services.notify import notify as _notify
+
+            by_artist: dict[str, list[str]] = {}
+            for m in matched:
+                by_artist.setdefault(m["artist"], []).append(m["title"])
+            for artist, titles in by_artist.items():
+                subs = _ls.find_subscribers(db, artist)
+                if not subs:
+                    continue
+                body = "\n".join(f"• {t}" for t in titles[:10])
+                if len(titles) > 10:
+                    body += f"\n…и ещё {len(titles) - 10}"
+                body += "\nУже в библиотеке."
+                per_user = {str(r.user_id) for r in subs if r.user_id}
+                for uid in per_user:
+                    if _notify(db, "success", f"«{artist}» — новые треки",
+                               body, user_id=uid, link="/library"):
+                        notified += 1
+                if any(r.user_id is None for r in subs):
+                    if _notify(db, "success", f"«{artist}» — новые треки",
+                               body, user_id=None, link="/library"):
+                        notified += 1
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("library_sync: notify failed: {}", e)
+    return {"status": "success", "job_id": job_id,
+            "matched": len(matched), "notified": notified}

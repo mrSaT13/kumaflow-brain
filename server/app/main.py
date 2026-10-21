@@ -26,6 +26,7 @@ from app.api import (
     now_playing,
     devices,
     sonar,
+    library_sync,
 )
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -195,6 +196,7 @@ def create_app() -> FastAPI:
     app.include_router(cron.router, prefix="/api/cron", tags=["cron"])
     app.include_router(covers.router, prefix="/api/covers", tags=["covers"])
     app.include_router(bridge.router, prefix="/api/bridge", tags=["bridge"])
+    app.include_router(library_sync.router, prefix="/api/library-sync", tags=["library-sync"])
     app.include_router(sonar.router, prefix="/api/sonar", tags=["sonar"])
     app.include_router(now_playing.router, prefix="/api/now-playing", tags=["now-playing"])
     app.include_router(devices.router, prefix="/api/me/devices", tags=["devices"])

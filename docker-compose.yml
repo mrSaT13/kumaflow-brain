@@ -53,6 +53,10 @@ services:
     environment:
       ENV: prod
       LOG_LEVEL: INFO
+      # Library Sync — внешний сервис-поставщик треков (дефолт; основное
+      # задаётся в веб-UI: Настройки → Library Sync, хранится в БД).
+      # LIBRARY_SYNC_URL: http://host.docker.internal:3000
+      # LIBRARY_SYNC_TOKEN: CHANGE_ME_library_sync_token
       # «Домашнее» время: границы суток daily-плейлистов, срабатывание крона,
       # контекст утро/вечер в волне, подписи времени в API.
       # IANA-имя или сдвиг (+4). UTC+4 = Europe/Samara (Самара/Саратов/Ижевск),
@@ -118,6 +122,10 @@ services:
     environment:
       ENV: prod
       LOG_LEVEL: INFO
+      # Тот же Library Sync-дефолт, что у backend (воркер читает настройки из БД,
+      # env — только если в БД пусто).
+      # LIBRARY_SYNC_URL: http://host.docker.internal:3000
+      # LIBRARY_SYNC_TOKEN: CHANGE_ME_library_sync_token
       DB_URL_OVERRIDE: ""
       POSTGRES_HOST: postgres
       POSTGRES_USER: kumaflow
