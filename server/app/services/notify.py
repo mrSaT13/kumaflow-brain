@@ -14,14 +14,16 @@ KINDS = ("info", "success", "warn", "error", "drift", "discovery")
 
 
 def notify(db, kind: str, title: str, body: str | None = None,
-           user_id: str | None = None, link: str | None = None) -> str | None:
+           user_id: str | None = None, link: str | None = None,
+           meta: dict | None = None) -> str | None:
     from app.db.models import Notification
 
     try:
         if kind not in KINDS:
             kind = "info"
         n = Notification(kind=kind, title=title[:512], body=body,
-                         user_id=user_id, link=(link or '')[:512] or None)
+                         user_id=user_id, link=(link or '')[:512] or None,
+                         meta=dict(meta) if meta else None)
         db.add(n)
         db.flush()
         return str(n.id)

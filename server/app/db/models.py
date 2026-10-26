@@ -681,6 +681,9 @@ class Notification(Base):
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     link: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # Структурная нагрузка (плеер её читает, веб игнорирует): для новинок
+    # от подписок — {"tracks": [{id, title, artist, album}]} с id медиа-сервера.
+    meta: Mapped[Optional[dict]] = mapped_column(JSONCol(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 

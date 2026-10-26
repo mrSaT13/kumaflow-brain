@@ -3010,7 +3010,9 @@ def library_sync_event(payload: dict | None = None) -> dict:
                 _upsert_song(server_id, song)
                 matched.append({
                     "artist": song.get("artist") or artist,
+                    "album": song.get("album") or t.get("album") or "",
                     "title": song.get("title") or title,
+                    "external_id": str(song.get("id") or ""),
                 })
         return matched
 
@@ -3109,39 +3111,70 @@ def library_sync_event(payload: dict | None = None) -> dict:
         logger.exception("library_sync_event failed: {}", e)
         return {"status": "failure", "error": str(e)[:300]}
 
-    # уведомления подписавшимся — группируем по артисту
+    # уведомления подписавшимся — группируем по артисту и альбому:
+    # ≥3 треков с одним альбомом = «новый альбом», остальное = «новые треки»
     notified = 0
     try:
         with session_scope() as db:
             from app.services.notify import notify as _notify
 
-            by_artist: dict[str, list[str]] = {}
+            by_artist: dict[str, list[dict]] = {}
             by_provider: dict[str, str] = {}  # каноническое имя -> id поставщика (если прислан)
             for m in matched:
-                by_artist.setdefault(m["artist"], []).append(m["title"])
+                by_artist.setdefault(m["artist"], []).append(m)
             for t in incoming:
                 if isinstance(t, dict):
                     pid = str(t.get("providerArtistId") or t.get("artistId") or "").strip()
                     aname = str(t.get("artist") or "").strip()
                     if pid and aname:
                         by_provider.setdefault(aname, pid)
-            for artist, titles in by_artist.items():
+            for artist, items in by_artist.items():
                 subs = _ls.find_subscribers(db, artist, by_provider.get(artist))
                 if not subs:
                     continue
-                body = "\n".join(f"• {t}" for t in titles[:10])
-                if len(titles) > 10:
-                    body += f"\n…и ещё {len(titles) - 10}"
-                body += "\nУже в библиотеке."
+                album_groups: dict[str, list[dict]] = {}
+                for it in items:
+                    album_groups.setdefault((it.get("album") or "").strip(), []).append(it)
+                # Заметка: (заголовок, текст, треки{id,title,artist} для докачки).
+                notes: list[tuple[str, str, list[dict]]] = []
+                singles: list[dict] = []
+                for album, group in album_groups.items():
+                    if album and len(group) >= 3:
+                        titles = [g["title"] for g in group]
+                        body = "\n".join(f"• {t}" for t in titles[:10])
+                        if len(titles) > 10:
+                            body += f"\n…и ещё {len(titles) - 10}"
+                        body += f"\nТреков: {len(titles)}. Уже в библиотеке."
+                        notes.append((f"«{artist}» — новый альбом «{album}\"", body, group))
+                    else:
+                        singles.extend(group)
+                if singles:
+                    titles = [g["title"] for g in singles]
+                    body = "\n".join(f"• {t}" for t in titles[:10])
+                    if len(titles) > 10:
+                        body += f"\n…и ещё {len(titles) - 10}"
+                    body += "\nУже в библиотеке."
+                    notes.append((f"«{artist}» — новые треки", body, singles))
                 per_user = {str(r.user_id) for r in subs if r.user_id}
-                for uid in per_user:
-                    if _notify(db, "success", f"«{artist}» — новые треки",
-                               body, user_id=uid, link="/library"):
-                        notified += 1
-                if any(r.user_id is None for r in subs):
-                    if _notify(db, "success", f"«{artist}» — новые треки",
-                               body, user_id=None, link="/library"):
-                        notified += 1
+                has_global = any(r.user_id is None for r in subs)
+                for title, body, group in notes[:4]:
+                    tracks_meta = [
+                        {"id": g.get("external_id") or "",
+                         "title": g.get("title") or "",
+                         "artist": artist}
+                        for g in group if g.get("external_id")
+                    ][:50]
+                    meta = {"tracks": tracks_meta} if tracks_meta else None
+                    for uid in per_user:
+                        if _notify(db, "discovery", title,
+                                   body, user_id=uid, link="/library",
+                                   meta=meta):
+                            notified += 1
+                    if has_global:
+                        if _notify(db, "discovery", title,
+                                   body, user_id=None, link="/library",
+                                   meta=meta):
+                            notified += 1
             db.commit()
     except Exception as e:  # noqa: BLE001
         logger.warning("library_sync: notify failed: {}", e)

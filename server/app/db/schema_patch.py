@@ -32,6 +32,9 @@ COLUMNS: list[tuple[str, str, str]] = [
     # Бан по Navidrome-ID артиста (десктоп шлёт пары {id, name}).
     # Nullable: старые именные строки работают как раньше, матчинг — имя ИЛИ id.
     ("artist_bans", "artist_external_id", "VARCHAR(128)"),
+    # Структурная нагрузка уведомлений (треки новинок для докачки плеером).
+    # Nullable: старые строки читаются как раньше, meta отдаётся только где есть.
+    ("notifications", "meta", "JSON"),
 ]
 
 

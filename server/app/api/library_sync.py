@@ -156,6 +156,7 @@ def add_sub(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True,
             "subscription": {"id": str(sub.id), "user_id": sub.user_id,
                              "artist_name": sub.artist_name,
+                             "artist_external_id": sub.artist_external_id,
                              "provider_artist_id": sub.provider_artist_id},
             "provider": provider}
 

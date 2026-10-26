@@ -519,6 +519,52 @@ def _is_non_music_track(title: Any) -> bool:
         return False
 
 
+def drop_non_music_tracks(db, ids: list[str]) -> list[str]:
+    """Выкинуть скиты/интро из очереди. Единая точка для волны, радио
+    и умных плейлистов (раньше фильтр жил только в wave_continue —
+    радио открывалось топом-скитом, а подборки его пропускали).
+
+    Тумблер wave_skip_non_music (дефолт True). Best-effort: выключено,
+    ошибка БД или пустой остаток — возвращаем как было, очередь не рвём.
+    Треки без строки в БД (id не найден) оставляем — судить не по чему.
+    """
+    if not ids:
+        return []
+    try:
+        from app.services import automation as _auto
+
+        if not bool(_auto.get_flags(db).get("wave_skip_non_music", True)):
+            return list(ids)
+    except Exception:
+        pass
+    try:
+        from app.db.models import Track as _T
+
+        uniq = list(dict.fromkeys(str(i) for i in ids if i))
+        titles: dict[str, str] = {}
+        for i in range(0, len(uniq), 500):
+            try:
+                for t in db.query(_T).filter(
+                        _T.id.in_(uniq[i:i + 500])).all():
+                    titles[str(t.id)] = t.title or ""
+            except Exception:
+                break
+        out = [c for c in ids
+               if not (str(c) in titles and
+                       _is_non_music_track(titles[str(c)]))]
+        if len(out) != len(ids):
+            try:
+                from app.core.logging import get_logger as _gl
+
+                _gl("wave").info("non-music filter: {} -> {}",
+                                 len(ids), len(out))
+            except Exception:
+                pass
+        return out if out else list(ids)
+    except Exception:
+        return list(ids)
+
+
 def _meta_ru_ids(db, ids: list) -> set:
     """Кириллический fast-path: треки БЕЗ текстов (нет в Lyrics), но с
     кириллицей в метаданных (артист/название/альбом) считаем русскоязычными.
@@ -2117,6 +2163,10 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
     from datetime import date as _date
 
     cand = [str(c) for c in (candidate_ids or []) if c]
+    if not cand:
+        return []
+    # Скиты/интро — мимо подборок (волна чистилась, а daily/smart — нет).
+    cand = drop_non_music_tracks(db, cand)
     if not cand:
         return []
     n = max(1, min(100, int(n or 30)))
@@ -3801,24 +3851,7 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         pass
     # Немузыкальные треки (скиты/интерлюдии): разговорные вставки в волну
     # не берём — раздражают. Тумблер: Автоматизация → wave_skip_non_music.
-    try:
-        from app.services import automation as _auto
-
-        _skip_nm = bool(_auto.get_flags(db).get("wave_skip_non_music", True))
-    except Exception:
-        _skip_nm = True
-    if _skip_nm and cand:
-        _before_nm = len(cand)
-        cand = [c for c in cand
-                if not (meta.get(c) and _is_non_music_track(meta[c].title))]
-        if len(cand) != _before_nm:
-            try:
-                from app.core.logging import get_logger as _gl
-
-                _gl("wave").info("wave non-music filter: {} -> {} (skit/interlude/intro)",
-                                 _before_nm, len(cand))
-            except Exception:
-                pass
+    cand = drop_non_music_tracks(db, cand)
     # Временный бан жанра из дрейфа (3+ скипа жанра за сессию): только запрос.
     _tmp_genres = set(drift.get("temp_banned_genres") or [])
     if _tmp_genres and cand:

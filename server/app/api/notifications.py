@@ -14,6 +14,10 @@ router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
 
 def _to_dict(n) -> dict:
+    try:
+        meta = dict(n.meta) if isinstance(n.meta, dict) else None
+    except Exception:
+        meta = None
     return {
         "id": str(n.id),
         "user_id": str(n.user_id) if n.user_id else None,
@@ -21,6 +25,7 @@ def _to_dict(n) -> dict:
         "title": n.title,
         "body": n.body,
         "link": n.link,
+        "meta": meta,
         "created_at": n.created_at.isoformat() if n.created_at else None,
         "read_at": n.read_at.isoformat() if n.read_at else None,
     }

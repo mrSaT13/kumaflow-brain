@@ -575,6 +575,14 @@ def track_radio(db, user_id: str, track_ref: str, n: int = 30) -> dict:
     # Дизлайки/баны — мимо. Раньше это делал только artist_radio, и волна по
     # треку могла подсунуть забаненного артиста.
     base = _filter_dislikes_bans(db, user_id, base)
+    # Скиты/интро — мимо очереди (сам сид не трогаем: его выбрал пользователь).
+    try:
+        from app.services import wave as _wave_nm2
+
+        base = [t_ for t_ in _wave_nm2.drop_non_music_tracks(db, base)
+                if t_ != seed_id]
+    except Exception:
+        pass
     base = [t_ for t_ in base if t_ != seed_id][: max(n * 3, n)]
 
     # Общий скоринг волны от центроида сида — как у артиста.
@@ -809,6 +817,19 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
     # Дизлайки/баны — мимо очереди (как cold_start). Общая реализация с
     # волной по треку: правило не должно расходиться между ветками.
     pool = _filter_dislikes_bans(db, user_id, pool)
+
+    # Скиты/интро — мимо радио (волна чистилась, а радио открывалось
+    # топом-скитом: сид-гарантия брала первый трек по прослушиваниям).
+    try:
+        from app.services import wave as _wave_nm
+
+        pool = _wave_nm.drop_non_music_tracks(db, pool)
+        _musical_seeds = set(_wave_nm.drop_non_music_tracks(
+            db, [str(t.id) for t in own[:5]]))
+        if _musical_seeds:
+            seed_ids = [s for s in seed_ids if s in _musical_seeds]
+    except Exception:
+        pass
 
     from app.services import wave as _wave
 
