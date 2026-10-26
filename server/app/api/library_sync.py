@@ -57,12 +57,14 @@ def save_cfg(payload: dict, db: Session = Depends(get_db)):
 @router.post("/config/test", dependencies=[Depends(require_admin)])
 async def test_cfg(payload: dict | None = None, db: Session = Depends(get_db)):
     """Проверить поставщика. Без body — сохранённые настройки."""
-    cfg = payload if payload and payload.get("url") else ls.get_config(db)
-    url = (cfg.get("url") or "").strip()
+    saved = ls.get_config(db)
+    body = payload or {}
+    url = (body.get("url") or saved.get("url") or "").strip()
+    tok = (body.get("token") or "").strip() or (saved.get("token") or "")
     if not url:
         return {"ok": False, "error": "Укажите URL сервиса"}
     try:
-        res = await ls.test_connection(url, cfg.get("token") or "")
+        res = await ls.test_connection(url, tok)
         return {"ok": True, **res}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)[:300]}
@@ -106,10 +108,7 @@ def add_sub(payload: dict, db: Session = Depends(get_db)):
     u = _resolve_user(db, (payload or {}).get("user_id"), (payload or {}).get("username"))
     uid = str(u.id) if u else None
 
-    existing = db.query(ArtistSubscription).filter(
-        ArtistSubscription.user_id == uid,
-        ArtistSubscription.artist_name == artist_name,
-    ).first()
+    existing = ls.find_existing_subscription(db, uid, artist_name)
     sub = existing
     if sub is None:
         sub = ArtistSubscription(user_id=uid, artist_name=artist_name[:512],
@@ -127,17 +126,28 @@ def add_sub(payload: dict, db: Session = Depends(get_db)):
         cfg = ls.get_config(db)
         if cfg["enabled"] and cfg["url"]:
             res = ls.push_subscription(cfg, artist_name)
-            provider = {"ok": True, "skipped": False, "response": res}
-            # запоминаем id на стороне поставщика — пригодится для отписки
+            # Имя поставщика — каноническое: фиксируем его локально вместе с id.
+            # Матчинг ответа — по каноническому ключу, а не точным ==.
             try:
                 subs = (res or {}).get("subs") or []
+                want = ls.canonical_key(artist_name)
                 hit = next((s for s in subs
-                            if str(s.get("artistName") or "") == artist_name), None)
-                if hit and hit.get("artistId"):
-                    sub.provider_artist_id = str(hit["artistId"])[:128]
+                            if ls.canonical_key(str(s.get("artistName") or "")) == want
+                            and str(s.get("artistName") or "")), None)
+                if hit:
+                    if hit.get("artistId"):
+                        sub.provider_artist_id = str(hit["artistId"])[:128]
+                    cname = str(hit.get("artistName") or "").strip()
+                    if cname and cname != sub.artist_name:
+                        sub.artist_name = cname[:512]
                     db.commit()
+                    provider = {"ok": True, "skipped": False, "response": res,
+                                "ambiguous": False}
+                else:
+                    provider = {"ok": False, "skipped": False,
+                                "error": "поставщик не вернул подписку (возможно, неоднозначное имя)"}
             except Exception:
-                pass
+                provider = {"ok": True, "skipped": False, "response": res}
         else:
             provider = {"ok": False, "skipped": True,
                         "error": "Library Sync выключен или не настроен"}
@@ -158,10 +168,7 @@ def remove_sub(payload: dict, db: Session = Depends(get_db)):
         return {"ok": False, "error": "artist_name required"}
     u = _resolve_user(db, (payload or {}).get("user_id"), (payload or {}).get("username"))
     uid = str(u.id) if u else None
-    sub = db.query(ArtistSubscription).filter(
-        ArtistSubscription.user_id == uid,
-        ArtistSubscription.artist_name == artist_name,
-    ).first()
+    sub = ls.find_existing_subscription(db, uid, artist_name)
     provider: dict = {"ok": False, "skipped": True}
     if sub is not None and sub.provider_artist_id:
         try:

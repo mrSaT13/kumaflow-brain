@@ -42,6 +42,21 @@ def norm_name(s: str | None) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def canonical_key(s: str | None) -> str:
+    """Канонический ключ имени — только для скопа Library Sync.
+
+    Строже norm_name: регистр/пунктуация/ё-пробелы схлопываются
+    (AC/DC == AC-DC == ac dc). Библиотечные нормализаторы
+    (artist_names, dedup) не трогаем — у них другой контракт
+    и SQL-предикаты, завязанные на точное lower(trim).
+    """
+    import unicodedata
+
+    t = unicodedata.normalize("NFKC", s or "").lower()
+    t = re.sub(r"[^a-zа-я0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def get_config(db: Session) -> dict[str, Any]:
     """Сначала AppSetting.library_sync (сохранено из веб-UI), иначе env."""
     row = db.get(AppSetting, KEY)
@@ -61,9 +76,18 @@ def get_config(db: Session) -> dict[str, Any]:
 
 
 def save_config(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    # Токен меняем только если ключ прислан явно; пустая форма = оставить прежний.
+    prev_token = ""
+    prev = db.get(AppSetting, KEY)
+    if prev is not None and isinstance(prev.value, dict):
+        prev_token = (prev.value.get("token") or "").strip()
+    if "token" in payload:
+        token = (payload.get("token") or "").strip()
+    else:
+        token = prev_token
     value = {
         "url": _norm_url(payload.get("url")),
-        "token": (payload.get("token") or "").strip(),
+        "token": token,
         "enabled": bool(payload.get("enabled", False)),
     }
     row = db.get(AppSetting, KEY)
@@ -158,10 +182,41 @@ def record_event(db: Session, job_id: str) -> bool:
     return True
 
 
-def find_subscribers(db: Session, artist_name: str) -> list[ArtistSubscription]:
-    """Все подписки на артиста: точное имя (case-insensitive)."""
-    name = norm_name(artist_name)
-    if not name:
+def find_subscribers(db: Session, artist_name: str,
+                     provider_artist_id: str | None = None) -> list[ArtistSubscription]:
+    """Все подписки на артиста: сначала по id поставщика, затем по имени.
+
+    Имя сравниваем по canonical_key, со старым norm_name как фолбэком —
+    строки, сохранённые до ужесточения ключа, продолжают находиться.
+    """
+    if provider_artist_id:
+        rows = db.query(ArtistSubscription).filter(
+            ArtistSubscription.provider_artist_id == str(provider_artist_id)).all()
+        if rows:
+            return rows
+    key = canonical_key(artist_name)
+    legacy = norm_name(artist_name)
+    if not key and not legacy:
         return []
     rows = db.query(ArtistSubscription).all()
-    return [r for r in rows if norm_name(r.artist_name) == name]
+    out = []
+    for r in rows:
+        if key and canonical_key(r.artist_name) == key:
+            out.append(r)
+        elif legacy and norm_name(r.artist_name) == legacy:
+            out.append(r)
+    return out
+
+
+def find_existing_subscription(db: Session, user_id: str | None,
+                               artist_name: str) -> ArtistSubscription | None:
+    """Дубль подписки того же юзера: сверка по каноническому ключу имени."""
+    key = canonical_key(artist_name)
+    legacy = norm_name(artist_name)
+    q = db.query(ArtistSubscription).filter(ArtistSubscription.user_id == user_id)
+    for r in q.all():
+        if key and canonical_key(r.artist_name) == key:
+            return r
+        if legacy and norm_name(r.artist_name) == legacy:
+            return r
+    return None

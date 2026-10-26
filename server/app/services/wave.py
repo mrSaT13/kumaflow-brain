@@ -2303,6 +2303,21 @@ def rerank_pool(db, user_id: str, candidate_ids: list[str], *,
                 settings_eff["mood"] = _am
     except Exception:
         pass
+    # Холодный слушатель (нет сидов вкуса и свежих событий): пул общий для
+    # всех, базовые скоры равны — без сдвига окна все холодные получают один
+    # и тот же набор (джиттер лишь тасует внутри). Поворачиваем окно выборки
+    # по стабильному хешу юзера: наборы разные, тёплых не трогаем вообще.
+    if not _seeds and not recent_events and len(cand) > n:
+        try:
+            import hashlib as _hl
+
+            _off = int.from_bytes(
+                _hl.sha256(f"{user_id}:{kind or 'pool'}".encode()).digest()[:4],
+                "big") % len(cand)
+            if _off:
+                cand = cand[_off:] + cand[:_off]
+        except Exception:
+            pass
     ranked = score_candidates(
         db, user_id, cand[:_score_win], _seeds, settings_eff, recent_events,
         collab_scores, current_hour=_hour,

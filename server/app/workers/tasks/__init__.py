@@ -2420,6 +2420,7 @@ def smart_playlists(*args, **kwargs):
                             id=str(_uuid.uuid4()), server_id=u.server_id,
                             owner_user_id=u.id,
                             name=f"{label} · {today.isoformat()}",
+                            comment=f"для {u.username}",
                             is_auto_generated=True,
                             generated_for_date=datetime.combine(
                                 today, datetime.min.time()))
@@ -3115,10 +3116,17 @@ def library_sync_event(payload: dict | None = None) -> dict:
             from app.services.notify import notify as _notify
 
             by_artist: dict[str, list[str]] = {}
+            by_provider: dict[str, str] = {}  # каноническое имя -> id поставщика (если прислан)
             for m in matched:
                 by_artist.setdefault(m["artist"], []).append(m["title"])
+            for t in incoming:
+                if isinstance(t, dict):
+                    pid = str(t.get("providerArtistId") or t.get("artistId") or "").strip()
+                    aname = str(t.get("artist") or "").strip()
+                    if pid and aname:
+                        by_provider.setdefault(aname, pid)
             for artist, titles in by_artist.items():
-                subs = _ls.find_subscribers(db, artist)
+                subs = _ls.find_subscribers(db, artist, by_provider.get(artist))
                 if not subs:
                     continue
                 body = "\n".join(f"• {t}" for t in titles[:10])
