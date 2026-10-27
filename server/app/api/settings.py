@@ -1,15 +1,35 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.auth import require_admin
+from app.core.auth import require_admin, require_brain_auth
 from app.db import get_db
 from app.db.models import AppSetting
 from app.services import ai
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+
+# Тюнинг рекомендаций отдельно от require_admin: свой оверлей
+# (user_id == владелец токена) плеер правит сам, без админа.
+# Глобал без user_id — по-прежнему только админ.
+tuning_router = APIRouter(dependencies=[Depends(require_brain_auth)])
+
+
+def _tuning_write_allowed(request: Request, user_id: str | None) -> None:
+    """403, если не-админ лезет в глобал или чужой оверлей."""
+    info = getattr(request.state, "brain_token", None)
+    if info is None:
+        return  # auth выключен — доверенная LAN
+    if info.get("is_admin"):
+        return
+    owner = info.get("owner_user_id")
+    scopes = set(info.get("scopes") or [])
+    if (user_id and owner and str(owner) == str(user_id)
+            and ("sync" in scopes or "admin" in scopes)):
+        return
+    raise HTTPException(403, "rec-tuning: можно менять только свой overlay (или нужен admin)")
 
 
 @router.get("", include_in_schema=False)
@@ -333,7 +353,7 @@ def save_automation(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True, "flags": flags}
 
 
-@router.get("/rec-tuning")
+@tuning_router.get("/rec-tuning")
 def get_rec_tuning(user_id: str | None = None, db: Session = Depends(get_db)):
     """Тюнинг рекомендаций: дефолты (=константы кода), сырое из БД, итог.
 
@@ -373,12 +393,14 @@ def get_rec_tuning(user_id: str | None = None, db: Session = Depends(get_db)):
             "effective": _rt.get_all(db, user_id)}
 
 
-@router.put("/rec-tuning")
-def save_rec_tuning(payload: dict, db: Session = Depends(get_db)):
+@tuning_router.put("/rec-tuning")
+def save_rec_tuning(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Сохранить тюнинг рекомендаций: {user_id?, group: {key: value}}.
 
-    Без user_id — пишет глобал (рамки для всех). С user_id — личный
-    оверлей слушателя (проверяем, что юзер существует). Неизвестные
+    Без user_id — пишет глобал (рамки для всех, только админ).
+    С user_id — личный оверлей слушателя: админ или владелец токена
+    со скоупом sync (плеер правит свои era/depth сам).
+    Проверяем, что юзер существует. Неизвестные
     группы/ключи молча отбрасываются, известные — клампятся
     в допустимые диапазоны (см. services/rec_tuning.py).
     `{"reset": true}` — сброс scope к дефолтам (строка в БД удаляется).
@@ -387,6 +409,7 @@ def save_rec_tuning(payload: dict, db: Session = Depends(get_db)):
 
     body = dict(payload or {})
     user_id = body.pop("user_id", None) or None
+    _tuning_write_allowed(request, str(user_id) if user_id else None)
     if user_id is not None:
         from app.db.models import MediaUser
 

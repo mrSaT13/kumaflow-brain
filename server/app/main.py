@@ -181,6 +181,7 @@ def create_app() -> FastAPI:
 
     app.include_router(status.router, prefix="/api", tags=["status"])
     app.include_router(settings_api.router, prefix="/api/settings", tags=["settings"])
+    app.include_router(settings_api.tuning_router, prefix="/api/settings", tags=["settings"])
     app.include_router(library.router, prefix="/api/library", tags=["library"])
     app.include_router(tracks.router, prefix="/api/tracks", tags=["tracks"])
     app.include_router(scan.router, prefix="/api/scan", tags=["scan"])
