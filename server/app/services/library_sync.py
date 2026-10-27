@@ -76,15 +76,13 @@ def get_config(db: Session) -> dict[str, Any]:
 
 
 def save_config(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
-    # Токен меняем только если ключ прислан явно; пустая форма = оставить прежний.
+    # Токен меняем только на непустой: веб-UI пустое поле вообще не шлёт,
+    # но и явный "" от других клиентов сохранённый токен не затирает.
     prev_token = ""
     prev = db.get(AppSetting, KEY)
     if prev is not None and isinstance(prev.value, dict):
         prev_token = (prev.value.get("token") or "").strip()
-    if "token" in payload:
-        token = (payload.get("token") or "").strip()
-    else:
-        token = prev_token
+    token = (payload.get("token") or "").strip() or prev_token
     value = {
         "url": _norm_url(payload.get("url")),
         "token": token,

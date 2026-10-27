@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -532,6 +532,51 @@ def taste_profile(user_id: str, top_n: int = 50, db: Session = Depends(get_db)):
 
     _require_user(db, user_id)
     return _taste.user_profile(db, user_id, top_n=max(1, min(200, top_n)))
+
+
+@router.get("/{user_id}/favorite-artists")
+def user_favorite_artists(
+    user_id: str,
+    limit: int = Query(2000, le=5000),
+    db: Session = Depends(get_db),
+):
+    """Все артисты по лайкам пользователя (для автоподписок загрузчика).
+
+    Полный список без потолка top-40 из /profile: {name, likes},
+    сортировка likes по убыванию, при равенстве — по имени.
+    Дубли регистра/пунктуации схлопываются (AC/DC == AC-DC == ac dc).
+    """
+    from collections import Counter
+
+    from app.db.models import Favorite, Track
+    from app.services.library_sync import canonical_key as _canon
+
+    u = _require_user(db, user_id)
+    lim = max(1, min(int(limit or 2000), 5000))
+    rows = (
+        db.query(Track.artist_name)
+        .join(Favorite, Favorite.track_id == Track.id)
+        .filter(Favorite.user_id == str(u.id), Track.artist_name.isnot(None))
+        .all()
+    )
+    counts: dict[str, int] = {}
+    spellings: dict[str, Counter] = {}
+    for (name,) in rows:
+        raw = (name or "").strip()
+        if not raw:
+            continue
+        key = _canon(raw) or raw.lower()
+        counts[key] = counts.get(key, 0) + 1
+        spellings.setdefault(key, Counter())[raw] += 1
+    items: list[dict] = []
+    for key, cnt in counts.items():
+        freq = spellings[key].most_common()
+        top_n = freq[0][1]
+        shown = sorted(n for n, c in freq if c == top_n)[0]
+        items.append({"name": shown, "likes": cnt})
+    items.sort(key=lambda d: (-d["likes"], d["name"]))
+    artists = items[:lim]
+    return {"user_id": str(u.id), "total": len(artists), "artists": artists}
 
 
 @router.post("/{user_id}/sync-from-mobile")

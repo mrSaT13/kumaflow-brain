@@ -108,3 +108,34 @@ def test_record_event_dedupe_and_subscribers():
         assert ls.find_subscribers(db, "Аквариум") == []
     finally:
         db.close()
+
+
+def test_save_config_keeps_token_on_empty_form():
+    """Регрессия 0.3.28: пустое поле токена не затирает сохранённый.
+
+    Веб-UI ключ вообще не шлёт, но и явный "" от других клиентов
+    токен убивать не должен. Проверка соединения подхватывает
+    сохранённый токен (см. test_cfg: body.token or saved.token).
+    """
+    db = SessionLocal()
+    try:
+        ls.save_config(db, {"url": "http://srv:3000", "token": "secret123",
+                            "enabled": True})
+        # форма без ключа — как шлёт веб при пустом поле
+        v = ls.save_config(db, {"url": "http://srv:3000", "enabled": True})
+        assert v["token"] == "secret123"
+        # явный пустой токен — тоже не затирает
+        v = ls.save_config(db, {"url": "http://srv:3000", "token": "",
+                                "enabled": True})
+        assert v["token"] == "secret123"
+        assert ls.get_config(db)["token"] == "secret123"
+        # наружу токен не отдаётся
+        masked = ls.masked_config(db)
+        assert masked["token_configured"] is True
+        assert "token" not in masked
+        # новый токен — меняется как раньше
+        v = ls.save_config(db, {"url": "http://srv:3000", "token": "new456",
+                                "enabled": True})
+        assert v["token"] == "new456"
+    finally:
+        db.close()
