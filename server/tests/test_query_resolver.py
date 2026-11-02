@@ -274,6 +274,27 @@ def test_resolve_finds_track_by_cyrillic_title():
         db.close()
 
 
+def test_resolve_voice_phrases_for_track():
+    """ASR коверкает название: «включи лусе юрселф» → трек «Lose Yourself».
+
+    Сравнение должно быть слово к слову (и с чисткой глаголов-паразитов),
+    иначе «Lose Yourself — Eminem» одной строкой не находится."""
+    _seed_track()
+    db = SessionLocal()
+    try:
+        cases = ("лусе юрселф", "включи лусе юрселф", "лус юарсэлф",
+                 "эминем лусе юрселф")
+        for q in cases:
+            res = qr.resolve(q, db, kind="any", top_k=5)
+            best = res["best"]
+            assert best is not None, f"{q}: не понял"
+            assert best["title"] == "Lose Yourself", f"{q}: {best}"
+            assert best["sub"] == "Eminem", f"{q}: {best}"
+            assert qr.is_confident(res), f"{q}: неуверенно ({best['score']})"
+    finally:
+        db.close()
+
+
 def test_resolve_track_candidate_has_raw_title_and_sub():
     """Клиент ищет по названию в каталоге — ему нужно «чистое» имя,
     а «Название — Исполнитель» остаётся показом для человека."""
@@ -286,6 +307,19 @@ def test_resolve_track_candidate_has_raw_title_and_sub():
         assert best["title"] == "Lose Yourself"
         assert best["sub"] == "Eminem"
         assert "Eminem" in best["name"]  # name по-прежнему показ человеку
+    finally:
+        db.close()
+
+
+def test_unrelated_song_is_not_matched():
+    """Мусор («отдыхай», «таймер на пять минут») не должен находить ничего."""
+    _seed_track()
+    db = SessionLocal()
+    try:
+        for q in ("отдыхай", "таймер на пять минут"):
+            res = qr.resolve(q, db, kind="any", top_k=5)
+            best = res["best"]
+            assert best is None or not qr.is_confident(res), f"{q}: {best}"
     finally:
         db.close()
 

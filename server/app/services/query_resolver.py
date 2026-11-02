@@ -48,6 +48,58 @@ ALIAS_FUZZY_MIN = 0.88
 _LIB_CACHE_TTL = 120.0
 _lib_cache: dict[str, Any] = {"ts": 0.0, "index": {}}
 
+# Слова-паразиты ассистента: ASR их шлёт вместе с названием («включи лусе
+# юрселф»), и без чистки они ломают сравнение слово к слову.
+FILLER_WORDS = frozenset({
+    "включи", "поставь", "запусти", "послушай", "зацени", "накинь",
+    "давай", "ну", "пожалуйста", "эй", "привет", "трек", "песню",
+    "композицию", "play", "please",
+})
+
+
+def _word_score(qt: str, ntw: str) -> float:
+    """Оценка одного слова запроса против одного слова названия (0..1)."""
+    if qt == ntw:
+        return SCORE_WORD
+    qf, nf = phonetic_key(qt), phonetic_key(ntw)
+    if qf and qf == nf:
+        return SCORE_PHONETIC
+    # утратив пробел: «сэлф» внутри «yourself»
+    if qf and len(qf) >= 3 and len(qf) < len(nf) and qf in nf:
+        return 0.85
+    sim = similarity(qt, ntw)
+    if sim >= 0.85:
+        return 0.60 + 0.35 * sim
+    if sim >= 0.70:
+        return 0.45 + 0.30 * sim
+    return 0.0
+
+
+def _tokens_score(query: str, name: str) -> tuple[float, str]:
+    """Слово к слову: квадрант запроса против квадранта названия.
+
+    ASR теряет и добавляет пробелы («луз юр сэлф», «включи лусе юрселф»),
+    поэтому целую фразу такому запросу не спасти. Сравниваем каждое слово
+    запроса с каждым словом названия (после транслита), паразитов — выкидываем.
+    """
+    qwords = [tok for tok in query.split()
+              if tok not in FILLER_WORDS and len(tok) >= 3]
+    nwords = [word for word in name.split() if word]
+    if not qwords or not nwords:
+        return 0.0, ""
+    total = 0.0
+    for tok in qwords:
+        tt = translit_ru_en(tok)
+        best = 0.0
+        for word in nwords:
+            best = max(best, _word_score(tt, translit_ru_en(word)))
+        total += best
+    avg = total / len(qwords)
+    if avg >= 0.70:
+        return round(avg, 4), ("совпадение по словам" if avg >= 0.85
+                               else "слова похожи")
+    return 0.0, ""
+
 
 def score_pair(query: str | None, name: str | None) -> tuple[float, str]:
     """Оценка «похожести» запроса на имя. Возвращает (score, причина).
@@ -87,6 +139,13 @@ def score_pair(query: str | None, name: str | None) -> tuple[float, str]:
                 return SCORE_WORD, "совпадение по слову"
             if tt and nt.startswith(tt) and len(tt) >= 4:
                 return SCORE_WORD - 0.05, "совпадение по слову"
+
+    # ASR редко шлёт название ровно: «включи лусе юрселф» — меж морфема затесался
+    # глагол, и пробелы потерялись («луз юр сэлф»). Сравниваем слово к слову:
+    # в каком запросе — титульные слова, и наоборот.
+    score, why = _tokens_score(q, nt)
+    if score:
+        return score, why
 
     return 0.0, ""
 
