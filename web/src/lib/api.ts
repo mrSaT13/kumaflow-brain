@@ -857,13 +857,14 @@ export const api = {
   resolveImport: (text: string, kind = "artist") =>
     http<{ ok: boolean; added: { alias: string; target: string }[]; failed: string[]; parsed: number; count: number }>(
       `/api/resolve/import`, { method: "POST", body: JSON.stringify({ text, kind }) }),
-  resolveQuery: (q: string, kind = "artist", topK = 5) =>
+  // «any»: проба должна показывать и треки, и альбомы — как понимает станция.
+  resolveQuery: (q: string, kind = "any", topK = 5) =>
     http<{
       ok: boolean; query: string; reason: string; confident: boolean;
       best: ResolveCandidate | null;
       candidates: ResolveCandidate[];
     }>(`/api/resolve/query`, { method: "POST", body: JSON.stringify({ q, kind, top_k: topK, source: "manual" }) }),
-  resolveSuggest: (q: string, kind = "artist", topK = 3) =>
+  resolveSuggest: (q: string, kind = "any", topK = 3) =>
     http<{ ok: boolean; query: string; kind: string; reason: string; suggestions: ResolveCandidate[] }>(
       `/api/resolve/suggest`, { method: "POST", body: JSON.stringify({ q, kind, top_k: topK }) }),
   resolveSuggestions: (status = "open") =>
@@ -891,6 +892,8 @@ export type ResolveMiss = {
 export type ResolveCandidate = {
   name: string; external_id?: string; score: number; why: string;
   kind?: string; source?: string;
+  /** Чистое название (без «— Исполнитель») — им и ищем в каталоге. */
+  title?: string; sub?: string;
 };
 
 export type ApiToken = {

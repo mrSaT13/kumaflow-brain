@@ -19,6 +19,16 @@ const SOURCE_TONE: Record<string, "ok" | "warn" | "info" | "default"> = {
   confirmed: "ok",
 };
 
+const KIND_LABELS: Record<string, string> = {
+  artist: "артист",
+  track: "трек",
+  album: "альбом",
+};
+
+function kindLabel(kind?: string): string {
+  return KIND_LABELS[kind ?? ""] ?? "вид?";
+}
+
 export default function ResolvePage() {
   const toast = useToast();
   const { data: aliasData, mutate: reloadAliases } = useSWR(
@@ -395,7 +405,7 @@ export default function ResolvePage() {
               <span className="text-xs uppercase tracking-wider text-muted">Что услышала колонка</span>
               <Input
                 value={probe}
-                placeholder="эминем"
+                placeholder="эминем или лусе юрселф"
                 onChange={(e) => setProbe(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") runProbe();
@@ -417,7 +427,11 @@ export default function ResolvePage() {
               {probeResult.best ? (
                 <>
                   <div>
-                    Понял как: <span className="font-semibold">{probeResult.best.name}</span>{" "}
+                    Понял как: <span className="font-semibold">{probeResult.best.title ?? probeResult.best.name}</span>{" "}
+                    {probeResult.best.sub && (
+                      <span className="text-muted">· {probeResult.best.sub}</span>
+                    )}{" "}
+                    <Badge tone="info">{kindLabel(probeResult.best.kind)}</Badge>{" "}
                     <Badge tone={probeResult.confident ? "ok" : "warn"}>
                       {probeResult.confident ? "уверенно" : "неуверенно"}
                     </Badge>{" "}
@@ -427,7 +441,10 @@ export default function ResolvePage() {
                     <ul className="mt-2 text-muted space-y-1">
                       {probeResult.candidates.slice(1, 5).map((c, i) => (
                         <li key={`${c.name}-${i}`}>
-                          {c.name} — {c.why} ({Math.round(c.score * 100)}%)
+                          {c.title ?? c.name}
+                          {c.sub ? ` · ${c.sub}` : ""}{" "}
+                          <Badge tone="info">{kindLabel(c.kind)}</Badge>{" "}
+                          — {c.why} ({Math.round(c.score * 100)}%)
                         </li>
                       ))}
                     </ul>
