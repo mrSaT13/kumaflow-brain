@@ -108,6 +108,14 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # behaviorBonus: окно последних событий + таблица
         "behavior_window": 10,
         "bonus_like": 0.2,
+        # якорь свежего лайка: тот же артист/жанр в следующей пачке вверх;
+        # окно часов, в котором Favorite считается свежим
+        "bonus_like_artist": 0.15,
+        "bonus_like_genre": 0.1,
+        "bonus_like_vibe": 0.2,
+        "like_anchor_hours": 24,
+        # ранний скип: тот же жанр сразу вниз (не ждать 3 скипов под бан)
+        "penalty_skip_genre": 0.1,
         "bonus_replay": 0.25,
         "bonus_complete": 0.2,
         "bonus_play_long": 0.1,
@@ -202,6 +210,7 @@ for _k, _lo, _hi in (
         ("fatigue_days", 1, 90), ("artist_cap", 1, 20),
         ("likes_threshold", 1, 10000), ("behavior_window", 1, 100),
         ("play_long_sec", 10, 3600), ("skip_early_sec", 5, 300),
+        ("like_anchor_hours", 0, 720),
         ("skip_late_sec", 30, 3600), ("forgotten_days", 1, 3650),
         ("sport_bpm_min", 60, 220), ("pool_limit", 100, 10000),
         ("score_window", 50, 2000), ("collab_extra", 0, 1000),
@@ -218,7 +227,8 @@ for _k, _lo, _hi in (
     _g2 = ("repeats" if _k in ("fatigue_days", "artist_cap")
            else "character" if _k == "likes_threshold"
            else "skips" if _k in ("behavior_window", "play_long_sec",
-                                  "skip_early_sec", "skip_late_sec")
+                                  "skip_early_sec", "skip_late_sec",
+                                  "like_anchor_hours")
            else "playlists")
     _SCHEMA[(_g2, _k)] = ("int", _lo, _hi)
 for _k, _lo, _hi in (
@@ -237,6 +247,8 @@ for _k, _lo, _hi in (
         ("bonus_replay", -1.0, 1.0), ("bonus_complete", -1.0, 1.0),
         ("bonus_play_long", -1.0, 1.0), ("penalty_abandon", -1.0, 1.0),
         ("penalty_skip_early", -1.0, 1.0), ("penalty_skip_late", -1.0, 1.0),
+        ("bonus_like_artist", -1.0, 1.0), ("bonus_like_genre", -1.0, 1.0),
+        ("bonus_like_vibe", -1.0, 1.0), ("penalty_skip_genre", -1.0, 1.0),
         ("genre_ban_skips", 1, 20), ("night_energy_max", 0.0, 1.0),
         ("sport_energy_min", 0.0, 1.0),         ("smooth_max_step", 0.01, 1.0),
         ("key_energy_max", 0.01, 1.0),
@@ -251,7 +263,8 @@ for _k, _lo, _hi in (
         ("seed_recent_default", 0.0, 1.0)):
     if _k in ("bonus_like", "bonus_replay", "bonus_complete",
               "bonus_play_long", "penalty_abandon", "penalty_skip_early",
-              "penalty_skip_late", "genre_ban_skips"):
+              "penalty_skip_late", "genre_ban_skips", "bonus_like_artist",
+              "bonus_like_genre", "bonus_like_vibe", "penalty_skip_genre"):
         _g3 = "skips"
         _t3 = "int" if _k == "genre_ban_skips" else "float"
     elif _k in ("night_energy_max", "sport_energy_min", "smooth_max_step",

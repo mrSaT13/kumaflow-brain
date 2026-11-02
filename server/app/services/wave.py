@@ -1595,6 +1595,83 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
         elif a == 'skip' and pos >= _late_sec:
             bonus[tid] += _p_late
 
+    # Якорь свежего лайка: лайкнул трек — следующая пачка подтягивает
+    # того же артиста/жанр. Мобильный лайк идёт через ratings_delta
+    # (сразу в избранное), а не в recent_events — поэтому смотрим и
+    # like-события окна, и свежие Favorite (starred_at в окне часов).
+    # Артист — скромно (дубли режет кап артиста в пачке), основа —
+    # похожесть по вайбу (муд-вектор), а не «тот же артист в лоб».
+    _b_anchor_a = _tun_float(tun, 'skips', 'bonus_like_artist', 0.15)
+    _b_anchor_g = _tun_float(tun, 'skips', 'bonus_like_genre', 0.10)
+    _b_vibe_w = _tun_float(tun, 'skips', 'bonus_like_vibe', 0.20)
+    _b_anchor_h = _tun_int(tun, 'skips', 'like_anchor_hours', 24)
+    anchor_artists: set[str] = set()
+    anchor_genres: set[str] = set()
+    vibe_vecs: list[dict] = []
+    try:
+        _liked_tids: set[str] = set()
+        for e in (recent_events or [])[:max(1, _b_win)]:
+            if isinstance(e, dict) and str(e.get('action') or '') == 'like':
+                _lt = str(e.get('track_id') or '')
+                if _lt:
+                    _liked_tids.add(_lt)
+        if _b_anchor_h > 0:
+            from datetime import datetime as _dtA, timedelta as _tdA
+
+            from app.db.models import Favorite as _FavA
+
+            _cut = _dtA.utcnow() - _tdA(hours=_b_anchor_h)
+            for _fr in db.query(_FavA).filter(
+                    _FavA.user_id == user_id,
+                    _FavA.starred_at >= _cut).limit(200).all():
+                _liked_tids.add(str(_fr.track_id))
+        if _liked_tids:
+            _lt_rows = db.query(Track).filter(
+                Track.id.in_(list(_liked_tids)[:200])).all()
+            # вайб-векторы лайкнутых соберём ниже, после genre_vecs
+            # (нужен жанровый фолбэк из пула)
+            _lt_genre: dict[str, str] = {}
+            for _lt2 in _lt_rows:
+                _an = (getattr(_lt2, 'artist_name', '') or '').strip().lower()
+                if _an:
+                    anchor_artists.add(_an)
+                _gn = (getattr(_lt2, 'genre', '') or '').strip().lower()
+                if _gn and _gn != '—':
+                    anchor_genres.add(_gn)
+                    _lt_genre[str(_lt2.id)] = _gn
+        else:
+            _lt_genre = {}
+    except Exception:
+        anchor_artists, anchor_genres = set(), set()
+        _liked_tids, _lt_genre = set(), {}
+    vibe_vecs: list[dict] = []
+    # Ранний скип (< порога «сразу не зашло»): жанр штрафуем в этой же
+    # пачке, не дожидаясь 3 скипов для временного бана.
+    _p_skip_g = _tun_float(tun, 'skips', 'penalty_skip_genre', 0.10)
+    skip_anchor_genres: set[str] = set()
+    try:
+        _skip_tids: set[str] = set()
+        for e in (recent_events or [])[:max(1, _b_win)]:
+            if not isinstance(e, dict) or str(e.get('action') or '') != 'skip':
+                continue
+            _pos2 = e.get('position_sec')
+            try:
+                _pos2 = int(_pos2) if _pos2 is not None else 999
+            except (TypeError, ValueError):
+                _pos2 = 999
+            if _pos2 < _early_sec:
+                _st = str(e.get('track_id') or '')
+                if _st:
+                    _skip_tids.add(_st)
+        if _skip_tids and _p_skip_g > 0:
+            for _st2 in db.query(Track).filter(
+                    Track.id.in_(list(_skip_tids)[:200])).all():
+                _sg = (getattr(_st2, 'genre', '') or '').strip().lower()
+                if _sg and _sg != '—':
+                    skip_anchor_genres.add(_sg)
+    except Exception:
+        skip_anchor_genres = set()
+
     used_artists: dict[str, int] = {}
     used_genres: dict[str, int] = {}
     used_moods: dict[str, int] = {}
@@ -1647,6 +1724,25 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             genre_vecs = genre_vector_map(feats, _gm_)
         except Exception:
             genre_vecs = {}
+    # Вайб-векторы лайкнутых: свой анализ, иначе жанровый фолбэк из пула —
+    # похожесть по звуку/настроению работает и без полного покрытия анализом.
+    if _liked_tids and _b_vibe_w > 0:
+        try:
+            from app.db.models import TrackFeatures as _TFA
+
+            _lf = {str(r.track_id): r for r in db.query(_TFA).filter(
+                _TFA.track_id.in_(list(_liked_tids)[:200])).all()}
+        except Exception:
+            _lf = {}
+        try:
+            for _ltid in list(_liked_tids)[:50]:
+                _vv = mood_vector(_lf.get(_ltid)) if _lf.get(_ltid) is not None else {}
+                if not _vv:
+                    _vv = (genre_vecs or {}).get(_lt_genre.get(_ltid, '')) or {}
+                if _vv:
+                    vibe_vecs.append(_vv)
+        except Exception:
+            pass
     for tid in candidate_ids:
         t = tracks.get(tid)
         if not t:
@@ -2032,10 +2128,33 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             except Exception:
                 mood_pen = 0.0
         _jit_v = _rng.random() * _jitter
+        # Свежий лайк якорит пачку: тот же артист — скромно (дубли режет
+        # кап артиста), тот же жанр — чуть, похожее по вайбу — основной
+        # драйвер. Ранний скип жанра — вниз.
+        _cand_an = (t.artist_name or '').strip().lower()
+        _cand_gn = (t.genre or '').strip().lower()
+        anchor_a = _b_anchor_a if (_cand_an and _cand_an in anchor_artists) else 0.0
+        anchor_g = _b_anchor_g if (not anchor_a and _cand_gn and _cand_gn in anchor_genres) else 0.0
+        vibe_b = 0.0
+        if vibe_vecs and _vec and _b_vibe_w > 0:
+            try:
+                _best = 0.0
+                for _vv in vibe_vecs:
+                    _d = mood_vec_dist(_vec, _vv)
+                    _s = 1.0 - _d
+                    if _s > _best:
+                        _best = _s
+                if _best > 0:
+                    vibe_b = _b_vibe_w * _best
+            except Exception:
+                vibe_b = 0.0
+        skip_g_pen = _p_skip_g if (_cand_gn and _cand_gn in skip_anchor_genres) else 0.0
+        anchor_b = anchor_a + anchor_g + vibe_b
         total_raw = (w['audio'] * audio + w['genre'] * genre_s +
                      w['artist'] * artist_s + w['behavior'] * behavior +
                      w['collab'] * collab + w['novelty'] * novelty +
-                     _nov_extra * novelty + ctx + bonus.get(tid, 0.0) -
+                     _nov_extra * novelty + ctx + bonus.get(tid, 0.0) +
+                     anchor_b - skip_g_pen -
                      pen - neg_pen - mood_pen + srv_bonus + time_b + arm_b + assoc_b +
                      _cw * clap_s + mood_b - _skip_w * skip_p +
                      _jit_v +
@@ -2061,6 +2180,8 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
             reason = f'By {t.artist_name}'
         elif genre_s > 0.5:
             reason = f'{t.genre} you enjoy'
+        elif anchor_a > 0:
+            reason = f'Похоже на ваш лайк: {t.artist_name}'
         elif novelty > 0.8:
             reason = 'New discovery'
         else:
@@ -2095,6 +2216,7 @@ def score_candidates(db, user_id: str, candidate_ids: list[str],
                              'timbre': round(timbre_c, 3),
                              'knn': round(knn_c, 3),
                              'skip': round(skip_p, 3),
+                             'anchor': round(anchor_b - skip_g_pen, 3),
                              'mood_arm': round(mood_b, 3),
                              'mood_pen': round(mood_pen, 3),
                              'mood_fit': round(_mfit, 3),

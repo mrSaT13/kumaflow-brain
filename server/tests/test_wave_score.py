@@ -18,6 +18,8 @@ os.environ["REDIS_HOST"] = "localhost"
 
 import uuid as _uuid
 
+import pytest as _pytest
+
 from app.db.database import SessionLocal, init_db
 from app.db.models import (
     MediaServer,
@@ -137,6 +139,121 @@ def test_mark_served_stores_raw_score():
     finally:
         db.query(RecommendationFeedback).filter_by(user_id=UID).delete()
         db.commit()
+        db.close()
+
+
+# ---------------- якорь свежего лайка / раннего скипа ----------------
+
+def _anchor_tracks(db):
+    """L — лайкнутый; A — тот же артист; G — тот же жанр; N — нейтральный."""
+    srv = db.query(MediaServer).first()
+
+    def mk(ext, artist, genre):
+        t = db.query(Track).filter_by(external_id=ext).first()
+        if t is None:
+            t = Track(id=str(_uuid.uuid4()), server_id=srv.id, external_id=ext,
+                      title=ext, artist_name=artist, genre=genre)
+            db.add(t)
+            db.flush()
+        return str(t.id)
+
+    L = mk("anchor_liked", "Anchor Band", "anchor rock")
+    A = mk("anchor_same_artist", "Anchor Band", "other stuff")
+    G = mk("anchor_same_genre", "Someone Else", "anchor rock")
+    N = mk("anchor_neutral", "Nobody", "elevator")
+    return L, A, G, N
+
+
+def _raws(db, cands, ev=None, seed="anchor"):
+    ranked = _wave.score_candidates(db, UID, cands, [], settings={},
+                                    recent_events=ev or [], jitter_seed=seed)
+    return {r["track_id"]: r for r in ranked}
+
+
+def test_like_event_anchors_artist_and_genre():
+    """Лайк в свежих событиях: +0.15 тому же артисту, +0.10 тому же жанру."""
+    db = SessionLocal()
+    try:
+        L, A, G, N = _anchor_tracks(db)
+        cands = [A, G, N]
+        base = _raws(db, cands)
+        nxt = _raws(db, cands, ev=[{"track_id": L, "action": "like",
+                                    "position_sec": 200}])
+        assert nxt[A]["score_raw"] - base[A]["score_raw"] == _pytest.approx(0.15)
+        assert nxt[G]["score_raw"] - base[G]["score_raw"] == _pytest.approx(0.10)
+        assert nxt[N]["score_raw"] - base[N]["score_raw"] == _pytest.approx(0.0)
+        assert nxt[A]["comp"]["anchor"] == _pytest.approx(0.15)
+        assert nxt[A]["reason"] == "Похоже на ваш лайк: Anchor Band"
+    finally:
+        db.close()
+
+
+def test_fresh_favorite_anchors_next_pack():
+    """Лайк через ratings_delta (мобила) оседает в Favorite — якорь держится
+    и в следующих запросах без событий (окно like_anchor_hours)."""
+    from app.db.models import Favorite as _Fav
+
+    db = SessionLocal()
+    try:
+        L, A, G, N = _anchor_tracks(db)
+        cands = [A, G, N]
+        base = _raws(db, cands, seed="anchor2")
+        db.add(_Fav(user_id=UID, track_id=L))
+        db.flush()
+        nxt = _raws(db, cands, seed="anchor2")
+        assert nxt[A]["score_raw"] - base[A]["score_raw"] == _pytest.approx(0.15)
+        assert nxt[G]["score_raw"] - base[G]["score_raw"] == _pytest.approx(0.10)
+        assert nxt[N]["score_raw"] - base[N]["score_raw"] == _pytest.approx(0.0)
+    finally:
+        db.close()
+
+
+def test_vibe_anchor_pulls_similar_sound_not_same_artist():
+    """Якорь тянет похожее по вайбу (тот же муд-вектор), а не дубли артиста:
+    другой артист + другой жанр, но тот же звук — вверх."""
+    db = SessionLocal()
+    try:
+        L, _, _, N = _anchor_tracks(db)
+        srv = db.query(MediaServer).first()
+        v = db.query(Track).filter_by(external_id="anchor_vibe").first()
+        if v is None:
+            v = Track(id=str(_uuid.uuid4()), server_id=srv.id,
+                      external_id="anchor_vibe", title="anchor_vibe",
+                      artist_name="Vibe Other", genre="vibe pop")
+            db.add(v)
+            db.flush()
+        V = str(v.id)
+        for tid in (L, V):
+            if db.query(TrackFeatures).filter_by(track_id=tid).first() is None:
+                db.add(TrackFeatures(track_id=tid, energy=0.9, valence=0.5,
+                                     arousal=0.8, danceability=0.7,
+                                     tempo_bpm=140.0))
+        db.flush()
+        cands = [V, N]
+        base = _raws(db, cands, seed="anchor4")
+        nxt = _raws(db, cands, ev=[{"track_id": L, "action": "like",
+                                    "position_sec": 200}], seed="anchor4")
+        # вайб 1.0 * 0.2; артист/жанр у V другие — только звук
+        assert nxt[V]["score_raw"] - base[V]["score_raw"] == _pytest.approx(0.20)
+        assert nxt[N]["score_raw"] - base[N]["score_raw"] == _pytest.approx(0.0)
+        assert nxt[V]["comp"]["anchor"] == _pytest.approx(0.20)
+    finally:
+        db.close()
+
+
+def test_early_skip_penalizes_genre_immediately():
+    """Ранний скип (<30с): −0.10 тому же жанру сразу, не дожидаясь 3 скипов."""
+    db = SessionLocal()
+    try:
+        L, A, G, N = _anchor_tracks(db)
+        cands = [G, N]
+        base = _raws(db, cands, seed="anchor3")
+        nxt = _raws(db, cands, ev=[{"track_id": L, "action": "skip",
+                                    "position_sec": 5}], seed="anchor3")
+        # L жанра "anchor rock" — скип бьёт по G того же жанра, N не трогает
+        assert nxt[G]["score_raw"] - base[G]["score_raw"] == _pytest.approx(-0.10)
+        assert nxt[N]["score_raw"] - base[N]["score_raw"] == _pytest.approx(0.0)
+    finally:
         db.close()
 
 
