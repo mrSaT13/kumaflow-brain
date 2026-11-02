@@ -205,11 +205,14 @@ def lookup_alias(db, query: str, user_id: str | None = None,
             return None
         return {
             "name": row.target_name,
+            # У алиасов название и «чистое» имя совпадают; sub у них нет.
+            "title": row.target_name,
             "external_id": row.target_external_id or "",
             "score": 1.0,
             "why": why,
             "kind": row.kind or kind,
             "source": "alias",
+            "sub": "",
             "learned_from": row.source or "",
         }
     except Exception as e:
@@ -254,11 +257,15 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
                 continue
             cands.append({
                 "name": _display(one_kind, entry),
+                # Чистое название без «— Исполнитель»: клиентам, которые потом
+                # ищут по имени в каталоге, нужно именно оно.
+                "title": entry.get("name") or "",
                 "external_id": entry.get("id", ""),
                 "score": round(sc, 4),
                 "why": why,
                 "kind": one_kind,
                 "source": "library",
+                "sub": (entry.get("sub") or "").strip(),
             })
             seen.add(key)
 
@@ -274,11 +281,13 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
             continue
         cands.append({
             "name": disp,
+            "title": disp,
             "external_id": "",
             "score": round(sc, 4),
             "why": why,
             "kind": kind,
             "source": "external",
+            "sub": "",
         })
         seen.add(key)
 

@@ -274,6 +274,22 @@ def test_resolve_finds_track_by_cyrillic_title():
         db.close()
 
 
+def test_resolve_track_candidate_has_raw_title_and_sub():
+    """Клиент ищет по названию в каталоге — ему нужно «чистое» имя,
+    а «Название — Исполнитель» остаётся показом для человека."""
+    _seed_track()
+    db = SessionLocal()
+    try:
+        res = qr.resolve("Lose Yourself", db, kind="any", top_k=5)
+        best = res["best"]
+        assert best is not None
+        assert best["title"] == "Lose Yourself"
+        assert best["sub"] == "Eminem"
+        assert "Eminem" in best["name"]  # name по-прежнему показ человеку
+    finally:
+        db.close()
+
+
 def test_resolve_finds_album():
     _seed_track()
     db = SessionLocal()
