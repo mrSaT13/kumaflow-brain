@@ -168,6 +168,17 @@ def _tick_once() -> None:
                         _up.check_and_notify(db)
                     except Exception:
                         pass
+                elif kind == "query_aliases":
+                    # Самообучение «спасателя запроса»: мозг сам разбирает
+                    # промахи («Эминем» → «Eminem») и учится на поведении юзера.
+                    # Дёшево: имена библиотеки кэшированы, окно поведения узкое.
+                    try:
+                        from app.services import query_learning as _ql
+
+                        _ql.auto_learn(db)
+                        _ql.learn_from_behavior(db)
+                    except Exception:
+                        pass
                 else:
                     continue
                 # Статусы видны в UI: без них «крон не работает» и «крон упал» выглядели одинаково.

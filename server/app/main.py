@@ -27,6 +27,7 @@ from app.api import (
     devices,
     sonar,
     library_sync,
+    resolve,
 )
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -202,6 +203,7 @@ def create_app() -> FastAPI:
     app.include_router(now_playing.router, prefix="/api/now-playing", tags=["now-playing"])
     app.include_router(devices.router, prefix="/api/me/devices", tags=["devices"])
     app.include_router(devices.tokens_router, prefix="/api/me/tokens", tags=["devices"])
+    app.include_router(resolve.router, prefix="/api/resolve", tags=["resolve"])
 
     return app
 

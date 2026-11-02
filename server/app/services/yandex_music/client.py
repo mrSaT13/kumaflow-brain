@@ -163,6 +163,47 @@ async def fetch_metadata(db: Session, artist: str, title: str, album: str = "") 
     res = await search_track(db, artist, title, album)
     return res
 
+
+async def search_artists(db: Session, text: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Поиск артистов в Yandex Music — внешний источник кандидатов.
+
+    Нужен «спасателю запроса» (services/query_resolver): если в библиотеке
+    ничего не нашлось («Эминем» → «Eminem»), спросим ещё и Яндекс.
+    Возвращает [{id, name}]. Без токена/выключенного ЯМ — пустой список.
+    """
+    cfg = get_yandex_config(db)
+    if not cfg["enabled"] or not cfg["token"]:
+        return []
+    q = (text or "").strip()[:120]
+    if not q:
+        return []
+    key = f"ym:artists:{q.lower()}"
+    hit = _mem_get(key)
+    if hit is not None:
+        return hit
+    await _throttle()
+    try:
+        async with httpx.AsyncClient(timeout=15, headers=_headers(cfg["token"])) as c:
+            r = await c.get(f"{API}/search",
+                            params={"text": q, "type": "artist", "page": 0, "nocorrect": "false"})
+            if r.status_code in (401, 429):
+                logger.warning("yandex artists search: {}", r.status_code)
+                return []
+            r.raise_for_status()
+            j = r.json()
+            artists = (((j.get("result") or {}).get("artists") or {}).get("results") or [])
+            out: list[dict[str, Any]] = []
+            for a in artists[: max(1, min(20, int(limit or 5)))]:
+                nm = str(a.get("name") or "")
+                if not nm:
+                    continue
+                out.append({"id": str(a.get("id") or ""), "name": nm})
+            _mem_set(key, out)
+            return out
+    except httpx.HTTPError as e:
+        logger.warning("yandex artists search failed: {}", e)
+        return []
+
 # sync wrapper для воркеров (rq — sync)
 def fetch_metadata_sync(db: Session, artist: str, title: str, album: str = "") -> dict[str, Any] | None:
     import asyncio as _aio

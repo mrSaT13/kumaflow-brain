@@ -770,6 +770,65 @@ class ApiToken(Base):
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class QueryAlias(Base):
+    """Выученное соответствие «как сказал → как на самом деле».
+
+    Голос/ASR пишет «Эминем» кириллицей, в каталоге «Eminem». Мозг один раз
+    сообразил (сам, по фонетике или по твоему поведению) и запомнил — дальше
+    такой запрос разбирается мгновенно.
+
+    alias — нормализованный ключ (norm_key), target_name — как в каталоге.
+    user_id IS NULL — алиас общий (мозг один на всех).
+    source: auto (нашёл сам) | behavior (вывел из твоих действий) | confirmed
+    (ты подтвердил голосом/тапом).
+    """
+
+    __tablename__ = "query_aliases"
+
+    id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
+    user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    alias: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="artist")
+    target_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    target_external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="auto")
+    hits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_query_alias_lookup", "alias", "kind"),
+    )
+
+
+class QueryMiss(Base):
+    """Запрос, который не нашёл ничего — сырьё для самообучения.
+
+    Мозг копит такие промахи и сам (без твоих тыков) пытается догадаться:
+    «эминем» → «Eminem». Если догадался уверенно — заводит query_aliases.
+    """
+
+    __tablename__ = "query_misses"
+
+    id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
+    user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    query: Mapped[str] = mapped_column(String(512), nullable=False)
+    norm: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="artist")
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="voice")
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_query_miss_open", "resolved", "created_at"),
+    )
+
+
 class AudioFingerprint(Base):
     """Локальный Shazam: спектральные пиковые хэши трека (Dejavu-принцип).
 
