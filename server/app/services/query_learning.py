@@ -176,6 +176,33 @@ def auto_learn(db, limit: int = 200) -> dict[str, Any]:
     return stats
 
 
+def ask_ai(db, limit: int = 10) -> dict[str, Any]:
+    """Спросить ИИ про слова, которые мозг не смог разобрать сам.
+
+    Модель получает список названий из библиотеки и предлагает варианты;
+    они копятся в ai_suggestions, и юзер решает в веб-морде: принять
+    (мозг запомнит) или отклонить. Ничего не принимается молча.
+    """
+    stats = {"asked": 0, "suggested": 0}
+    try:
+        from app.services.ai import is_configured
+
+        if not is_configured():
+            return stats
+    except Exception:
+        return stats
+    try:
+        from app.services.query_ai import suggest_for_misses
+
+        produced = suggest_for_misses(db, limit=limit)
+    except Exception as e:
+        logger.warning("ИИ-разбор промахов не удался: {}", e)
+        return stats
+    stats["asked"] = len(produced)
+    stats["suggested"] = sum(len(item.get("suggestions") or []) for item in produced)
+    return stats
+
+
 def learn_from_behavior(db, window_min: int = BEHAVIOR_WINDOW_MIN) -> dict[str, Any]:
     """Учиться на действиях юзера: промах «эминем» + включённый Eminem = алиас.
 

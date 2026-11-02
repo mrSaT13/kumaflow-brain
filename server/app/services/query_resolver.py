@@ -46,7 +46,7 @@ ALIAS_FUZZY_MIN = 0.88
 # Кэш имён библиотеки: пересобирать на каждый запрос — лишняя работа,
 # библиотека меняется редко.
 _LIB_CACHE_TTL = 120.0
-_lib_cache: dict[str, Any] = {"ts": 0.0, "names": {}, "ids": {}}
+_lib_cache: dict[str, Any] = {"ts": 0.0, "index": {}}
 
 
 def score_pair(query: str | None, name: str | None) -> tuple[float, str]:
@@ -91,41 +91,73 @@ def score_pair(query: str | None, name: str | None) -> tuple[float, str]:
     return 0.0, ""
 
 
-def _library_names(db) -> tuple[dict[str, str], dict[str, str]]:
-    """(имя → external_id, имя → '') для артистов библиотеки.
+def _library_index(db) -> dict[str, dict[str, dict[str, str]]]:
+    """Индекс библиотеки по видам: артист / трек / альбом.
 
-    Берём и таблицу artists, и artist_name треков: часть библиотек
-    отдаёт артистов только через треки.
+    kind → {norm_имя: {"name": название, "id": external_id, "sub": исполнитель}}
+
+    Артисты берём и из таблицы artists, и из artist_name треков: часть
+    библиотек отдаёт артистов только через треки. Для треков и альбомов
+    храним исполнителя отдельно — запрос вида «Eminem Lose Yourself»
+    должен находиться по названию + исполнителю.
     """
     now = time.time()
     if now - float(_lib_cache.get("ts") or 0.0) < _LIB_CACHE_TTL:
-        return _lib_cache["names"], _lib_cache["ids"]
-    names: dict[str, str] = {}
-    ids: dict[str, str] = {}
+        return _lib_cache["index"]
+    index: dict[str, dict[str, dict[str, str]]] = {
+        "artist": {}, "track": {}, "album": {},
+    }
     try:
-        from sqlalchemy import func
-
-        from app.db.models import Artist, Track
+        from app.db.models import Album, Artist, Track
 
         for nm, ext in db.query(Artist.name, Artist.external_id).distinct().all():
             key = norm_key(nm)
-            if key and key not in names:
-                names[key] = nm
-                if ext:
-                    ids[key] = str(ext)
+            if key and key not in index["artist"]:
+                index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
         for nm, ext in db.query(Track.artist_name, Track.artist_external_id).distinct().all():
             key = norm_key(nm)
-            if key and key not in names:
-                names[key] = nm
-                if ext:
-                    ids[key] = str(ext)
+            if key and key not in index["artist"]:
+                index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
+        for title, artist, ext in db.query(
+                Track.title, Track.artist_name, Track.external_id).distinct().all():
+            key = norm_key(title)
+            if key and key not in index["track"]:
+                index["track"][key] = {"name": str(title), "id": str(ext or ""),
+                                       "sub": str(artist or "")}
+        for title, artist, ext in db.query(
+                Album.title, Album.artist_name, Album.external_id).distinct().all():
+            key = norm_key(title)
+            if key and key not in index["album"]:
+                index["album"][key] = {"name": str(title), "id": str(ext or ""),
+                                       "sub": str(artist or "")}
     except Exception as e:
-        logger.warning("не удалось собрать имена артистов: {}", e)
-        return _lib_cache["names"], _lib_cache["ids"]
+        logger.warning("не удалось собрать индекс библиотеки: {}", e)
+        return _lib_cache.get("index") or index
     _lib_cache["ts"] = now
-    _lib_cache["names"] = names
-    _lib_cache["ids"] = ids
-    return names, ids
+    _lib_cache["index"] = index
+    return index
+
+
+def _score_candidate(query: str, kind: str, entry: dict[str, str]) -> tuple[float, str]:
+    """Оценка кандидата с учётом вида: трек/альбом ищутся и по названию,
+    и по паре «название + исполнитель»."""
+    score, why = score_pair(query, entry.get("name") or "")
+    sub = (entry.get("sub") or "").strip()
+    if sub:
+        full = f"{entry.get('name') or ''} {sub}"
+        score2, why2 = score_pair(query, full)
+        if score2 > score:
+            return min(score2, 0.97), ("название с исполнителем" if why2 == "точное совпадение" else why2)
+    return score, why
+
+
+def _display(kind: str, entry: dict[str, str]) -> str:
+    """Как показывать кандидата человеку: «Lose Yourself — Eminem»."""
+    name = entry.get("name") or ""
+    sub = (entry.get("sub") or "").strip()
+    if kind != "artist" and sub and sub.lower() != name.lower():
+        return f"{name} — {sub}"
+    return name
 
 
 def invalidate_cache() -> None:
@@ -202,27 +234,33 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
     cands: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    alias = lookup_alias(db, raw, user_id=user_id, kind=kind)
-    if alias:
-        cands.append(alias)
-        seen.add(norm_key(alias["name"]))
+    kinds = [kind] if kind in ("artist", "track", "album") else ["artist", "track", "album"]
 
-    names, ids = _library_names(db)
-    for key, disp in names.items():
-        if key in seen:
-            continue
-        sc, why = score_pair(raw, disp)
-        if sc <= 0.0:
-            continue
-        cands.append({
-            "name": disp,
-            "external_id": ids.get(key, ""),
-            "score": round(sc, 4),
-            "why": why,
-            "kind": kind,
-            "source": "library",
-        })
-        seen.add(key)
+    for one_kind in kinds:
+        alias = lookup_alias(db, raw, user_id=user_id, kind=one_kind)
+        if alias:
+            alias = dict(alias)
+            alias["kind"] = one_kind
+            cands.append(alias)
+            seen.add(norm_key(alias["name"]))
+
+    index = _library_index(db)
+    for one_kind in kinds:
+        for key, entry in index.get(one_kind, {}).items():
+            if key in seen:
+                continue
+            sc, why = _score_candidate(raw, one_kind, entry)
+            if sc <= 0.0:
+                continue
+            cands.append({
+                "name": _display(one_kind, entry),
+                "external_id": entry.get("id", ""),
+                "score": round(sc, 4),
+                "why": why,
+                "kind": one_kind,
+                "source": "library",
+            })
+            seen.add(key)
 
     for extra in (extra_names or []):
         disp = str(extra or "").strip()

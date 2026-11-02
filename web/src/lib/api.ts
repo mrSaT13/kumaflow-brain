@@ -863,6 +863,20 @@ export const api = {
       best: ResolveCandidate | null;
       candidates: ResolveCandidate[];
     }>(`/api/resolve/query`, { method: "POST", body: JSON.stringify({ q, kind, top_k: topK, source: "manual" }) }),
+  resolveSuggest: (q: string, kind = "artist", topK = 3) =>
+    http<{ ok: boolean; query: string; kind: string; reason: string; suggestions: ResolveCandidate[] }>(
+      `/api/resolve/suggest`, { method: "POST", body: JSON.stringify({ q, kind, top_k: topK }) }),
+  resolveSuggestions: (status = "open") =>
+    http<{ ok: boolean; suggestions: AiSuggestion[] }>(`/api/resolve/suggestions?status=${encodeURIComponent(status)}`),
+  resolveDecide: (body: { id?: string; query: string; name?: string; accept: boolean }) =>
+    http<{ ok: boolean; status?: string; alias?: string; target?: string }>(
+      `/api/resolve/decide`, { method: "POST", body: JSON.stringify(body) }),
+};
+
+export type AiSuggestion = {
+  id: string; query: string; kind: string;
+  suggestions: ResolveCandidate[];
+  status: string; created_at?: string | null;
 };
 
 export type ResolveAlias = {

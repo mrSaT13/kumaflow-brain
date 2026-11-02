@@ -222,6 +222,132 @@ def test_api_resolve_miss_is_recorded():
     assert any(m["query"] == "квквкв несуществующий артист" for m in misses)
 
 
+# --- треки и альбомы --------------------------------------------------------
+
+def _seed_track(title="Lose Yourself", artist="Eminem", album="The Eminem Show"):
+    db = SessionLocal()
+    try:
+        srv = db.query(models.MediaServer).first()
+        if srv is None:
+            srv = models.MediaServer(type="navidrome", name="t", url="http://x")
+            db.add(srv)
+            db.flush()
+        a = models.Artist(server_id=srv.id, external_id="ar-" + uuid.uuid4().hex[:8],
+                          name=artist)
+        db.add(a)
+        db.flush()
+        al = models.Album(server_id=srv.id, external_id="al-" + uuid.uuid4().hex[:8],
+                           title=album, artist_name=artist)
+        db.add(al)
+        db.flush()
+        t = models.Track(server_id=srv.id, external_id="tr-" + uuid.uuid4().hex[:8],
+                         title=title, artist_name=artist, album_name=album,
+                         artist_external_id=a.external_id)
+        db.add(t)
+        db.flush()
+        db.commit()
+        qr.invalidate_cache()
+    finally:
+        db.close()
+
+
+def test_resolve_finds_track_by_title():
+    _seed_track()
+    db = SessionLocal()
+    try:
+        res = qr.resolve("Lose Yourself", db, kind="track", top_k=5)
+        assert res["best"] is not None
+        assert "Lose Yourself" in res["best"]["name"]
+        assert res["best"]["kind"] == "track"
+    finally:
+        db.close()
+
+
+def test_resolve_finds_track_by_cyrillic_title():
+    _seed_track(title="Какой-то Трек")
+    db = SessionLocal()
+    try:
+        res = qr.resolve("какойто трек", db, kind="track", top_k=5)
+        assert res["best"] is not None
+        assert "Какой-то Трек" in res["best"]["name"]
+    finally:
+        db.close()
+
+
+def test_resolve_finds_album():
+    _seed_track()
+    db = SessionLocal()
+    try:
+        res = qr.resolve("The Eminem Show", db, kind="album", top_k=5)
+        assert res["best"] is not None
+        assert res["best"]["kind"] == "album"
+        assert "Eminem Show" in res["best"]["name"]
+    finally:
+        db.close()
+
+
+def test_resolve_any_kind_searches_everything():
+    _seed_track()
+    db = SessionLocal()
+    try:
+        res = qr.resolve("Lose Yourself", db, kind="any", top_k=5)
+        assert res["best"] is not None
+        assert res["best"]["kind"] in ("track", "album", "artist")
+    finally:
+        db.close()
+
+
+# --- ИИ-предложения ---------------------------------------------------------
+
+def test_ai_suggest_uses_model_and_parses_json(monkeypatch):
+    from app.services import query_ai
+
+    db = SessionLocal()
+    try:
+        _seed_track()
+        monkeypatch.setattr("app.services.ai.is_configured", lambda: True)
+        monkeypatch.setattr("app.services.ai.chat",
+                            lambda **kwargs: '{"suggestions": [{"name": "Eminem", '
+                                             '"confidence": 0.9, "why": "похоже"}]}')
+        out = query_ai.suggest(db, "эминем", kind="artist")
+        assert len(out) == 1
+        assert out[0]["name"] == "Eminem"
+        assert out[0]["score"] == 0.9
+        assert out[0]["source"] == "ai"
+    finally:
+        db.close()
+
+
+def test_ai_suggest_without_provider_returns_empty(monkeypatch):
+    from app.services import query_ai
+
+    db = SessionLocal()
+    try:
+        monkeypatch.setattr("app.services.ai.is_configured", lambda: False)
+        assert query_ai.suggest(db, "эминем", kind="artist") == []
+    finally:
+        db.close()
+
+
+def test_api_decide_accept_creates_alias():
+    r = client.post("/api/resolve/decide",
+                     json={"query": "квквкв непонятное", "name": "Eminem", "accept": True})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    aliases = {a["alias"]: a["target"] for a in client.get("/api/resolve/aliases").json()["aliases"]}
+    assert aliases.get("квквкв непонятное") == "Eminem"
+
+
+def test_api_decide_reject_closes_miss():
+    client.post("/api/resolve/query", json={"q": "непонятное слово тест", "kind": "artist"})
+    r = client.post("/api/resolve/decide",
+                     json={"query": "непонятное слово тест", "accept": False})
+    assert r.status_code == 200
+    assert r.json()["status"] == "rejected"
+    misses = client.get("/api/resolve/misses").json()["misses"]
+    assert not any(m["query"] == "непонятное слово тест" for m in misses)
+
+
 # --- правка и массовый импорт ----------------------------------------------
 
 def test_api_delete_alias():

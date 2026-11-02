@@ -804,6 +804,36 @@ class QueryAlias(Base):
     )
 
 
+class AiSuggestion(Base):
+    """Предложения ИИ по непонятному слову — ждут решения юзера.
+
+    Мозг не умеет догадываться о словах, которых нет в библиотеке, поэтому
+    подключает модель: она получает список названий из твоей библиотеки и
+    предлагает, что ты имел в виду. Ты подтверждаешь («да, это оно») — и
+    мозг запоминает соответствие, или отклоняешь — и больше не спрашивает.
+
+    suggestions — список {name, score, why, kind, source}.
+    """
+
+    __tablename__ = "ai_suggestions"
+
+    id: Mapped[str] = mapped_column(UUIDCol(), primary_key=True, default=_uuid)
+    user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("media_users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    query: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="artist")
+    suggestions: Mapped[list] = mapped_column(JSONCol(), default=list, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="ai")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_ai_suggestion_open", "status", "created_at"),
+    )
+
+
 class QueryMiss(Base):
     """Запрос, который не нашёл ничего — сырьё для самообучения.
 

@@ -27,7 +27,9 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.auth import require_brain_auth
+from app.core.time import utcnow
 from app.db import get_db
+from app.services.text_tools import norm_key
 
 router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
@@ -115,6 +117,114 @@ def resolve_confirm(payload: dict, request: Request, db: Session = Depends(get_d
         return {"ok": False, "error": "нужны q и name"}
     out = confirm_alias(db, q, name, user_id=uid, kind=kind,
                         external_id=payload.get("external_id"))
+    return out
+
+
+@router.post("/suggest")
+def resolve_suggest(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Спросить ИИ: что я имел в виду? (разовый запрос, не крон)
+
+    Модель получает список названий из библиотеки и предлагает варианты;
+    она не выдумывает id — резолв идёт по нашим названиям.
+    """
+    from app.services.query_ai import suggest
+
+    if not isinstance(payload, dict):
+        payload = {}
+    q = str(payload.get("q") or payload.get("query") or "").strip()
+    kind = str(payload.get("kind") or "artist").strip().lower()
+    if kind not in ("artist", "track", "album", "any"):
+        kind = "artist"
+    uid = _owner(request, payload.get("user_id"))
+    if not q:
+        return {"ok": True, "query": "", "suggestions": [], "reason": "пусто"}
+    try:
+        top_k = int(payload.get("top_k") or 3)
+    except Exception:
+        top_k = 3
+    suggestions = suggest(db, q, kind=kind, top_k=top_k, user_id=uid)
+    return {"ok": True, "query": q, "kind": kind, "suggestions": suggestions,
+            "reason": "есть варианты" if suggestions else "ИИ не нашёл вариантов"}
+
+
+@router.get("/suggestions")
+def resolve_suggestions(request: Request, db: Session = Depends(get_db),
+                        user_id: str | None = None, limit: int = 50,
+                        status: str = "open"):
+    """Предложения ИИ, ждущие твоего решения."""
+    from app.db.models import AiSuggestion
+
+    uid = _owner(request, user_id)
+    try:
+        q = db.query(AiSuggestion)
+        if uid:
+            q = q.filter((AiSuggestion.user_id == uid) | (AiSuggestion.user_id.is_(None)))
+        if status and status != "all":
+            q = q.filter(AiSuggestion.status == status)
+        rows = (q.order_by(AiSuggestion.created_at.desc())
+               .limit(max(1, min(200, int(limit or 50)))).all())
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "suggestions": []}
+    return {"ok": True, "suggestions": [{
+        "id": r.id,
+        "query": r.query,
+        "kind": r.kind,
+        "suggestions": r.suggestions or [],
+        "status": r.status,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]}
+
+
+@router.post("/decide")
+def resolve_decide(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Твоё решение по предложению ИИ: принять (запомнить) или отклонить."""
+    from app.db.models import AiSuggestion, QueryMiss
+    from app.services.query_learning import confirm_alias
+
+    if not isinstance(payload, dict):
+        payload = {}
+    uid = _owner(request, payload.get("user_id"))
+    suggestion_id = str(payload.get("id") or "").strip()
+    query_text = str(payload.get("query") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    accept = payload.get("accept", True)
+    if not accept:
+        # Отклонил — промах закрыт, чтобы не крутился и не доставал снова.
+        if suggestion_id:
+            row = db.get(AiSuggestion, suggestion_id)
+            if row is not None:
+                row.status = "rejected"
+                row.decided_at = utcnow()
+        try:
+            q = db.query(QueryMiss).filter(QueryMiss.norm == norm_key(query_text))
+            if uid:
+                q = q.filter((QueryMiss.user_id == uid) | (QueryMiss.user_id.is_(None)))
+            for miss in q.filter(QueryMiss.resolved.is_(False)).all():
+                miss.resolved = True
+            db.commit()
+        except Exception:
+            pass
+        return {"ok": True, "status": "rejected", "query": query_text}
+
+    if not query_text or not name:
+        return {"ok": False, "error": "нужны query и name"}
+    row = None
+    if suggestion_id:
+        row = db.get(AiSuggestion, suggestion_id)
+    out = confirm_alias(db, query_text, name, user_id=uid, kind="artist")
+    if row is not None:
+        row.status = "accepted"
+        row.decided_at = utcnow()
+    try:
+        q = db.query(QueryMiss).filter(QueryMiss.norm == norm_key(query_text))
+        if uid:
+            q = q.filter((QueryMiss.user_id == uid) | (QueryMiss.user_id.is_(None)))
+        for miss in q.filter(QueryMiss.resolved.is_(False)).all():
+            miss.resolved = True
+        db.commit()
+    except Exception:
+        pass
+    out["status"] = "accepted"
     return out
 
 

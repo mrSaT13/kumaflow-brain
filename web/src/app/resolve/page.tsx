@@ -32,6 +32,11 @@ export default function ResolvePage() {
 
   const aliases = aliasData?.aliases ?? [];
   const misses = missData?.misses ?? [];
+  const { data: aiData, mutate: reloadAi } = useSWR(
+    "/api/resolve/suggestions",
+    () => api.resolveSuggestions("open"),
+  );
+  const aiSuggestions = aiData?.suggestions ?? [];
 
   const [word, setWord] = useState("");
   const [target, setTarget] = useState("");
@@ -122,6 +127,47 @@ export default function ResolvePage() {
     }
   }
 
+  async function askAi() {
+    if (!probe.trim()) return;
+    setBusy(true);
+    try {
+      const res = await api.resolveSuggest(probe.trim());
+      if (res.suggestions.length === 0) {
+        toast("ИИ не нашёл вариантов", "info");
+      } else {
+        toast(`ИИ предложил: ${res.suggestions.map((s) => s.name).join(", ")}`, "ok");
+      }
+      setProbeResult((prev) => ({
+        ok: true,
+        query: res.query,
+        reason: res.reason,
+        confident: false,
+        best: null,
+        candidates: res.suggestions,
+      }));
+      await reloadAi();
+    } catch (e) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decide(item: { id: string; query: string }, name: string, accept: boolean) {
+    setBusy(true);
+    try {
+      await api.resolveDecide({ id: item.id, query: item.query, name, accept });
+      toast(accept ? `Запомнил: «${item.query}» → ${name}` : `Отклонил: «${item.query}»`, accept ? "ok" : "info");
+      await reloadAi();
+      await reloadAliases();
+      await reloadMisses();
+    } catch (e) {
+      toast(fmtErr(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -139,6 +185,54 @@ export default function ResolvePage() {
         <Stat label="Из них догадался сам" value={selfLearned} hint="без твоих подтверждений" />
         <Stat label="Не понято пока" value={misses.length} hint="ждут, когда мозг разберётся" />
       </div>
+
+      <Section title="Предложения ИИ">
+        {aiSuggestions.length === 0 ? (
+          <EmptyState message="Пока пусто. Мозг спрашивает модель про слова, которые не смог разобрать сам — предложения появятся здесь." />
+        ) : (
+          <div className="space-y-4">
+            {aiSuggestions.map((item) => (
+              <Card key={item.id}>
+                <div className="text-sm">
+                  Ты сказал(а): <span className="font-semibold">{item.query}</span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {item.suggestions.map((s) => (
+                    <div
+                      key={s.name}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-black/10 px-3 py-2 dark:border-white/10"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-medium">{s.name}</span>
+                        <span className="text-xs text-muted ml-2">
+                          уверенность {Math.round((s.score ?? 0) * 100)}%
+                        </span>
+                        {s.why && <div className="text-xs text-muted">{s.why}</div>}
+                      </div>
+                      <div className="flex gap-3 shrink-0">
+                        <button
+                          className="text-sm underline"
+                          onClick={() => decide(item, s.name, true)}
+                          disabled={busy}
+                        >
+                          Это оно
+                        </button>
+                        <button
+                          className="text-sm text-rose-600 underline"
+                          onClick={() => decide(item, s.name, false)}
+                          disabled={busy}
+                        >
+                          Не то
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </Section>
 
       <Section title="Что мозг выучил">
         {aliases.length === 0 ? (
@@ -309,9 +403,14 @@ export default function ResolvePage() {
                 className="mt-1"
               />
             </label>
-            <Button onClick={runProbe} disabled={busy || !probe.trim()}>
-              Что поймёт мозг
-            </Button>
+            <div className="flex gap-2">
+              <Button onClick={runProbe} disabled={busy || !probe.trim()}>
+                Что поймёт мозг
+              </Button>
+              <Button variant="ghost" onClick={askAi} disabled={busy || !probe.trim()}>
+                Спросить ИИ
+              </Button>
+            </div>
           </div>
           {probeResult && (
             <div className="mt-4 text-sm">

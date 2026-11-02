@@ -172,11 +172,14 @@ def _tick_once() -> None:
                     # Самообучение «спасателя запроса»: мозг сам разбирает
                     # промахи («Эминем» → «Eminem») и учится на поведении юзера.
                     # Дёшево: имена библиотеки кэшированы, окно поведения узкое.
+                    # ИИ-добавка: слова, которые и так не разобрались, модель
+                    # предлагает варианты — юзер решит в веб-морде.
                     try:
                         from app.services import query_learning as _ql
 
                         _ql.auto_learn(db)
                         _ql.learn_from_behavior(db)
+                        _ql.ask_ai(db, limit=10)
                     except Exception:
                         pass
                 else:
