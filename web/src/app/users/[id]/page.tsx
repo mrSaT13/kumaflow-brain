@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import UserDevices from "@/components/UserDevices";
+import MyTokens from "@/components/MyTokens";
 import { PasswordDialog } from "@/components/dialog";
 import { useToast, fmtErr } from "@/components/toasts";
 import { api } from "@/lib/api";
@@ -390,6 +391,11 @@ export default function UserProfilePage() {
       {isMine && (
         <Section title="Мои устройства">
           <UserDevices />
+        </Section>
+      )}
+      {isMine && (
+        <Section title="Мои токены">
+          <MyTokens />
         </Section>
       )}
 

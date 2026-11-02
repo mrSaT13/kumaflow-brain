@@ -2992,7 +2992,9 @@ def library_sync_event(payload: dict | None = None) -> dict:
                 await _sleep(5)
             for t in incoming:
                 artist = str(t.get("artist") or "").strip()
-                title = str(t.get("title") or "").strip()
+                # страховка от склеенного "Артист - Трек" (старый отправитель):
+                # чистый title нужен и для search3, и для _pick_song
+                title = _ls.clean_incoming_title(artist, t.get("title"))
                 if not title:
                     continue
                 try:

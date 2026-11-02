@@ -588,6 +588,15 @@ export const api = {
       `/api/me/devices/${encodeURIComponent(device_id)}`,
       { method: "PATCH", body: JSON.stringify({ display_name }) },
     ),
+  /** Свои токены: обычный юзер выпускает себе токен для плеера без админа. */
+  myTokens: () =>
+    http<{ ok: boolean; user_id: string; tokens: ApiToken[] }>(`/api/me/tokens/`),
+  createMyToken: (body: { name: string; preset?: string; scopes?: string[] }) =>
+    http<{ ok: boolean; user_id: string; id: string; name: string; prefix: string; scopes: string[]; token: string }>(
+      `/api/me/tokens/`, { method: "POST", body: JSON.stringify(body) },
+    ),
+  deleteMyToken: (id: string) =>
+    http<{ ok: boolean }>(`/api/me/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
   listCron: () =>
     http<{ jobs: CronJob[] }>(`/api/cron/`),
   /** «Жив ли планировщик» — зовём, когда список задач не пришёл. */

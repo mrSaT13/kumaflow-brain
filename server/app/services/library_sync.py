@@ -42,6 +42,25 @@ def norm_name(s: str | None) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def clean_incoming_title(artist: str | None, title: str | None) -> str:
+    """Отрезаем префикс 'Артист - ' от title из входящего события.
+
+    Старые версии отправителя склеивали название как 'Артист - Трек',
+    а получатель добавляет артиста к поисковому запросу сам — иначе
+    запрос дублирует его ('Артист Артист - Трек') и ничего не находит.
+    """
+    t = (title or "").strip()
+    a = (artist or "").strip()
+    if not t or not a:
+        return t
+    low_t, low_a = t.lower(), a.lower()
+    for sep in (" - ", " – ", " — ", ": "):
+        if low_t.startswith(low_a + sep):
+            cut = t[len(a + sep):].strip()
+            return cut or t
+    return t
+
+
 def canonical_key(s: str | None) -> str:
     """Канонический ключ имени — только для скопа Library Sync.
 

@@ -201,6 +201,7 @@ def create_app() -> FastAPI:
     app.include_router(sonar.router, prefix="/api/sonar", tags=["sonar"])
     app.include_router(now_playing.router, prefix="/api/now-playing", tags=["now-playing"])
     app.include_router(devices.router, prefix="/api/me/devices", tags=["devices"])
+    app.include_router(devices.tokens_router, prefix="/api/me/tokens", tags=["devices"])
 
     return app
 

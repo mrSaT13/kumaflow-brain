@@ -96,6 +96,16 @@ def test_subscriptions_per_user():
     assert r.status_code == 404
 
 
+def test_clean_incoming_title_strips_artist_prefix():
+    """Склеенное 'Артист - Трек' от старого отправителя чистим сами."""
+    assert ls.clean_incoming_title("Кино", "Кино - Пачка сигарет") == "Пачка сигарет"
+    assert ls.clean_incoming_title("кино", "КИНО - Пачка сигарет") == "Пачка сигарет"
+    assert ls.clean_incoming_title("Кино", "Пачка сигарет") == "Пачка сигарет"
+    assert ls.clean_incoming_title("", "Кино - Пачка сигарет") == "Кино - Пачка сигарет"
+    # дефис внутри названия без префикса артиста не трогаем
+    assert ls.clean_incoming_title("Кино", "Звезда по имени Солнце") == "Звезда по имени Солнце"
+
+
 def test_record_event_dedupe_and_subscribers():
     db = SessionLocal()
     try:

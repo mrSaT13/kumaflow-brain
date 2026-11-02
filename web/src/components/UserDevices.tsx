@@ -155,7 +155,7 @@ export default function UserDevices() {
       <Card>
         <div className="font-medium text-sm mb-1">Токены этого пользователя</div>
         {toks.length === 0 ? (
-          <div className="text-xs text-muted">Токенов нет — создайте в Настройки → Токены.</div>
+          <div className="text-xs text-muted">Токенов нет — выпустите ниже в «Мои токены».</div>
         ) : (
           <div className="divide-y divide-border">
             {toks.map((t) => (
@@ -177,7 +177,7 @@ export default function UserDevices() {
         )}
         <div className="text-xs text-muted mt-2">
           Один токен — одно устройство. Подсветка «имя повторяется» означает, что один и тот же
-          токен, похоже, введён дважды — создайте отдельный в Настройки → Токены.
+          токен, похоже, введён дважды — выпустите отдельный ниже в «Мои токены».
         </div>
       </Card>
     </div>

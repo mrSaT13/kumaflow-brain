@@ -18,6 +18,10 @@ from app.db import get_db
 
 router = APIRouter(dependencies=[Depends(require_brain_auth)])
 
+# Самовыпуск токенов: /api/me/tokens (монтируется отдельно в main.py).
+# Обычный юзер выпускает/удаляет СВОИ токены без админа.
+tokens_router = APIRouter(dependencies=[Depends(require_brain_auth)])
+
 
 def _me(request: Request, user_id: str | None = None) -> str:
     """owner_user_id из токена. Без владельца — только явный user_id (open LAN)."""
@@ -167,3 +171,67 @@ def rename_device(slot: str, payload: dict | None = None, request: Request = Non
         row.display_name = name
     db.commit()
     return {"ok": True, "device_id": norm, "display_name": name}
+
+
+@tokens_router.get("")
+@tokens_router.get("/")
+def my_tokens(request: Request, user_id: str | None = None,
+              db: Session = Depends(get_db)):
+    """Свои токены: владелец — из токена, чужое не отдаём."""
+    from app.services import api_tokens as _tokens
+
+    uid = _me(request, user_id)
+    return {"ok": True, "user_id": uid, "tokens": _tokens.list_tokens(db, uid)}
+
+
+@tokens_router.post("")
+@tokens_router.post("/")
+def my_token_create(payload: dict | None = None, request: Request = None,
+                    user_id: str | None = None, db: Session = Depends(get_db)):
+    """Выпустить себе токен (для плеера): имя + пресет, без админа.
+
+    Скоуп admin обычному пользователю недоступен (403 на явный запрос,
+    молча срезается из произвольного списка). Владелец всегда = сам.
+    Ответ содержит plaintext ОДИН раз — показать и скопировать.
+    """
+    from fastapi import HTTPException as _HE
+
+    from app.services import api_tokens as _tokens
+
+    uid = _me(request, user_id)
+    info = getattr(request.state, "brain_token", None) or {}
+    is_admin = bool(info.get("is_admin"))
+    body = dict(payload or {})
+    preset = str(body.get("preset") or "").strip().lower()
+    if preset in _tokens.PRESETS and not body.get("scopes"):
+        scopes = list(_tokens.PRESETS[preset]["scopes"])
+    else:
+        scopes = [str(s) for s in (body.get("scopes") or [])]
+    if "admin" in [str(s).strip().lower() for s in scopes] and not is_admin:
+        raise _HE(403, "скоуп admin — только через админа")
+    name = str(body.get("name") or "player").strip()[:128] or "player"
+    try:
+        res = _tokens.create_token(db, uid, name, scopes)
+    except ValueError as e:
+        raise _HE(404, str(e))
+    return {"ok": True, "user_id": uid, **res}
+
+
+@tokens_router.delete("/{token_id}")
+def my_token_delete(token_id: str, request: Request = None,
+                    db: Session = Depends(get_db)):
+    """Удалить СВОЙ токен. Чужой — 403 (админ чистит через Настройки → Токены)."""
+    from fastapi import HTTPException as _HE
+
+    from app.db.models import ApiToken
+
+    info = getattr(request.state, "brain_token", None) or {}
+    uid = _me(request)
+    row = db.get(ApiToken, str(token_id))
+    if row is None:
+        raise _HE(404, "not found")
+    if not bool(info.get("is_admin")) and str(row.owner_user_id or "") != uid:
+        raise _HE(403, "чужой токен")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
