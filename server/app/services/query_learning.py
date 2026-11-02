@@ -225,6 +225,79 @@ def learn_from_behavior(db, window_min: int = BEHAVIOR_WINDOW_MIN) -> dict[str, 
     return stats
 
 
+def delete_alias(db, alias: str, *, user_id: str | None = None,
+                 kind: str = "artist") -> bool:
+    """Забыть соответствие (юзер решил, что мозг понял неверно)."""
+    key = norm_key(alias)
+    if not key:
+        return False
+    try:
+        from app.db.models import QueryAlias
+
+        q = db.query(QueryAlias).filter(QueryAlias.alias == key)
+        if user_id:
+            q = q.filter((QueryAlias.user_id == user_id) | (QueryAlias.user_id.is_(None)))
+        else:
+            q = q.filter(QueryAlias.user_id.is_(None))
+        rows = q.all()
+        for row in rows:
+            db.delete(row)
+        db.flush()
+        return bool(rows)
+    except Exception as e:
+        logger.warning("не удалось удалить алиас {!r}: {}", alias, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+
+
+# Разделители в текстовом файле соответствий: «слово = артист».
+_IMPORT_SEPARATORS = ("=", "->", "→", "=>", "\t", ";", ",")
+
+
+def parse_alias_text(text: str) -> list[tuple[str, str]]:
+    """Разобрать текст соответствий: «слово = артист» (по строке на пару).
+
+    Разделители: =, ->, →, =>, таб, ;, запятая. Пустые строки и строки без
+    разделителя пропускаются — вернём только разобранные пары.
+    """
+    out: list[tuple[str, str]] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        for sep in _IMPORT_SEPARATORS:
+            if sep in line:
+                left, _, right = line.partition(sep)
+                left, right = left.strip(), right.strip()
+                if left and right:
+                    out.append((left, right))
+                break
+    return out
+
+
+def import_aliases(db, text: str, *, user_id: str | None = None,
+                   kind: str = "artist") -> dict[str, Any]:
+    """Массово добавить соответствия из текста (файл/вставка в веб-морде)."""
+    pairs = parse_alias_text(text)
+    added: list[dict[str, str]] = []
+    failed: list[str] = []
+    for left, right in pairs:
+        if _upsert_alias(db, left, right, user_id=user_id, kind=kind,
+                         score=1.0, source="confirmed"):
+            added.append({"alias": norm_key(left), "target": right})
+        else:
+            failed.append(left)
+    try:
+        db.commit()
+    except Exception:
+        pass
+    return {"ok": True, "added": added, "failed": failed,
+            "parsed": len(pairs), "count": len(added)}
+
+
 def list_aliases(db, user_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     """Список выученных соответствий (для UI и отладки)."""
     try:

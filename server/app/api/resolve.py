@@ -128,6 +128,37 @@ def resolve_aliases(request: Request, db: Session = Depends(get_db),
     return {"ok": True, "aliases": list_aliases(db, user_id=uid, limit=limit)}
 
 
+@router.delete("/aliases")
+def resolve_delete_alias(alias: str, request: Request, db: Session = Depends(get_db),
+                         user_id: str | None = None, kind: str = "artist"):
+    """Забыть соответствие: мозг понял неверно — юзер поправил."""
+    from app.services.query_learning import delete_alias
+
+    uid = _owner(request, user_id)
+    ok = delete_alias(db, alias, user_id=uid, kind=kind)
+    try:
+        db.commit()
+    except Exception:
+        pass
+    return {"ok": bool(ok), "alias": alias}
+
+
+@router.post("/import")
+def resolve_import(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Массово добавить соответствия из текста: «слово = артист» по строке.
+
+    Тот же формат, что и экспорт, — файл можно скопировать туда-обратно.
+    """
+    from app.services.query_learning import import_aliases
+
+    if not isinstance(payload, dict):
+        payload = {}
+    text = str(payload.get("text") or "")
+    kind = str(payload.get("kind") or "artist").strip().lower() or "artist"
+    uid = _owner(request, payload.get("user_id"))
+    return import_aliases(db, text, user_id=uid, kind=kind)
+
+
 @router.get("/misses")
 def resolve_misses(request: Request, db: Session = Depends(get_db),
                    user_id: str | None = None, limit: int = 50):

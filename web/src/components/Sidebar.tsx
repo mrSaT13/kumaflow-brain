@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   Library,
   History,
+  Languages,
   ListMusic,
   Sparkles,
   Users,
@@ -36,6 +37,7 @@ const sections: { title: string; items: NavItem[] }[] = [
   { title: "Задачи", items: [
     { href: "/scans", label: "Задачи и логи", icon: Activity },
     { href: "/history", label: "История", icon: History },
+    { href: "/resolve", label: "Умный поиск", icon: Languages },
   ]},
   { title: "Замеры", items: [
     { href: "/stats", label: "Статистика волны", icon: BarChart3 },

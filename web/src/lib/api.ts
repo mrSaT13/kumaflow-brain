@@ -841,6 +841,42 @@ export const api = {
       owner_user_id?: string | null; prefix?: string;
       locked: boolean; tokens_exist: boolean; env_configured: boolean;
     }>(`/api/settings/whoami`),
+
+  // --- «Спасатель запроса»: как мозг чинит голосовые запросы ---
+  resolveAliases: () =>
+    http<{ ok: boolean; aliases: ResolveAlias[] }>(`/api/resolve/aliases`),
+  resolveMisses: () =>
+    http<{ ok: boolean; misses: ResolveMiss[] }>(`/api/resolve/misses`),
+  resolveConfirm: (q: string, name: string, kind = "artist") =>
+    http<{ ok: boolean; alias: string; target: string; source: string }>(
+      `/api/resolve/confirm`, { method: "POST", body: JSON.stringify({ q, name, kind }) }),
+  resolveDelete: (alias: string, kind = "artist") =>
+    http<{ ok: boolean; alias: string }>(
+      `/api/resolve/aliases?alias=${encodeURIComponent(alias)}&kind=${encodeURIComponent(kind)}`,
+      { method: "DELETE" }),
+  resolveImport: (text: string, kind = "artist") =>
+    http<{ ok: boolean; added: { alias: string; target: string }[]; failed: string[]; parsed: number; count: number }>(
+      `/api/resolve/import`, { method: "POST", body: JSON.stringify({ text, kind }) }),
+  resolveQuery: (q: string, kind = "artist", topK = 5) =>
+    http<{
+      ok: boolean; query: string; reason: string; confident: boolean;
+      best: ResolveCandidate | null;
+      candidates: ResolveCandidate[];
+    }>(`/api/resolve/query`, { method: "POST", body: JSON.stringify({ q, kind, top_k: topK, source: "manual" }) }),
+};
+
+export type ResolveAlias = {
+  alias: string; target: string; kind: string; source: string;
+  score: number; hits: number; created_at?: string | null;
+};
+
+export type ResolveMiss = {
+  query: string; kind: string; source: string; created_at?: string | null;
+};
+
+export type ResolveCandidate = {
+  name: string; external_id?: string; score: number; why: string;
+  kind?: string; source?: string;
 };
 
 export type ApiToken = {

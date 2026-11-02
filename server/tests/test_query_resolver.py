@@ -206,3 +206,38 @@ def test_api_resolve_miss_is_recorded():
     assert body["confident"] is False
     misses = client.get("/api/resolve/misses").json()["misses"]
     assert any(m["query"] == "квквкв несуществующий артист" for m in misses)
+
+
+# --- правка и массовый импорт ----------------------------------------------
+
+def test_api_delete_alias():
+    client.post("/api/resolve/confirm", json={"q": "эминем", "name": "Eminem"})
+    assert any(a["alias"] == "эминем" for a in client.get("/api/resolve/aliases").json()["aliases"])
+    r = client.delete("/api/resolve/aliases", params={"alias": "эминем"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert not any(a["alias"] == "эминем" for a in client.get("/api/resolve/aliases").json()["aliases"])
+
+
+def test_api_import_aliases_from_text():
+    text = "эминем = Eminem\nпиано гайс = The Piano Guys\n# комментарий\nджем -> Jam\n"
+    r = client.post("/api/resolve/import", json={"text": text})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 3
+    aliases = {a["alias"]: a["target"] for a in client.get("/api/resolve/aliases").json()["aliases"]}
+    assert aliases.get("эминем") == "Eminem"
+    assert aliases.get("пиано гайс") == "The Piano Guys"
+    assert aliases.get("джем") == "Jam"
+
+
+def test_parse_alias_text_separators():
+    from app.services.query_learning import parse_alias_text
+
+    pairs = parse_alias_text("a = b\nc -> d\ne → f\ng, h\nпустая строка\n")
+    got = {left: right for left, right in pairs}
+    assert got["a"] == "b"
+    assert got["c"] == "d"
+    assert got["e"] == "f"
+    assert got["g"] == "h"
+    assert len(pairs) == 4
