@@ -39,6 +39,9 @@ SCORE_TRANSLIT = 0.95
 SCORE_PHONETIC = 0.90
 SCORE_WORD = 0.80
 GOOD_ENOUGH = 0.85
+# Насколько похожее написание слова ещё считаем «тем же самым» при поиске
+# выученного алиаса: голос пишет одно слово по-разному.
+ALIAS_FUZZY_MIN = 0.88
 
 # Кэш имён библиотеки: пересобирать на каждый запрос — лишняя работа,
 # библиотека меняется редко.
@@ -132,31 +135,51 @@ def invalidate_cache() -> None:
 
 def lookup_alias(db, query: str, user_id: str | None = None,
                  kind: str = "artist") -> dict[str, Any] | None:
-    """Выученный алиас: «эминем» → «Eminem». user_id=None — общие алиасы."""
+    """Выученный алиас: «эминем» → «Eminem». user_id=None — общие алиасы.
+
+    Сначала ищем точное совпадение. Если его нет — берём ближайший похожий
+    алиас: голос пишет одно и то же слово по-разному («имейджен драгонс» и
+    «имайджен драгонс»), и учить каждое написание отдельно не нужно.
+    """
     key = norm_key(query)
     if not key:
         return None
     try:
         from app.db.models import QueryAlias
 
-        q = db.query(QueryAlias).filter(QueryAlias.alias == key)
+        q = db.query(QueryAlias)
         if user_id:
             rows = q.filter((QueryAlias.user_id == user_id)
                             | (QueryAlias.user_id.is_(None))).all()
         else:
             rows = q.filter(QueryAlias.user_id.is_(None)).all()
+        exact = None
+        best: tuple[float, Any] | None = None
         for row in rows:
             if kind and row.kind and row.kind != kind:
                 continue
-            return {
-                "name": row.target_name,
-                "external_id": row.target_external_id or "",
-                "score": 1.0,
-                "why": "выучено",
-                "kind": row.kind or kind,
-                "source": "alias",
-                "learned_from": row.source or "",
-            }
+            if norm_key(row.alias) == key:
+                exact = row
+                break
+            score, _ = score_pair(query, row.alias)
+            if score >= ALIAS_FUZZY_MIN and (best is None or score > best[0]):
+                best = (score, row)
+        row = exact
+        why = "выучено"
+        if row is None and best is not None:
+            row = best[1]
+            why = "выучено (похожее написание)"
+        if row is None:
+            return None
+        return {
+            "name": row.target_name,
+            "external_id": row.target_external_id or "",
+            "score": 1.0,
+            "why": why,
+            "kind": row.kind or kind,
+            "source": "alias",
+            "learned_from": row.source or "",
+        }
     except Exception as e:
         logger.warning("не удалось прочитать алиасы: {}", e)
     return None

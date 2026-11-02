@@ -112,6 +112,20 @@ def test_resolve_uses_learned_alias_first():
         db.close()
 
 
+def test_resolve_finds_alias_by_similar_spelling():
+    """Голос пишет одно слово по-разному — алиас должен сработать и на близкий
+    вариант («имейджен драгонс» / «имайджен драгонс»)."""
+    db = SessionLocal()
+    try:
+        ql.confirm_alias(db, "имейджен драгонс", "Imagine Dragons", kind="artist")
+        res = qr.resolve("имайджен драгонс", db, kind="artist", top_k=5)
+        assert res["best"] is not None
+        assert res["best"]["name"] == "Imagine Dragons"
+        assert res["best"]["source"] == "alias"
+    finally:
+        db.close()
+
+
 # --- самообучение без тыков ------------------------------------------------
 
 def test_auto_learn_resolves_miss_by_itself():
