@@ -4467,6 +4467,16 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                 r["cover_art_id"] = _resolve_cover(db, t) if t is not None else None
             except Exception:
                 r["cover_art_id"] = None
+            # Длительность трека — клиент умножает её на 1000 в duration_ms;
+            # без поля станция получала 0 и рисовала мусорный прогресс
+            # (MPRIS/дисплей). _tm уже загружен для cover — поле бесплатно.
+            try:
+                _t = _tm.get(str(r.get("track_id") or ""))
+                r["duration_sec"] = (int(_t.duration_sec)
+                                     if _t is not None and _t.duration_sec
+                                     else None)
+            except (TypeError, ValueError):
+                r["duration_sec"] = None
     except Exception:
         pass
     # Тембровые векторы пачки — для попарного ограничения потока (соседние

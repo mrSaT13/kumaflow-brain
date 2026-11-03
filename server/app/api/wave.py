@@ -714,11 +714,13 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
     except Exception:
         pass
     cur_tid: str | None = None
+    _cur_track = None
     for raw, t in found:
         tid = str(t.id)
         if cur_raw and (cur_raw == tid or cur_raw == str(raw)):
             cur_idx = len(tracks)
             cur_tid = tid
+            _cur_track = t
         try:
             moods = list((feats[tid].mood_labels or [])) if tid in feats else []
         except Exception:
@@ -733,9 +735,14 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
                 if tid in feats and feats[tid].tempo_bpm else None
         except (TypeError, ValueError):
             tempo = None
+        try:
+            _dur = int(t.duration_sec) if t.duration_sec else None
+        except (TypeError, ValueError):
+            _dur = None
         tracks.append({'track_id': tid, 'title': t.title,
                        'artist_name': t.artist_name, 'album_name': t.album_name,
                        'genre': t.genre, 'cover_art_id': t.cover_art_id,
+                       'duration_sec': _dur,
                        'mood': str(moods[0]).lower() if moods else None,
                        'moods': [str(m).lower() for m in moods[:3]],
                        'energy': energy, 'tempo': tempo,
@@ -754,7 +761,13 @@ def wave_live(user_id: str, request: Request, device: str | None = None,
             'current': cur_idx, 'age_sec': int(age),
             'current_track_id': cur_tid,
             'position_sec': _pos(entry.get('position_sec')),
-            'duration_sec': _pos(entry.get('duration_sec')),
+            # Клиент может не прислать duration в /publish — не оставляем
+            # мусор, дотягиваем длительность текущего трека из библиотеки.
+            'duration_sec': (_pos(entry.get('duration_sec'))
+                             if entry.get('duration_sec') is not None
+                             else (int(_cur_track.duration_sec)
+                                   if _cur_track is not None and _cur_track.duration_sec
+                                   else None)),
             'device': entry.get('device'),
             'device_id': slot,
             'devices': devices,

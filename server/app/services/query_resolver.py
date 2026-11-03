@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import time
 from typing import Any, Iterable
 
@@ -44,9 +45,30 @@ GOOD_ENOUGH = 0.85
 ALIAS_FUZZY_MIN = 0.88
 
 # Кэш имён библиотеки: пересобирать на каждый запрос — лишняя работа,
-# библиотека меняется редко.
+# библиотека меняется редко. На больших коллекциях (80к+ треков) полный
+# перебор со скорингом каждой строки занял ~10 с и ломал таймаут станции.
+#
+# Поэтому поиск работает как у больших сервисов (Яндекс/ВК/Spotify):
+#  * инвертированные бакеты — по нормализованному ключу, транслиту,
+#    «звуковому» ключу (целому и по словам) — кандидаты ГЕНЕРИРУЮТСЯ, а не
+#    перебираются;
+#  * дорогая метрика (Левенштейн) считается только на этих кандидатах;
+#  * фон-фолбэк похожести ограничен бюджетом времени;
+#  * перестройка индекса идёт в фоне (stale-while-revalidate), голосовой
+#    запрос никогда не ждёт пересбор.
 _LIB_CACHE_TTL = 120.0
-_lib_cache: dict[str, Any] = {"ts": 0.0, "index": {}}
+
+# Максимум кандидатов из одного бакета — защита от вырожденных запросов
+# («a») на гигантских библиотеках.
+_SEARCH_BUCKET_CAP = 64
+# Бюджет фон-фолбэка (перебор «похожих по написанию») — только когда
+# бакеты ничего не дали или дали неуверенного кандидата.
+_FUZZ_BUDGET_SEC = 0.40
+
+_lib_cache: dict[str, Any] = {"ts": 0.0, "index": None, "search": None,
+                              "building": False, "force": False}
+_EMPTY_SEARCH: dict[str, Any] = {"translit": {}, "phon": {}, "wphon": {},
+                                 "tkeys": {}, "bix": {}, "lists": {}}
 
 # Слова-паразиты ассистента: ASR их шлёт вместе с названием («включи лусе
 # юрселф»), и без чистки они ломают сравнение слово к слову.
@@ -150,8 +172,138 @@ def score_pair(query: str | None, name: str | None) -> tuple[float, str]:
     return 0.0, ""
 
 
+def _rebuild_index(db) -> None:
+    """Пересобрать индекс библиотеки + поисковые структуры.
+
+    Вызывается фон-потоком (stale-while-revalidate) или синхронно на
+    холодном старте / после явного invalidate_cache().
+    """
+    index: dict[str, dict[str, dict[str, str]]] = {
+        "artist": {}, "track": {}, "album": {},
+    }
+    from app.db.models import Album, Artist, Track
+
+    for nm, ext in db.query(Artist.name, Artist.external_id).distinct().all():
+        key = norm_key(nm)
+        if key and key not in index["artist"]:
+            index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
+    for nm, ext in db.query(Track.artist_name, Track.artist_external_id).distinct().all():
+        key = norm_key(nm)
+        if key and key not in index["artist"]:
+            index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
+    for title, artist, ext, dur in db.query(
+            Track.title, Track.artist_name, Track.external_id,
+            Track.duration_sec).distinct().all():
+        key = norm_key(title)
+        if key and key not in index["track"]:
+            index["track"][key] = {"name": str(title), "id": str(ext or ""),
+                                   "sub": str(artist or ""), "dur": dur}
+    for title, artist, ext in db.query(
+            Album.title, Album.artist_name, Album.external_id).distinct().all():
+        key = norm_key(title)
+        if key and key not in index["album"]:
+            index["album"][key] = {"name": str(title), "id": str(ext or ""),
+                                   "sub": str(artist or "")}
+
+    search = _build_search(index)
+    _lib_cache["index"] = index
+    _lib_cache["search"] = search
+    _lib_cache["ts"] = time.time()
+
+
+def _build_search(index: dict[str, dict[str, dict[str, str]]]) -> dict[str, Any]:
+    """Инвертированные бакеты по видам (как у больших сервисов).
+
+    Для каждой записи раз прекомпьютим: транслит, фонетический ключ,
+    фонетические ключи слов (название + исполнитель) и 2-граммы — дальше
+    на каждый запрос работаем только с бакетами, без перебора библиотеки.
+    """
+    search: dict[str, Any] = {"translit": {}, "phon": {}, "wphon": {},
+                              "tkeys": {}, "bix": {}, "lists": {}}
+    for kind, entries in index.items():
+        tmap: dict[str, list] = {}
+        pmap: dict[str, list] = {}
+        wmap: dict[str, list] = {}
+        bmap: dict[str, list] = {}
+        elems: list[str] = []  # ключи транслита, у которых есть имя
+        for e in entries.values():
+            if "_tr" not in e:
+                n = str(e.get("name") or "")
+                e["_tr"] = translit_ru_en(n)
+                e["_ph"] = phonetic_key(n)
+                sub = str(e.get("sub") or "")
+                words = [w for w in (sub + " " + n).split() if len(w) >= 3]
+                e["_wph"] = {phonetic_key(w) for w in words} - {""}
+            tr = e.get("_tr") or ""
+            if tr:
+                tmap.setdefault(tr, []).append(e)
+                elems.append(tr)
+            if e.get("_ph"):
+                pmap.setdefault(e["_ph"], []).append(e)
+            for wp in e.get("_wph") or ():
+                wmap.setdefault(wp, []).append(e)
+        # bigram-индекс — классика спеллчекеров (bigram → транслит-ключи):
+        # запрос берёт «свои» бакеты словарём и считает пересечения, это
+        # O(бакеты запроса), а не O(библиотека). Дубли tr_key в разных
+        # бакетах не страшны — хиты считаются и идёт пороговая фильтрация.
+        for tr_key in tmap:
+            for bgg in _bigrams(tr_key):
+                bmap.setdefault(bgg, []).append(tr_key)
+        search["translit"][kind] = tmap
+        search["phon"][kind] = pmap
+        search["wphon"][kind] = wmap
+        search["tkeys"][kind] = sorted(tmap)
+        search["bix"][kind] = bmap
+        search["lists"][kind] = sorted(
+            tmap.values(), key=lambda lst: lst[0].get("name") or "")
+    return search
+
+
+def _rebuild_thread() -> None:
+    """Фоновая перестройка: свой DB-коннект, запрос пользователя не ждёт."""
+    try:
+        from app.db.database import session_scope
+
+        with session_scope() as db:
+            _rebuild_index(db)
+    except Exception as e:
+        logger.warning("фоновая перестройка индекса не удалась: {}", e)
+    finally:
+        _lib_cache["building"] = False
+
+
+def _library_data(db) -> tuple[dict, dict]:
+    """Актуальные или чуть протухшие (index, search), без ожидания.
+
+    Холодный старт и явный invalidate_cache() — САМЫЙ МЕДЛЕННЫЙ РЕЖИМ
+    синхронной сборки; вся остальная жизнь протухший индекс остаётся
+    у клиентов добрых 20 минут — и перестройка идёт в фоне.
+    """
+    now = time.time()
+    have = _lib_cache.get("search") is not None
+    fresh = now - float(_lib_cache.get("ts") or 0.0) < _LIB_CACHE_TTL
+    if not fresh:
+        forced = bool(_lib_cache.get("force"))
+        if have and not forced:
+            # Протухшее — вкусно для пользователя: отдаём сразу и
+            # перечитываем в фоне.
+            if not _lib_cache.get("building"):
+                from threading import Thread
+
+                _lib_cache["building"] = True
+                Thread(target=_rebuild_thread, daemon=True,
+                       name="query-index-rebuild").start()
+            return _lib_cache.get("index") or {}, _lib_cache.get("search") or _EMPTY_SEARCH
+        try:
+            _rebuild_index(db)
+        except Exception as e:
+            logger.warning("не удалось собрать индекс библиотеки: {}", e)
+    _lib_cache["force"] = False
+    return _lib_cache.get("index") or {}, _lib_cache.get("search") or _EMPTY_SEARCH
+
+
 def _library_index(db) -> dict[str, dict[str, dict[str, str]]]:
-    """Индекс библиотеки по видам: артист / трек / альбом.
+    """Индекс библиотеки по видам: артист / трек / альбом (совместимость).
 
     kind → {norm_имя: {"name": название, "id": external_id, "sub": исполнитель}}
 
@@ -160,40 +312,7 @@ def _library_index(db) -> dict[str, dict[str, dict[str, str]]]:
     храним исполнителя отдельно — запрос вида «Eminem Lose Yourself»
     должен находиться по названию + исполнителю.
     """
-    now = time.time()
-    if now - float(_lib_cache.get("ts") or 0.0) < _LIB_CACHE_TTL:
-        return _lib_cache["index"]
-    index: dict[str, dict[str, dict[str, str]]] = {
-        "artist": {}, "track": {}, "album": {},
-    }
-    try:
-        from app.db.models import Album, Artist, Track
-
-        for nm, ext in db.query(Artist.name, Artist.external_id).distinct().all():
-            key = norm_key(nm)
-            if key and key not in index["artist"]:
-                index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
-        for nm, ext in db.query(Track.artist_name, Track.artist_external_id).distinct().all():
-            key = norm_key(nm)
-            if key and key not in index["artist"]:
-                index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
-        for title, artist, ext in db.query(
-                Track.title, Track.artist_name, Track.external_id).distinct().all():
-            key = norm_key(title)
-            if key and key not in index["track"]:
-                index["track"][key] = {"name": str(title), "id": str(ext or ""),
-                                       "sub": str(artist or "")}
-        for title, artist, ext in db.query(
-                Album.title, Album.artist_name, Album.external_id).distinct().all():
-            key = norm_key(title)
-            if key and key not in index["album"]:
-                index["album"][key] = {"name": str(title), "id": str(ext or ""),
-                                       "sub": str(artist or "")}
-    except Exception as e:
-        logger.warning("не удалось собрать индекс библиотеки: {}", e)
-        return _lib_cache.get("index") or index
-    _lib_cache["ts"] = now
-    _lib_cache["index"] = index
+    index, _ = _library_data(db)
     return index
 
 
@@ -210,6 +329,69 @@ def _score_candidate(query: str, kind: str, entry: dict[str, str]) -> tuple[floa
     return score, why
 
 
+def _entry_dur(entry: dict[str, Any]) -> int | None:
+    """duration_sec из кэша индекса (None — у артистов/алиасов её нет)."""
+    try:
+        d = entry.get("dur")
+        return int(d) if d not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _bigrams(s: str) -> frozenset:
+    """2-граммы строки — дешёвый префильтр для «похожести по написанию»."""
+    if len(s) <= 2:
+        return frozenset({s}) if s else frozenset()
+    return frozenset(s[i:i + 2] for i in range(len(s) - 1))
+
+
+def _fuzz_pick(q: str, kinds: list[str], search: dict, pool: dict) -> None:
+    """Бюджетный фолбэк «похоже по написанию» (Левенштейн-случаи).
+
+    Прошлый резолвер прогонял дорогую метрику по ВСЕЙ библиотеке — на 80к+
+    треков это держало голосовой запрос в десятках секунд. Теперь кандидаты
+    достаются из инвертированного bigram-индекса (классика спеллчекеров):
+    берём «свои» бакеты словарём, ранжируем по числу общих bigram и кладём
+    в pool только топ. Работа пропорциональна бакетам запроса, а не размеру
+    библиотеки. Вызывается, только когда уверенного кандидата ещё нет.
+    """
+    words = [t for t in q.split() if t not in FILLER_WORDS and len(t) >= 3]
+    parts = [translit_ru_en(w) for w in (words or [q])]
+    qbg: set[str] = set()
+    for p in parts:
+        if p:
+            qbg |= _bigrams(p)
+    if not qbg:
+        return
+    # Порог пересечения: у случайных строк обычно ≤1 общая bigram,
+    # у настоящих опечаток — 2+. Короткие запросы ловятся и по одной.
+    need = 2 if len(qbg) >= 4 else 1
+    # Хиты считаем по (kind, tr_key): bigram-бакет хранит транслит-ключи,
+    # сами записи раскрываются из tmap-бакета уже после ранжирования.
+    hits: dict[tuple[str, str], int] = {}
+    t0 = time.perf_counter()
+    for kind in kinds:
+        bix = ((search.get("bix") or {}).get(kind)) or {}
+        if not bix:
+            continue
+        for bgg in qbg:
+            for tr_key in bix.get(bgg) or ():
+                hits[(kind, tr_key)] = hits.get((kind, tr_key), 0) + 1
+            if time.perf_counter() - t0 > _FUZZ_BUDGET_SEC:
+                break
+        if time.perf_counter() - t0 > _FUZZ_BUDGET_SEC:
+            break
+    top = sorted(hits.items(), key=lambda kv: -kv[1])[:_SEARCH_BUCKET_CAP]
+    for (kind, tr_key), cnt in top:
+        if cnt < need:
+            continue
+        tmap = ((search.get("translit") or {}).get(kind)) or {}
+        for e in (tmap.get(tr_key) or ()):
+            kk = (kind, norm_key(str(e.get("name") or "")))
+            if kk not in pool:
+                pool[kk] = (kind, e)
+
+
 def _display(kind: str, entry: dict[str, str]) -> str:
     """Как показывать кандидата человеку: «Lose Yourself — Eminem»."""
     name = entry.get("name") or ""
@@ -220,8 +402,14 @@ def _display(kind: str, entry: dict[str, str]) -> str:
 
 
 def invalidate_cache() -> None:
-    """Сбросить кэш имён (после скана библиотеки)."""
+    """Сбросить кэш имён (после скана библиотеки).
+
+    Явный вызов — значит «данные изменились»: следующий resolve пересоберёт
+    индекс СИНХРОННО, чтобы новые треки сразу находились. Фоновая
+    перестройка (stale-while-revalidate) работает только по TTL.
+    """
     _lib_cache["ts"] = 0.0
+    _lib_cache["force"] = True
 
 
 def lookup_alias(db, query: str, user_id: str | None = None,
@@ -306,27 +494,85 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
             cands.append(alias)
             seen.add(norm_key(alias["name"]))
 
-    index = _library_index(db)
+    index, search = _library_data(db)
+
+    # --- генерация кандидатов из бакетов (по возрастанию затрат) ---
+    q = norm_key(raw)
+    qt = translit_ru_en(q)
+    pq = phonetic_key(q)
+    pool: dict[tuple[str, str], tuple[str, dict]] = {}
+
+    def _put(entries: Iterable, one_kind: str) -> None:
+        n = 0
+        for e in entries or []:
+            kk = (one_kind, norm_key(str(e.get("name") or "")))
+            if kk not in pool:
+                pool[kk] = (one_kind, e)
+                n += 1
+            if n >= _SEARCH_BUCKET_CAP:
+                break
+
+    def _prefix(kind: str, prefix: str) -> list:
+        tmap = (search.get("translit") or {}).get(kind) or {}
+        tkeys = (search.get("tkeys") or {}).get(kind) or []
+        i = bisect.bisect_left(tkeys, prefix)
+        out: list = []
+        for kk in tkeys[i:i + _SEARCH_BUCKET_CAP]:
+            if not kk.startswith(prefix):
+                break
+            out.extend(tmap.get(kk) or [])
+        return out
+
     for one_kind in kinds:
-        for key, entry in index.get(one_kind, {}).items():
-            if key in seen:
-                continue
-            sc, why = _score_candidate(raw, one_kind, entry)
-            if sc <= 0.0:
-                continue
-            cands.append({
-                "name": _display(one_kind, entry),
-                # Чистое название без «— Исполнитель»: клиентам, которые потом
-                # ищут по имени в каталоге, нужно именно оно.
-                "title": entry.get("name") or "",
-                "external_id": entry.get("id", ""),
-                "score": round(sc, 4),
-                "why": why,
-                "kind": one_kind,
-                "source": "library",
-                "sub": (entry.get("sub") or "").strip(),
-            })
-            seen.add(key)
+        e = (index.get(one_kind) or {}).get(q)
+        if e is not None:
+            pool[(one_kind, q)] = (one_kind, e)
+        _put((search.get("translit") or {}).get(one_kind, {}).get(qt), one_kind)
+        if pq:
+            _put((search.get("phon") or {}).get(one_kind, {}).get(pq), one_kind)
+
+    # токены запроса: слово к слову (обрезаем филеры как при скоринге)
+    qtokens = [t for t in q.split() if t not in FILLER_WORDS and len(t) >= 3]
+    for tok in qtokens:
+        tt = translit_ru_en(tok)
+        tp = phonetic_key(tok)
+        for one_kind in kinds:
+            if tt:
+                # токен = имя целиком или его префикс («включи eminem»)
+                _put(_prefix(one_kind, tt), one_kind)
+            if tp:
+                # слово запроса звучит как слово названия/исполнителя
+                wmap = (search.get("wphon") or {}).get(one_kind)
+                if wmap:
+                    _put(wmap.get(tp), one_kind)
+
+    # Фолбэк «похоже по написанию»: только когда уверенного кандидата ещё
+    # нет (алиасы и бакеты промахнулись). Перебор бюджетный — см. _fuzz_pick.
+    if not any(float(c.get("score") or 0) >= GOOD_ENOUGH for c in cands):
+        _fuzz_pick(q, kinds, search, pool)
+
+    for (one_kind, _key), (_own, entry) in pool.items():
+        if _key in seen:
+            continue
+        sc, why = _score_candidate(raw, one_kind, entry)
+        if sc <= 0.0:
+            continue
+        cands.append({
+            "name": _display(one_kind, entry),
+            # Чистое название без «— Исполнитель»: клиентам, которые потом
+            # ищут по имени в каталоге, нужно именно оно.
+            "title": entry.get("name") or "",
+            "external_id": entry.get("id", ""),
+            # Длительность трека — только у kind='track': плеер строит
+            # duration_ms из неё, ноль выглядел как битый прогресс.
+            "duration_sec": _entry_dur(entry),
+            "score": round(sc, 4),
+            "why": why,
+            "kind": one_kind,
+            "source": "library",
+            "sub": (entry.get("sub") or "").strip(),
+        })
+        seen.add(_key)
 
     for extra in (extra_names or []):
         disp = str(extra or "").strip()
