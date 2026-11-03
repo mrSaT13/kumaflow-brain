@@ -84,10 +84,26 @@ FILLER_WORDS = frozenset({
 })
 
 
+def _too_far_apart(qt: str, ntw: str) -> bool:
+    """Слова слишком разной длины — это не одно и то же слово.
+
+    Фонетика коротких слов схлопывается в 2-3 буквы, и тогда мусорное
+    имя случайно «совпадает»: «end» (фонетика 'nd') против
+    «neudoe62204» (тоже 'nd') — и такой трек выигрывал запрос с
+    0.94. Слово из ASR — это одно слово: совпадение с именем втрое
+    длиннее не засчитываем.
+    """
+    if not qt or not ntw:
+        return True
+    return len(ntw) > 2 * len(qt) + 2
+
+
 def _word_score(qt: str, ntw: str) -> float:
     """Оценка одного слова запроса против одного слова названия (0..1)."""
     if qt == ntw:
         return SCORE_WORD
+    if _too_far_apart(qt, ntw):
+        return 0.0
     qf, nf = phonetic_key(qt), phonetic_key(ntw)
     if qf and qf == nf:
         return SCORE_PHONETIC
@@ -108,6 +124,11 @@ def _tokens_score(query: str, name: str) -> tuple[float, str]:
     ASR теряет и добавляет пробелы («луз юр сэлф», «включи лусе юрселф»),
     поэтому целую фразу такому запросу не спасти. Сравниваем каждое слово
     запроса с каждым словом названия (после транслита), паразитов — выкидываем.
+
+    Здесь обрывки ASR УЧАСТВУЮТ в среднем (строгий путь): запрос «богс план»
+    не должен «найти» трек из-за одного случайно похожего слова. Мусорные
+    обрывки («зз» вместо «the») гасит парный путь — там каждая сторона
+    требует своего подтверждения.
     """
     qwords = [tok for tok in query.split()
               if tok not in FILLER_WORDS and len(tok) >= 3]
@@ -337,6 +358,8 @@ def _word_score_dual(qt: str, ntw: str) -> float:
     """
     if qt == ntw:
         return 1.0
+    if _too_far_apart(qt, ntw):
+        return 0.0
     qf, nf = phonetic_key(qt), phonetic_key(ntw)
     if qf and qf == nf:
         return 0.90
@@ -351,25 +374,50 @@ def _word_score_dual(qt: str, ntw: str) -> float:
     return 0.0
 
 
-def _part_score(tokens: list[str], words: list[str]) -> float:
-    """Средняя уверенность фрагмента запроса против списка слов (0..1).
+def _part_score(tokens: list[str], words: list[str],
+                memo: dict[tuple[str, str], float] | None = None
+                ) -> tuple[float, float]:
+    """Оценка фрагмента запроса против списка слов: (среднее, лучшее).
 
-    Тот же примитив, что в _tokens_score, но слова названия/артиста
-    подготовлены снаружи — фолбэк «артист и трек» дёргает его парами.
+    Токены, не совпавшие ни с одним словом, в среднем не участвуют —
+    обрывки ASR («зз» вместо «the») не должны топить верное совпадение.
+    memo кэширует оценки пар «слово запроса — слово названия»: длинная
+    фраза и десятки кандидатов иначе считают одно и то же по разу.
     """
     if not tokens or not words:
-        return 0.0
+        return 0.0, 0.0
     total = 0.0
+    matched = 0
+    best_any = 0.0
     for tok in tokens:
         tt = translit_ru_en(tok)
         best = 0.0
         for word in words:
-            best = max(best, _word_score_dual(tt, translit_ru_en(word)))
+            ntw = translit_ru_en(word)
+            if memo is not None:
+                key = (tt, ntw)
+                val = memo.get(key)
+                if val is None:
+                    val = _word_score_dual(tt, ntw)
+                    memo[key] = val
+            else:
+                val = _word_score_dual(tt, ntw)
+            if val > best:
+                best = val
+        if best <= 0.0:
+            continue  # обрывок ASR — не мешает
         total += best
-    return total / len(tokens)
+        matched += 1
+        if best > best_any:
+            best_any = best
+    if not matched:
+        return 0.0, 0.0
+    return total / matched, best_any
 
 
-def _dual_score(query: str, name: str, sub: str) -> tuple[float, str]:
+def _dual_score(query: str, entry: dict,
+                memo: dict[tuple[str, str], float] | None = None
+                ) -> tuple[float, str]:
     """Парное распознавание «артист — трек»: «включи эминем веном» →
     трек «Venom» (Eminem).
 
@@ -378,30 +426,46 @@ def _dual_score(query: str, name: str, sub: str) -> tuple[float, str]:
     поле (название или исполнитель), иначе внешне похожие фразы
     («богс план» — оба слова названия) трогаем обычным словным скорингом.
     """
+    name = str(entry.get("name") or "")
+    sub = str(entry.get("sub") or "")
+    if not sub:
+        return 0.0, ""
     qwords = [tok for tok in norm_key(query).split()
               if tok not in FILLER_WORDS and len(tok) >= 3]
-    if len(qwords) < 2 or not sub:
+    if len(qwords) < 2 or len(qwords) > 12:
         return 0.0, ""
-    name_words = [w for w in norm_key(name).split() if len(w) >= 2]
-    sub_words = [w for w in norm_key(sub).split() if len(w) >= 2]
+    name_words = entry.get("_nw")
+    if name_words is None:
+        name_words = [w for w in norm_key(name).split() if len(w) >= 2]
+        entry["_nw"] = name_words
+    sub_words = entry.get("_sw")
+    if sub_words is None:
+        sub_words = [w for w in norm_key(sub).split() if len(w) >= 2]
+        entry["_sw"] = sub_words
     if not name_words or not sub_words:
         return 0.0, ""
     best = 0.0
     for cut in range(1, len(qwords)):
         head, tail = qwords[:cut], qwords[cut:]
         for t_part, s_part in ((head, tail), (tail, head)):
-            st = _part_score(t_part, name_words)
-            if st < 0.75:
+            st, st_max = _part_score(t_part, name_words, memo)
+            # ЯКОРЬ: на каждой стороне нужно хотя бы одно СИЛЬНО совпадение
+            # (точное или звуковое, ≥0.9). Иначе мусорный трек с «удачным»
+            # вхождением обрывка («nd» внутри «nd62204») набирал 0.94 и
+            # обгонял настоящий трек.
+            if st < 0.75 or st_max < 0.90:
                 continue
-            ss = _part_score(s_part, sub_words)
-            if ss < 0.75:
+            ss, ss_max = _part_score(s_part, sub_words, memo)
+            if ss < 0.75 or ss_max < 0.90:
                 continue
             sc = min(0.94, (st + ss) / 2 + 0.06)
             best = max(best, sc)
     return (round(best, 4), "артист и трек") if best else (0.0, "")
 
 
-def _score_candidate(query: str, kind: str, entry: dict[str, str]) -> tuple[float, str]:
+def _score_candidate(query: str, kind: str, entry: dict[str, str],
+                     memo: dict[tuple[str, str], float] | None = None
+                     ) -> tuple[float, str]:
     """Оценка кандидата с учётом вида: трек/альбом ищутся и по названию,
     и по паре «название + исполнитель», и по «артисту + треку» сразу
     (двойное распознавание голосовой фразы)."""
@@ -413,7 +477,7 @@ def _score_candidate(query: str, kind: str, entry: dict[str, str]) -> tuple[floa
         if score2 > score:
             score, why = min(score2, 0.97), (
                 "название с исполнителем" if why2 == "точное совпадение" else why2)
-        dsc, dwhy = _dual_score(query, entry.get("name") or "", sub)
+        dsc, dwhy = _dual_score(query, entry, memo)
         if dsc > score:
             score, why = dsc, dwhy
     return score, why
@@ -651,11 +715,15 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
     if not any(float(c.get("score") or 0) >= GOOD_ENOUGH for c in cands):
         _fuzz_pick(q, kinds, search, pool)
 
+    # Мемо словесных оценок на один запрос: «зз дейс грай трек зз энд ис
+    # нот зз ансвер» — длинная фраза, и без кэша одна и та же пара слов
+    # считалась бы десятки раз на каждом кандидате.
+    _memo: dict[tuple[str, str], float] = {}
     for (one_kind, _eid), (_own, entry) in pool.items():
         _key = _dedupe_key(one_kind, entry)
         if _key in seen:
             continue
-        sc, why = _score_candidate(raw, one_kind, entry)
+        sc, why = _score_candidate(raw, one_kind, entry, _memo)
         if sc <= 0.0:
             continue
         cands.append({

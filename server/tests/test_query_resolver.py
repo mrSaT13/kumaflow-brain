@@ -333,6 +333,43 @@ def test_resolve_voice_phrases_for_track():
         db.close()
 
 
+def test_asr_garbage_token_does_not_break_dual_recognition():
+    """Регресс: ASR превращает английское «the»/«three» в «зз».
+
+    Запрос «зз дейс грай трек зз энд ис нот зз ансвер» = «Three Days Grace —
+    The End Is Not The Answer». Обрывок «зз» тянул среднее по фрагменту вниз
+    (усредняли по ВСЕМ токенам), и верное совпадение терялось. Совпавшие
+    слова должны оцениваться без учёта обрывков."""
+    _seed_track(title="The End Is Not The Answer", artist="Three Days Grace")
+    db = SessionLocal()
+    try:
+        res = qr.resolve("зз дейс грай трек зз энд ис нот зз ансвер",
+                         db, kind="any", top_k=10)
+        best = res["best"]
+        assert best is not None, res
+        assert best["title"] == "The End Is Not The Answer", best
+        assert best["sub"] == "Three Days Grace", best
+        assert qr.is_confident(res), res
+    finally:
+        db.close()
+
+
+def test_asr_garbage_token_does_not_break_short_dual():
+    """«зз дейс грай трек пэин» → «Pain» (Three Days Grace): обрывок «зз»
+    в имени артиста не должен ронять уверенность."""
+    _seed_track(title="Pain", artist="Three Days Grace")
+    db = SessionLocal()
+    try:
+        res = qr.resolve("зз дейс грай трек пэин", db, kind="any", top_k=10)
+        best = res["best"]
+        assert best is not None, res
+        assert best["title"] == "Pain", best
+        assert best["sub"] == "Three Days Grace", best
+        assert qr.is_confident(res), res
+    finally:
+        db.close()
+
+
 def test_resolve_dual_artist_and_track():
     """Двойное распознавание: «включи эминем веном» → Venom (Eminem).
 
