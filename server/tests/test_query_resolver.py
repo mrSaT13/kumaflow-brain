@@ -295,6 +295,41 @@ def test_resolve_voice_phrases_for_track():
         db.close()
 
 
+def test_resolve_dual_artist_and_track():
+    """Двойное распознавание: «включи эминем веном» → Venom (Eminem).
+
+    Один запрос содержит и артиста, и название: фрагменты должны
+    независимо лечь на свои поля. По отдельности «веном» и без того
+    находилось фонетикой, парой — раньше падало в «неуверенно»."""
+    _seed_track(title="Venom")
+    db = SessionLocal()
+    try:
+        for q in ("включи эминем веном", "веном эмайнем", "эминем веном"):
+            res = qr.resolve(q, db, kind="any", top_k=5)
+            best = res["best"]
+            assert best is not None, f"{q}: не понял"
+            assert best["title"] == "Venom", f"{q}: {best}"
+            assert best["sub"] == "Eminem", f"{q}: {best}"
+            assert qr.is_confident(res), f"{q}: неуверенно ({best['score']})"
+            assert res["best"]["why"] == "артист и трек", f"{q}: {best['why']}"
+    finally:
+        db.close()
+
+
+def test_resolve_dual_words_of_title_not_confused():
+    """Оба слова запроса из названия — двойное распознавание не должно
+    считать «план» исполнителем и ломать уверенное совпадение по словам."""
+    _seed_track(title="God's Plan", artist="Drake")
+    db = SessionLocal()
+    try:
+        res = qr.resolve("богс план", db, kind="track", top_k=5)
+        best = res["best"]
+        assert best is not None and best["title"] == "God's Plan"
+        assert best["why"] != "артист и трек", best
+    finally:
+        db.close()
+
+
 def test_resolve_track_candidate_has_raw_title_and_sub():
     """Клиент ищет по названию в каталоге — ему нужно «чистое» имя,
     а «Название — Исполнитель» остаётся показом для человека."""
