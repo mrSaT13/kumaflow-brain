@@ -40,3 +40,6 @@ Thumbs.db
 
 # --- рабочие заметки сессий (локально: пути машины, внутренние долги) ---
 SESSION_CONTINUE_*.md
+SESSION-*.md
+docs/SESSION-*.md
+docs/api-reference.md
