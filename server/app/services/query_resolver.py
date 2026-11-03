@@ -182,33 +182,37 @@ def _rebuild_index(db) -> None:
 
     Вызывается фон-потоком (stale-while-revalidate) или синхронно на
     холодном старте / после явного invalidate_cache().
+
+    ВАЖНО: по одному нормализованному названию в библиотеке может быть
+    НЕСКОЛЬКО записей — «Venom» у Eminem и у Terry McVeagh, «Stan» у
+    Eminem и в сборнике «Eminem/Dido». Раньше индекс держал по ключу
+    названия только ПЕРВУЮ запись, и вторая молча выпадала из поиска:
+    голос «включи эминем веном» уходил к чужому «Venom». Поэтому
+    теперь ключ → СПИСОК записей, все видны.
     """
-    index: dict[str, dict[str, dict[str, str]]] = {
+    index: dict[str, dict[str, list[dict]]] = {
         "artist": {}, "track": {}, "album": {},
     }
     from app.db.models import Album, Artist, Track
 
+    def _add(kind: str, key: str, entry: dict) -> None:
+        if key:
+            index[kind].setdefault(key, []).append(entry)
+
     for nm, ext in db.query(Artist.name, Artist.external_id).distinct().all():
-        key = norm_key(nm)
-        if key and key not in index["artist"]:
-            index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
+        _add("artist", norm_key(nm), {"name": str(nm), "id": str(ext or ""), "sub": ""})
     for nm, ext in db.query(Track.artist_name, Track.artist_external_id).distinct().all():
-        key = norm_key(nm)
-        if key and key not in index["artist"]:
-            index["artist"][key] = {"name": str(nm), "id": str(ext or ""), "sub": ""}
+        _add("artist", norm_key(nm), {"name": str(nm), "id": str(ext or ""), "sub": ""})
     for title, artist, ext, dur in db.query(
             Track.title, Track.artist_name, Track.external_id,
             Track.duration_sec).distinct().all():
-        key = norm_key(title)
-        if key and key not in index["track"]:
-            index["track"][key] = {"name": str(title), "id": str(ext or ""),
-                                   "sub": str(artist or ""), "dur": dur}
+        _add("track", norm_key(title),
+             {"name": str(title), "id": str(ext or ""),
+              "sub": str(artist or ""), "dur": dur})
     for title, artist, ext in db.query(
             Album.title, Album.artist_name, Album.external_id).distinct().all():
-        key = norm_key(title)
-        if key and key not in index["album"]:
-            index["album"][key] = {"name": str(title), "id": str(ext or ""),
-                                   "sub": str(artist or "")}
+        _add("album", norm_key(title),
+             {"name": str(title), "id": str(ext or ""), "sub": str(artist or "")})
 
     search = _build_search(index)
     _lib_cache["index"] = index
@@ -216,7 +220,7 @@ def _rebuild_index(db) -> None:
     _lib_cache["ts"] = time.time()
 
 
-def _build_search(index: dict[str, dict[str, dict[str, str]]]) -> dict[str, Any]:
+def _build_search(index: dict[str, dict[str, list[dict]]]) -> dict[str, Any]:
     """Инвертированные бакеты по видам (как у больших сервисов).
 
     Для каждой записи раз прекомпьютим: транслит, фонетический ключ,
@@ -231,7 +235,7 @@ def _build_search(index: dict[str, dict[str, dict[str, str]]]) -> dict[str, Any]
         wmap: dict[str, list] = {}
         bmap: dict[str, list] = {}
         elems: list[str] = []  # ключи транслита, у которых есть имя
-        for e in entries.values():
+        for e in (e2 for lst in entries.values() for e2 in lst):
             if "_tr" not in e:
                 n = str(e.get("name") or "")
                 e["_tr"] = translit_ru_en(n)
@@ -307,10 +311,11 @@ def _library_data(db) -> tuple[dict, dict]:
     return _lib_cache.get("index") or {}, _lib_cache.get("search") or _EMPTY_SEARCH
 
 
-def _library_index(db) -> dict[str, dict[str, dict[str, str]]]:
+def _library_index(db) -> dict[str, dict[str, list[dict]]]:
     """Индекс библиотеки по видам: артист / трек / альбом (совместимость).
 
-    kind → {norm_имя: {"name": название, "id": external_id, "sub": исполнитель}}
+    kind → {norm_имя: [записи]} — СПИСОК, потому что одно название может
+    принадлежать разным исполнителям («Venom» у Eminem и у Terry McVeigh).
 
     Артисты берём и из таблицы artists, и из artist_name треков: часть
     библиотек отдаёт артистов только через треки. Для треков и альбомов
@@ -319,6 +324,31 @@ def _library_index(db) -> dict[str, dict[str, dict[str, str]]]:
     """
     index, _ = _library_data(db)
     return index
+
+
+def _word_score_dual(qt: str, ntw: str) -> float:
+    """Оценка слова для ПАРНОГО поиска («артист + трек»).
+
+    Отличается от _word_score иерархией: ТОЧНОЕ совпадение слова после
+    транслита даёт 1.0, звуковое — 0.9. Раньше было наоборот (точное 0.8,
+    звуковое 0.9), и запрос «эминем эвил» выигрывал альбом
+    «Funny Karaoke, Vol. 4» («эвил»→«vol» звучит) вместо трека
+    «Evil» (Eminem) («эвил»→«evil» совпадает точно).
+    """
+    if qt == ntw:
+        return 1.0
+    qf, nf = phonetic_key(qt), phonetic_key(ntw)
+    if qf and qf == nf:
+        return 0.90
+    # утратив пробел: «сэлф» внутри «yourself»
+    if qf and len(qf) >= 3 and len(qf) < len(nf) and qf in nf:
+        return 0.85
+    sim = similarity(qt, ntw)
+    if sim >= 0.85:
+        return 0.60 + 0.35 * sim
+    if sim >= 0.70:
+        return 0.45 + 0.30 * sim
+    return 0.0
 
 
 def _part_score(tokens: list[str], words: list[str]) -> float:
@@ -334,7 +364,7 @@ def _part_score(tokens: list[str], words: list[str]) -> float:
         tt = translit_ru_en(tok)
         best = 0.0
         for word in words:
-            best = max(best, _word_score(tt, translit_ru_en(word)))
+            best = max(best, _word_score_dual(tt, translit_ru_en(word)))
         total += best
     return total / len(tokens)
 
@@ -447,7 +477,7 @@ def _fuzz_pick(q: str, kinds: list[str], search: dict, pool: dict) -> None:
             continue
         tmap = ((search.get("translit") or {}).get(kind)) or {}
         for e in (tmap.get(tr_key) or ()):
-            kk = (kind, norm_key(str(e.get("name") or "")))
+            kk = (kind, id(e))
             if kk not in pool:
                 pool[kk] = (kind, e)
 
@@ -542,7 +572,9 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
         return {"ok": True, "query": "", "best": None, "candidates": [], "reason": "пусто"}
 
     cands: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    # Дедуп по тройке (вид, название, исполнитель): одно название у разных
+    # исполнителей — разные треки, схлопывать нельзя.
+    seen: set[tuple[str, str, str]] = set()
 
     kinds = [kind] if kind in ("artist", "track", "album") else ["artist", "track", "album"]
 
@@ -552,7 +584,7 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
             alias = dict(alias)
             alias["kind"] = one_kind
             cands.append(alias)
-            seen.add(norm_key(alias["name"]))
+            seen.add((one_kind, norm_key(alias["name"]), ""))
 
     index, search = _library_data(db)
 
@@ -560,12 +592,19 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
     q = norm_key(raw)
     qt = translit_ru_en(q)
     pq = phonetic_key(q)
-    pool: dict[tuple[str, str], tuple[str, dict]] = {}
+    # Ключ пула — по id записи: ОДНО название может принадлежать разным
+    # исполнителям («Venom» у Eminem и у Terry McVeagh), схлопывать их
+    # нельзя. Дедуп ниже — по паре «название + исполнитель».
+    pool: dict[tuple[str, int], tuple[str, dict]] = {}
+
+    def _dedupe_key(one_kind: str, entry: dict) -> tuple[str, str, str]:
+        return (one_kind, norm_key(str(entry.get("name") or "")),
+                norm_key(str(entry.get("sub") or "")))
 
     def _put(entries: Iterable, one_kind: str) -> None:
         n = 0
         for e in entries or []:
-            kk = (one_kind, norm_key(str(e.get("name") or "")))
+            kk = (one_kind, id(e))
             if kk not in pool:
                 pool[kk] = (one_kind, e)
                 n += 1
@@ -584,9 +623,10 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
         return out
 
     for one_kind in kinds:
-        e = (index.get(one_kind) or {}).get(q)
-        if e is not None:
-            pool[(one_kind, q)] = (one_kind, e)
+        # Точное совпадение названия: в индексе по ключу может быть
+        # несколько записей (разные исполнители) — берём их все.
+        for e in ((index.get(one_kind) or {}).get(q) or []):
+            pool[(one_kind, id(e))] = (one_kind, e)
         _put((search.get("translit") or {}).get(one_kind, {}).get(qt), one_kind)
         if pq:
             _put((search.get("phon") or {}).get(one_kind, {}).get(pq), one_kind)
@@ -611,7 +651,8 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
     if not any(float(c.get("score") or 0) >= GOOD_ENOUGH for c in cands):
         _fuzz_pick(q, kinds, search, pool)
 
-    for (one_kind, _key), (_own, entry) in pool.items():
+    for (one_kind, _eid), (_own, entry) in pool.items():
+        _key = _dedupe_key(one_kind, entry)
         if _key in seen:
             continue
         sc, why = _score_candidate(raw, one_kind, entry)
@@ -638,7 +679,7 @@ def resolve(query: str | None, db, *, user_id: str | None = None,
         disp = str(extra or "").strip()
         if not disp:
             continue
-        key = norm_key(disp)
+        key = (kind, norm_key(disp), "")
         if key in seen:
             continue
         sc, why = score_pair(raw, disp)

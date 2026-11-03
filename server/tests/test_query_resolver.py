@@ -251,6 +251,44 @@ def _seed_track(title="Lose Yourself", artist="Eminem", album="The Eminem Show")
         db.close()
 
 
+def test_same_title_by_different_artists_both_visible():
+    """Регресс: одно название у разных исполнителей («Venom» у Eminem и
+    у Terry McVeagh). Индекс держал по ключу названия только ПЕРВУЮ запись,
+    и вторая молча выпадала из поиска: голос «включи эминем веном» уходил
+    к чужому «Venom», а настоящего не было в кандидатах вообще."""
+    _seed_track(title="Venom", artist="Eminem")
+    _seed_track(title="Venom", artist="Terry McVeigh/Project X")
+    db = SessionLocal()
+    try:
+        res = qr.resolve("эминем веном", db, kind="track", top_k=10)
+        titles = [(c["title"], c["sub"]) for c in res["candidates"]]
+        assert ("Venom", "Eminem") in titles, titles
+        assert ("Venom", "Terry McVeigh/Project X") in titles, titles
+        best = res["best"]
+        assert best["title"] == "Venom" and best["sub"] == "Eminem", best
+        assert qr.is_confident(res), res
+    finally:
+        db.close()
+
+
+def test_exact_title_beats_phonetic_album():
+    """Регресс: «эминем эвил» выигрывал альбом «Funny Karaoke, Vol. 4»
+    («эвил»→«vol» звучит, 0.9), вместо трека «Evil» (точное совпадение
+    слова, но раньше оно давало 0.8). Точное совпадение должно быть
+    ВЫШЕ фонетического."""
+    _seed_track(title="Evil", artist="Eminem")
+    _seed_track(title="Funny Karaoke, Vol. 4", artist="Eminem")
+    db = SessionLocal()
+    try:
+        res = qr.resolve("эминем эвил", db, kind="any", top_k=10)
+        best = res["best"]
+        assert best["title"] == "Evil", best
+        assert best["sub"] == "Eminem", best
+        assert qr.is_confident(res), res
+    finally:
+        db.close()
+
+
 def test_resolve_finds_track_by_title():
     _seed_track()
     db = SessionLocal()
