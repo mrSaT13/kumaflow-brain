@@ -370,6 +370,26 @@ def test_asr_garbage_token_does_not_break_short_dual():
         db.close()
 
 
+def test_asr_garbage_token_does_not_break_dual_with_parenthetical():
+    """«диджей антонио звезда ютуба» → «Звезда Ютуба (Speed Up)» (Dj Antonio).
+
+    Тут два нюанса сразу: обрывок «диджей» (= «DJ») в имени артиста и
+    название с добавкой в скобках («(Speed Up)»). И то, и другое не должно
+    ронять парное совпадение."""
+    _seed_track(title="Звезда Ютуба (Speed Up)", artist="Dj Antonio")
+    db = SessionLocal()
+    try:
+        res = qr.resolve("диджей антонио звезда ютуба", db, kind="any", top_k=10)
+        best = res["best"]
+        assert best is not None, res
+        assert best["title"] == "Звезда Ютуба (Speed Up)", best
+        assert best["sub"] == "Dj Antonio", best
+        assert qr.is_confident(res), res
+        assert best["why"] == "артист и трек", best
+    finally:
+        db.close()
+
+
 def test_resolve_dual_artist_and_track():
     """Двойное распознавание: «включи эминем веном» → Venom (Eminem).
 
