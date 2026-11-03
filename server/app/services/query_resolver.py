@@ -316,16 +316,71 @@ def _library_index(db) -> dict[str, dict[str, dict[str, str]]]:
     return index
 
 
+def _part_score(tokens: list[str], words: list[str]) -> float:
+    """Средняя уверенность фрагмента запроса против списка слов (0..1).
+
+    Тот же примитив, что в _tokens_score, но слова названия/артиста
+    подготовлены снаружи — фолбэк «артист и трек» дёргает его парами.
+    """
+    if not tokens or not words:
+        return 0.0
+    total = 0.0
+    for tok in tokens:
+        tt = translit_ru_en(tok)
+        best = 0.0
+        for word in words:
+            best = max(best, _word_score(tt, translit_ru_en(word)))
+        total += best
+    return total / len(tokens)
+
+
+def _dual_score(query: str, name: str, sub: str) -> tuple[float, str]:
+    """Парное распознавание «артист — трек»: «включи эминем веном» →
+    трек «Venom» (Eminem).
+
+    Голос редко даёт точную границу между исполнителем и названием, поэтому
+    дробим запрос на фрагменты: каждый фрагмент должен уверенно лечь на своё
+    поле (название или исполнитель), иначе внешне похожие фразы
+    («богс план» — оба слова названия) трогаем обычным словным скорингом.
+    """
+    qwords = [tok for tok in norm_key(query).split()
+              if tok not in FILLER_WORDS and len(tok) >= 3]
+    if len(qwords) < 2 or not sub:
+        return 0.0, ""
+    name_words = [w for w in norm_key(name).split() if len(w) >= 2]
+    sub_words = [w for w in norm_key(sub).split() if len(w) >= 2]
+    if not name_words or not sub_words:
+        return 0.0, ""
+    best = 0.0
+    for cut in range(1, len(qwords)):
+        head, tail = qwords[:cut], qwords[cut:]
+        for t_part, s_part in ((head, tail), (tail, head)):
+            st = _part_score(t_part, name_words)
+            if st < 0.75:
+                continue
+            ss = _part_score(s_part, sub_words)
+            if ss < 0.75:
+                continue
+            sc = min(0.94, (st + ss) / 2 + 0.06)
+            best = max(best, sc)
+    return (round(best, 4), "артист и трек") if best else (0.0, "")
+
+
 def _score_candidate(query: str, kind: str, entry: dict[str, str]) -> tuple[float, str]:
     """Оценка кандидата с учётом вида: трек/альбом ищутся и по названию,
-    и по паре «название + исполнитель»."""
+    и по паре «название + исполнитель», и по «артисту + треку» сразу
+    (двойное распознавание голосовой фразы)."""
     score, why = score_pair(query, entry.get("name") or "")
     sub = (entry.get("sub") or "").strip()
     if sub:
         full = f"{entry.get('name') or ''} {sub}"
         score2, why2 = score_pair(query, full)
         if score2 > score:
-            return min(score2, 0.97), ("название с исполнителем" if why2 == "точное совпадение" else why2)
+            score, why = min(score2, 0.97), (
+                "название с исполнителем" if why2 == "точное совпадение" else why2)
+        dsc, dwhy = _dual_score(query, entry.get("name") or "", sub)
+        if dsc > score:
+            score, why = dsc, dwhy
     return score, why
 
 
