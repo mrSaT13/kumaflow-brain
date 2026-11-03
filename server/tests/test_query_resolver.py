@@ -304,7 +304,8 @@ def test_resolve_dual_artist_and_track():
     _seed_track(title="Venom")
     db = SessionLocal()
     try:
-        for q in ("включи эминем веном", "веном эмайнем", "эминем веном"):
+        for q in ("включи эминем веном", "веном эмайнем", "эминем веном",
+                  "эминем трк веном"):
             res = qr.resolve(q, db, kind="any", top_k=5)
             best = res["best"]
             assert best is not None, f"{q}: не понял"
