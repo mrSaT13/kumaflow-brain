@@ -136,8 +136,12 @@ def refresh_lyrics(track_id: str, db: Session = Depends(get_db)):
             if not f:
                 f = TrackFeatures(track_id=track_id)
                 db.add(f)
+            # Акустика (librosa) главнее слова (AI по тексту). Числа из AI
+            # пишем только туда, где аудио-анализа ещё не было — иначе
+            # ручной refresh текста перезаписывал valence/energy и ломал
+            # фильтр волны по звуку.
             for k in ("valence", "arousal", "energy"):
-                if k in ai_res:
+                if k in ai_res and getattr(f, k, None) is None:
                     try:
                         setattr(f, k, float(ai_res[k]))
                     except Exception:

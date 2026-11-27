@@ -1439,8 +1439,9 @@ def lyrics_fetch_one(track_id: str) -> dict:
             if f is None:
                 f = TrackFeatures(track_id=track_id)
                 db.add(f)
+            # Акустические оси уже посчитаны librosa — AI их не затирает.
             for k in ("valence", "arousal", "energy"):
-                if k in ai_result:
+                if k in ai_result and getattr(f, k, None) is None:
                     try:
                         setattr(f, k, float(ai_result[k]))
                     except Exception:
