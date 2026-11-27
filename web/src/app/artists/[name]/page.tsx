@@ -25,6 +25,8 @@ export default function ArtistPage() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [coverTry, setCoverTry] = useState(0);
+  // Хуки — строго до early-return: иначе rules-of-hooks падает в next build.
+  useEffect(() => setCoverTry(0), [name, data?.bridge?.synced_at]);
 
   async function refresh() {
     setBusy(true);
@@ -49,7 +51,6 @@ export default function ArtistPage() {
   // серый плейсхолдер «нет фото». Локальная обложка из библиотеки точнее.
   const coverSources = [b?.cover_url, localCover].filter(Boolean) as string[];
   const cover = coverSources[Math.min(coverTry, coverSources.length - 1)] ?? "";
-  useEffect(() => setCoverTry(0), [name, b?.synced_at]);
   const stats = data.stats ?? {};
 
   return (
