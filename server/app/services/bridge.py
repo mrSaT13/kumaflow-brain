@@ -85,6 +85,29 @@ async def fetch_artist(db: Session, name: str) -> dict[str, Any] | None:
 
 ENRICH_TTL_DAYS = 7
 
+# Только слова про настроение. Жанры/сцены/времена года (electronic, acoustic,
+# party, summer, winter) — НЕ настроения: они остаются в `tags`, но не попадают
+# ни в пилюли, ни в блок «Настроения» UI. Иначе «electronic» превращался в
+# «energetic» и плеер резал музыку по жанру, думая что это муд.
+MOOD_TAG_TO_CODE = {
+    "melancholic": "melancholic", "sad": "sad", "happy": "happy",
+    "energetic": "energetic", "calm": "calm", "aggressive": "aggressive",
+    "chill": "chill", "dreamy": "dreamy", "dark": "dark",
+    "uplifting": "happy", "romantic": "romantic", "mellow": "relaxed",
+    "moody": "dark", "introspective": "melancholic", "euphoric": "happy",
+    "relaxing": "relaxed", "sentimental": "romantic", "bright": "happy",
+}
+
+
+def clean_mood_tags(tags: list[str] | None) -> list[str]:
+    """Отфильтровать жанры/мусор из mood-тегов моста (для API и UI)."""
+    out: list[str] = []
+    for t in tags or []:
+        s = str(t).strip()
+        if s.lower() in MOOD_TAG_TO_CODE and s not in out:
+            out.append(s)
+    return out
+
 
 def artist_key(name: str | None) -> str:
     """Канонический ключ артиста: «AC/DC» == «ac dc» == «AC-DC»."""
@@ -103,7 +126,7 @@ def meta_to_dict(row) -> dict[str, Any]:
         "country": str(row.country or ""),
         "artist_type": str(row.artist_type or ""),
         "tags": list(row.tags or []),
-        "mood_tags": list(row.mood_tags or []),
+        "mood_tags": clean_mood_tags(list(row.mood_tags or [])),
         "similar_artists": list(row.similar_artists or []),
         "bio_summary": str(row.bio_summary or ""),
         "lastfm_url": str(row.lastfm_url or ""),
@@ -324,18 +347,8 @@ def bridge_enrich_job(limit: int = 25) -> dict[str, Any]:
 TRACK_SRC = "bridge_track"
 ALBUM_SRC = "bridge_album"
 
-# Теги Last.fm → канонические коды настроений мозга (wave.MOOD_LABELS).
-# Неизвестные слова отбрасываются: пилюля не должна появляться из мусора.
-MOOD_TAG_TO_CODE = {
-    "melancholic": "melancholic", "sad": "sad", "happy": "happy",
-    "energetic": "energetic", "calm": "calm", "aggressive": "aggressive",
-    "chill": "chill", "dreamy": "dreamy", "dark": "dark",
-    "uplifting": "happy", "romantic": "romantic", "party": "dance",
-    "summer": "happy", "winter": "calm", "acoustic": "warm",
-    "electronic": "energetic", "mellow": "relaxed", "moody": "dark",
-    "introspective": "melancholic", "euphoric": "happy",
-    "relaxing": "relaxed", "sentimental": "romantic", "bright": "happy",
-}
+# MOOD_TAG_TO_CODE объявлен выше (рядом с ENRICH_TTL_DAYS) — он используется
+# и meta_to_dict для очистки отображаемых тегов, и mood_codes для пилюль.
 
 
 def mood_codes(tags: list[str] | None) -> list[str]:
@@ -450,7 +463,8 @@ def enrich_track(db: Session, track, force: bool = False) -> dict[str, Any] | No
         "artist": str(data.get("artist") or track.artist_name or ""),
         "mbid": str(data.get("mbid") or ""),
         "tags": tags,
-        "mood_tags": [str(t) for t in (data.get("mood_tags") or []) if str(t).strip()][:20],
+        "mood_tags": clean_mood_tags(
+            [str(t) for t in (data.get("mood_tags") or []) if str(t).strip()])[:20],
         "mood_codes": mood_codes(data.get("mood_tags") or tags),
         "similar": data.get("similar") or [],
         "summary": str(data.get("summary") or ""),
@@ -489,7 +503,8 @@ def enrich_album(db: Session, album, representative_track_id: str,
         "first_release_date": str(data.get("first_release_date") or ""),
         "cover_url": str(data.get("cover_url") or ""),
         "tags": tags,
-        "mood_tags": [str(t) for t in (data.get("mood_tags") or []) if str(t).strip()][:20],
+        "mood_tags": clean_mood_tags(
+            [str(t) for t in (data.get("mood_tags") or []) if str(t).strip()])[:20],
         "mood_codes": mood_codes(data.get("mood_tags") or tags),
         "url": str(data.get("url") or ""),
     }

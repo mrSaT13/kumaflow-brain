@@ -138,10 +138,13 @@ def test_track_endpoint_exposes_bridge_metadata_with_source_and_date():
     assert r2.status_code == 200 and r2.json()["ok"] is True
 
 
-def test_mood_tags_map_to_canonical_codes_only():
-    codes = bridge_svc.mood_codes(["melancholic", "electronic", "неизвестный тег"])
-    assert "melancholic" in codes and "energetic" in codes
-    assert "неизвестный тег" not in codes
+def test_mood_tags_exclude_genres_and_unknown_words():
+    # electronic/acoustic — жанры, а не настроения: в пилюли не идут и в UI
+    # под «Настроениями» не показываются.
+    codes = bridge_svc.mood_codes(
+        ["melancholic", "electronic", "acoustic", "party", "dark", "неизвестный тег"])
+    assert codes == ["melancholic", "dark"]
+    assert bridge_svc.clean_mood_tags(["electronic", "dark", "sad"]) == ["dark", "sad"]
 
 
 def test_track_meta_is_cached_and_used_as_mood_fallback(monkeypatch):
@@ -209,7 +212,9 @@ def test_artist_page_endpoint_combines_library_and_bridge():
                      artist_name="Radiohead", year=1997)
     db.add(a)
     db.commit()
-    _meta(db, "Radiohead", tags=["alternative rock"], similar=["Muse"])
+    row = _meta(db, "Radiohead", tags=["alternative rock"], similar=["Muse"])
+    row.mood_tags = ["electronic", "dark"]
+    db.commit()
 
     r = client.get("/api/library/artist?name=radiohead")
     assert r.status_code == 200
@@ -220,6 +225,7 @@ def test_artist_page_endpoint_combines_library_and_bridge():
     assert body["tracks"][0]["track_id"] == str(t.id)
     assert body["albums"][0]["title"] == "OK Computer"
     assert body["bridge"]["tags"] == ["alternative rock"]
+    assert body["bridge"]["mood_tags"] == ["dark"], "жанр electronic не должен выдаваться за настроение"
     assert any(s["name"] == "Muse" and s["from_bridge"] is True for s in body["similar"])
 
 
