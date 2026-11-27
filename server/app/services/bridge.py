@@ -22,6 +22,16 @@ def _norm_url(u: str | None) -> str:
     return u
 
 
+def _int(value: Any) -> int | None:
+    """Last.fm отдаёт счётчики строками ('8531521'); пусто/мусор → None."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(str(value).replace(" ", "")))
+    except (TypeError, ValueError):
+        return None
+
+
 def get_bridge_config(db: Session) -> dict[str, Any]:
     """Сначала AppSetting.bridge (сохранено из веб-UI), иначе fallback на env."""
     row = db.get(AppSetting, "bridge")
@@ -30,15 +40,21 @@ def get_bridge_config(db: Session) -> dict[str, Any]:
         return {
             "url": _norm_url(v.get("url")),
             "enabled": bool(v.get("enabled", False)),
+            "lastfm_user": str(v.get("lastfm_user") or "").strip(),
         }
     s = get_settings()
-    return {"url": _norm_url(s.bridge_url), "enabled": bool(s.bridge_enabled)}
+    return {
+        "url": _norm_url(s.bridge_url),
+        "enabled": bool(s.bridge_enabled),
+        "lastfm_user": str(getattr(s, "lastfm_user", "") or "").strip(),
+    }
 
 
 def save_bridge_config(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
     value = {
         "url": _norm_url(payload.get("url")),
         "enabled": bool(payload.get("enabled", False)),
+        "lastfm_user": str(payload.get("lastfm_user") or "").strip()[:128],
     }
     row = db.get(AppSetting, "bridge")
     if row is None:
@@ -131,6 +147,14 @@ def meta_to_dict(row) -> dict[str, Any]:
         "bio_summary": str(row.bio_summary or ""),
         "lastfm_url": str(row.lastfm_url or ""),
         "cover_url": str(row.cover_url or ""),
+        "listeners": int(row.listeners or 0),
+        "playcount": int(row.playcount or 0),
+        "image_url": str(row.image_url or ""),
+        "mood": {
+            "valence": row.mood_valence,
+            "energy": row.mood_energy,
+            "label": str(row.mood_label or ""),
+        },
         "synced_at": row.fetched_at.isoformat() + "Z" if row.fetched_at else None,
         "stale": bool(row.fail_count),
     }
@@ -232,6 +256,16 @@ def enrich_artist(db: Session, name: str, force: bool = False) -> dict[str, Any]
         row.bio_summary = str(data.get("bio_summary") or data.get("bio") or "") or None
         row.lastfm_url = str(data.get("lastfm_url") or "") or None
         row.cover_url = str(data.get("cover_url") or "") or None
+        # Live-счётчики и муд из моста (значения могут отсутствовать — None).
+        row.listeners = _int(data.get("listeners"))
+        row.playcount = _int(data.get("playcount"))
+        row.image_url = str(data.get("image_url") or "") or None
+        _mood = data.get("mood") or {}
+        if not isinstance(_mood, dict):
+            _mood = {}
+        row.mood_valence = _mood.get("valence")
+        row.mood_energy = _mood.get("energy")
+        row.mood_label = str(_mood.get("mood") or "")[:32] or None
         row.fetched_at = datetime.utcnow()
         row.fail_count = 0
         row.last_error = None
@@ -469,6 +503,10 @@ def enrich_track(db: Session, track, force: bool = False) -> dict[str, Any] | No
         "similar": data.get("similar") or [],
         "summary": str(data.get("summary") or ""),
         "url": str(data.get("url") or ""),
+        "listeners": _int(data.get("listeners")),
+        "playcount": _int(data.get("playcount")),
+        "image_url": str(data.get("image_url") or "") or None,
+        "mood": data.get("mood") if isinstance(data.get("mood"), dict) else {},
     }
     return _save_enrich(db, tid, TRACK_SRC, payload, True)
 
@@ -507,6 +545,10 @@ def enrich_album(db: Session, album, representative_track_id: str,
             [str(t) for t in (data.get("mood_tags") or []) if str(t).strip()])[:20],
         "mood_codes": mood_codes(data.get("mood_tags") or tags),
         "url": str(data.get("url") or ""),
+        "listeners": _int(data.get("listeners")),
+        "playcount": _int(data.get("playcount")),
+        "image_url": str(data.get("image_url") or "") or None,
+        "mood": data.get("mood") if isinstance(data.get("mood"), dict) else {},
     }
     return _save_enrich(db, tid, ALBUM_SRC, payload, True)
 

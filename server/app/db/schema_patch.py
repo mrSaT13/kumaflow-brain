@@ -35,6 +35,15 @@ COLUMNS: list[tuple[str, str, str]] = [
     # Структурная нагрузка уведомлений (треки новинок для докачки плеером).
     # Nullable: старые строки читаются как раньше, meta отдаётся только где есть.
     ("notifications", "meta", "JSON"),
+    # Метаданные артиста из моста (Last.fm): счётчики, картинка и муд-оценка
+    # по словам тегов. Добавляем колонки в уже существующую artist_metadata —
+    # Alembic-версий в проекте нет, create_all колонки не обновляет.
+    ("artist_metadata", "listeners", "BIGINT"),
+    ("artist_metadata", "playcount", "BIGINT"),
+    ("artist_metadata", "image_url", "TEXT"),
+    ("artist_metadata", "mood_valence", "FLOAT"),
+    ("artist_metadata", "mood_energy", "FLOAT"),
+    ("artist_metadata", "mood_label", "VARCHAR(32)"),
 ]
 
 

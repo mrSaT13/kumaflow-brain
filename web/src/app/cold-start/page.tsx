@@ -214,7 +214,12 @@ export default function ColdStartPage() {
       <PageHeader
         title="Настрой свой вкус"
         subtitle={titles[page]}
-        actions={<StepDots page={page} />}
+        actions={
+          <div className="flex items-center gap-2">
+            <a href="/charts" className="kuma-pill inline-flex items-center gap-1">Чарты Last.fm ↗</a>
+            <StepDots page={page} />
+          </div>
+        }
       />
 
       <Section title="Пользователь">

@@ -145,6 +145,7 @@ export default function SettingsPage() {
   const [testBusy, setTestBusy] = useState(false);
   const [bridgeUrl, setBridgeUrl] = useState("");
   const [bridgeEnabled, setBridgeEnabled] = useState(false);
+  const [lastfmUser, setLastfmUser] = useState("");
   const [bridgeResult, setBridgeResult] = useState<string | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [enrichBusy, setEnrichBusy] = useState(false);
@@ -170,6 +171,7 @@ export default function SettingsPage() {
     if (!bridge) return;
     if (bridge.url) setBridgeUrl(bridge.url);
     setBridgeEnabled(Boolean(bridge.enabled));
+    setLastfmUser(bridge.lastfm_user ?? "");
   }, [bridge]);
 
   useEffect(() => {
@@ -303,7 +305,7 @@ export default function SettingsPage() {
     setBridgeBusy(true);
     setBridgeResult(null);
     try {
-      const r = await api.saveBridge({ url: bridgeUrl.trim(), enabled: bridgeEnabled });
+      const r = await api.saveBridge({ url: bridgeUrl.trim(), enabled: bridgeEnabled, lastfm_user: lastfmUser.trim() });
       if (!r.ok) { toast(r.error ?? "Ошибка сохранения", "err"); return; }
       await Promise.all([mutate(), mutateBridge()]);
       toast("Сохранено ✓", "ok");
@@ -763,6 +765,7 @@ export default function SettingsPage() {
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Field label="URL моста *" value={bridgeUrl} onChange={setBridgeUrl} placeholder="http://bridge:8001" />
+            <Field label="Last.fm пользователь (для личного топа)" value={lastfmUser} onChange={setLastfmUser} placeholder="логин Last.fm" />
             <label className="block">
               <div className="text-xs text-muted mb-1">Состояние</div>
               <select

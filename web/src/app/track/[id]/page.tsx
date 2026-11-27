@@ -18,6 +18,8 @@ export default function TrackPage() {
   const bridgeTrack = data?.metadata?.bridge_track as {
     mood_tags?: string[]; mood_codes?: string[]; tags?: string[];
     synced_at?: string; stale?: boolean; source?: string;
+    listeners?: number | null; playcount?: number | null; image_url?: string;
+    mood?: { valence?: number | null; energy?: number | null; label?: string };
   } | undefined;
   const { data: recs } = useSWR(data ? ["rec", id] : null, () => api.recommendByTrack(id));
   const [busy, setBusy] = useState<"sonic" | "lyrics" | null>(null);
@@ -240,6 +242,13 @@ export default function TrackPage() {
                   <span key={t} className="kuma-pill !text-[11px]" title="Тег Last.fm (не является пилюлей настроения)">{t}</span>
                 ))}
               </div>
+              {(!!bridgeTrack.listeners || !!bridgeTrack.playcount || !!bridgeTrack.mood?.label) && (
+                <div className="text-[10px] text-muted mt-1 flex flex-wrap gap-2">
+                  {!!bridgeTrack.listeners && <span>Слушателей: {bridgeTrack.listeners.toLocaleString("ru-RU")}</span>}
+                  {!!bridgeTrack.playcount && <span>Прослушиваний: {bridgeTrack.playcount.toLocaleString("ru-RU")}</span>}
+                  {!!bridgeTrack.mood?.label && <span>Муд по тегам: {bridgeTrack.mood.label} (valence {bridgeTrack.mood.valence ?? "—"} / energy {bridgeTrack.mood.energy ?? "—"})</span>}
+                </div>
+              )}
               <div className="text-[10px] text-muted mt-1">
                 Аудио-анализ имеет приоритет; мост используется только для треков без анализа.
               </div>

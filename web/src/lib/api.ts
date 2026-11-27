@@ -29,8 +29,17 @@ export type BridgeArtistMeta = {
   bio_summary?: string;
   lastfm_url?: string;
   cover_url?: string;
+  listeners?: number;
+  playcount?: number;
+  image_url?: string;
+  mood?: { valence?: number | null; energy?: number | null; label?: string };
   synced_at?: string | null;
   stale?: boolean;
+};
+
+export type ChartArtist = {
+  name: string; playcount?: string | number; listeners?: string | number;
+  mbid?: string; url?: string; image_url?: string;
 };
 
 export type TrackDetail = Track & {
@@ -825,8 +834,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  getBridge: () => http<{ url: string; enabled: boolean }>(`/api/settings/bridge`),
-  saveBridge: (body: { url: string; enabled: boolean }) =>
+  getBridge: () => http<{ url: string; enabled: boolean; lastfm_user?: string }>(`/api/settings/bridge`),
+  saveBridge: (body: { url: string; enabled: boolean; lastfm_user?: string }) =>
     http<{ ok: boolean; saved?: { url: string; enabled: boolean }; error?: string }>(
       `/api/settings/bridge`,
       { method: "POST", body: JSON.stringify(body) },
@@ -855,6 +864,16 @@ export const api = {
       tracks?: { fetched: number; cached: number; failed: number };
       albums?: { fetched: number; cached: number; failed: number };
     }>(`/api/bridge/enrich`, { method: "POST", body: JSON.stringify(body) }),
+  bridgeChartArtists: (limit = 50) =>
+    http<{ ok: boolean; artists: ChartArtist[]; error?: string }>(`/api/bridge/chart-artists?limit=${limit}`),
+  bridgeGeoArtists: (country = "Russian Federation", limit = 50) =>
+    http<{ ok: boolean; country?: string; artists: ChartArtist[]; error?: string }>(
+      `/api/bridge/geo-artists?country=${encodeURIComponent(country)}&limit=${limit}`,
+    ),
+  bridgeTopArtists: (period = "7day", limit = 50) =>
+    http<{ ok: boolean; user?: string; period?: string; artists: ChartArtist[]; error?: string }>(
+      `/api/bridge/top-artists?period=${encodeURIComponent(period)}&limit=${limit}`,
+    ),
 
   getLibrarySync: () =>
     http<{ url: string; enabled: boolean; token_configured: boolean }>(`/api/library-sync/config`),

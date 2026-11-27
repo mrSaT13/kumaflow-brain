@@ -76,6 +76,10 @@ def test_enrich_caches_bridge_response_and_never_calls_twice(monkeypatch):
             "tags": ["alternative rock", "electronic"],
             "similar_artists": [{"name": "Muse", "url": ""}],
             "bio_summary": "bio", "lastfm_url": "https://lfm/radiohead",
+            "listeners": "8531521", "playcount": "1438344660",
+            "image_url": "https://img/radiohead.png",
+            "mood": {"valence": -0.7, "energy": 0.2, "mood": "negative/moderate",
+                     "mood_tags": ["dark"]},
         }
 
     monkeypatch.setattr(bridge_svc, "_fetch_sync", _fake)
@@ -84,6 +88,9 @@ def test_enrich_caches_bridge_response_and_never_calls_twice(monkeypatch):
     assert calls == ["radiohead"], "второй вызов должен попасть в кэш БД"
     assert first["tags"] == ["alternative rock", "electronic"]
     assert second["name"] == "Radiohead"
+    assert second["listeners"] == 8531521 and second["playcount"] == 1438344660
+    assert second["image_url"] == "https://img/radiohead.png"
+    assert second["mood"]["valence"] == -0.7 and second["mood"]["label"] == "negative/moderate"
     assert db.query(models.ArtistMetadata).count() == 1
 
 
@@ -247,3 +254,29 @@ def test_country_filter_uses_bridge_metadata():
 
     saved = wave_settings.save_settings(db, "country-test", {"country": "RU"})
     assert "country" in wave_settings.effective_settings(db, "country-test", None)
+
+
+def test_chart_endpoints_proxy_bridge(monkeypatch):
+    db = SessionLocal()
+    _enable_bridge(db)
+    row = db.get(models.AppSetting, "bridge")
+    row.value = {"url": "http://bridge.test", "enabled": True, "lastfm_user": "sasha"}
+    db.commit()
+
+    seen = []
+
+    def _fake(url, endpoint, **params):
+        seen.append((endpoint, params))
+        if endpoint == "geo/artists":
+            return {"country": "Russian Federation", "artists": [{"name": "Кино"}]}
+        return {"artists": [{"name": "Radiohead", "playcount": "100"}]}
+
+    monkeypatch.setattr(bridge_svc, "_fetch_entity_sync", _fake)
+    r1 = client.get("/api/bridge/chart-artists?limit=20")
+    r2 = client.get("/api/bridge/geo-artists?country=Russia")
+    r3 = client.get("/api/bridge/top-artists?period=1month")
+    assert r1.json()["artists"][0]["name"] == "Radiohead"
+    assert r2.json()["country"] == "Russian Federation"
+    assert r3.json()["user"] == "sasha" and r3.json()["period"] == "1month"
+    assert seen[0][0] == "chart/artists" and seen[1][0] == "geo/artists"
+    assert seen[2][1]["user"] == "sasha"

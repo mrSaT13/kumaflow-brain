@@ -43,7 +43,7 @@ export default function ArtistPage() {
   if (error || !data?.ok) return <EmptyState message="Артист не найден." />;
 
   const b = data.bridge;
-  const cover = b?.cover_url || (data.entry?.cover_track_id ? api.trackCoverUrl(data.entry.cover_track_id, 400) : "");
+  const cover = b?.image_url || b?.cover_url || (data.entry?.cover_track_id ? api.trackCoverUrl(data.entry.cover_track_id, 400) : "");
   const stats = data.stats ?? {};
 
   return (
@@ -97,6 +97,9 @@ export default function ArtistPage() {
               {b.mbid && <div>MusicBrainz ID: <code className="kuma-pill">{b.mbid}</code></div>}
               {b.country && <div>Страна: <b className="text-text">{b.country}</b></div>}
               {b.artist_type && <div>Тип: <b className="text-text">{b.artist_type}</b></div>}
+              {!!b.listeners && <div>Слушателей (Last.fm): <b className="text-text tabular-nums">{b.listeners.toLocaleString("ru-RU")}</b></div>}
+              {!!b.playcount && <div>Прослушиваний (Last.fm): <b className="text-text tabular-nums">{b.playcount.toLocaleString("ru-RU")}</b></div>}
+              {!!b.mood?.label && <div>Муд по тегам: <b className="text-text">{b.mood.label}</b>{(b.mood.valence != null || b.mood.energy != null) && <span className="text-muted"> · valence {b.mood.valence ?? "—"} / energy {b.mood.energy ?? "—"}</span>}</div>}
               {b.lastfm_url && (
                 <a href={b.lastfm_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-text">
                   Last.fm <ExternalLink className="w-3 h-3" />

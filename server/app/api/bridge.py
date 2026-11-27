@@ -46,6 +46,52 @@ def bridge_artist_meta(name: str, db: Session = Depends(get_db)):
     return {"ok": True, "meta": bridge_svc.meta_to_dict(row)}
 
 
+@router.get("/chart-artists")
+def bridge_chart_artists(limit: int = 50, db: Session = Depends(get_db)):
+    """Глобальный чарт Last.fm (только чтение, в рекомендации не подмешивается)."""
+    cfg = bridge_svc.get_bridge_config(db)
+    if not cfg["enabled"] or not cfg["url"]:
+        return {"ok": False, "artists": [], "error": "bridge disabled"}
+    data = bridge_svc._fetch_entity_sync(
+        cfg["url"], "chart/artists", limit=str(max(1, min(int(limit), 200))))
+    if data is None:
+        return {"ok": False, "artists": [], "error": "bridge unavailable"}
+    return {"ok": True, "artists": data.get("artists") or []}
+
+
+@router.get("/geo-artists")
+def bridge_geo_artists(country: str = "Russian Federation", limit: int = 50,
+                       db: Session = Depends(get_db)):
+    """Топ артистов страны (geo.gettopartists) через мост."""
+    cfg = bridge_svc.get_bridge_config(db)
+    if not cfg["enabled"] or not cfg["url"]:
+        return {"ok": False, "artists": [], "error": "bridge disabled"}
+    data = bridge_svc._fetch_entity_sync(
+        cfg["url"], "geo/artists", country=country,
+        limit=str(max(1, min(int(limit), 200))))
+    if data is None:
+        return {"ok": False, "artists": [], "error": "bridge unavailable"}
+    return {"ok": True, "country": data.get("country") or country,
+            "artists": data.get("artists") or []}
+
+
+@router.get("/top-artists")
+def bridge_top_artists(period: str = "7day", limit: int = 50,
+                       db: Session = Depends(get_db)):
+    """Личный топ Last.fm: user берётся из настроек моста (LASTFM_USER)."""
+    cfg = bridge_svc.get_bridge_config(db)
+    user = cfg.get("lastfm_user") or ""
+    if not cfg["enabled"] or not cfg["url"] or not user:
+        return {"ok": False, "artists": [], "error": "bridge disabled или LASTFM_USER не задан"}
+    data = bridge_svc._fetch_entity_sync(
+        cfg["url"], "top-artists", user=user, period=period,
+        limit=str(max(1, min(int(limit), 200))))
+    if data is None:
+        return {"ok": False, "artists": [], "error": "bridge unavailable"}
+    return {"ok": True, "user": user, "period": period,
+            "artists": data.get("artists") or []}
+
+
 class EnrichIn(BaseModel):
     name: str | None = None
     limit: int = 25

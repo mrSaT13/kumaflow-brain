@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "KumaFlow Brain"
-    app_version: str = "0.3.46"
+    app_version: str = "0.3.47"
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
     # Часовой пояс «домашнего» времени: границы суток для daily-плейлистов,
@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     # (Настройки → Мост) и хранится в БД; env — только дефолт.
     bridge_url: str = ""
     bridge_enabled: bool = False
+    # Last.fm-логин для эндпоинта top-artists (личный топ прослушиваний).
+    lastfm_user: str = ""
 
     # Library Sync — внешний сервис-поставщик треков (адрес + токен).
     # Задаётся из веб-UI (Настройки → Library Sync) и хранится в БД;

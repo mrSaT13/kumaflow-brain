@@ -211,6 +211,13 @@ class ArtistMetadata(Base):
     bio_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     lastfm_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     cover_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    # Last.fm: число слушателей/прослушиваний, картинка, муд по словам тегов.
+    listeners: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    playcount: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mood_valence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mood_energy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mood_label: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
