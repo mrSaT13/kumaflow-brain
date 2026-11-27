@@ -15,12 +15,31 @@ export type Track = {
   source?: "navidrome" | "disk" | "demo" | string;
 };
 
+/** Метаданные артиста, синхронизированные с KumaFlow Bridge. */
+export type BridgeArtistMeta = {
+  name: string;
+  name_key: string;
+  source: string;
+  mbid?: string;
+  country?: string;
+  artist_type?: string;
+  tags: string[];
+  mood_tags: string[];
+  similar_artists: string[];
+  bio_summary?: string;
+  lastfm_url?: string;
+  cover_url?: string;
+  synced_at?: string | null;
+  stale?: boolean;
+};
+
 export type TrackDetail = Track & {
   features?: Record<string, number | string | null>;
   moods?: string[];
   mood_vector?: Record<string, unknown>;
   lyrics?: { provider: string; text: string; language?: string; source_url?: string } | null;
   metadata?: Record<string, Record<string, unknown>>;
+  artist_metadata?: BridgeArtistMeta | null;
   cluster?: { id: number; algorithm: string } | null;
 };
 
@@ -148,6 +167,10 @@ export type ArtistEntry = {
   top_genres: string[];
   cover_track_id?: string | null;
   cover_art_id?: string | null;
+  bridge_tags?: string[];
+  bridge_bio?: string;
+  bridge_similar?: string[];
+  bridge_synced_at?: string | null;
 };
 
 const BASE = process.env.NEXT_PUBLIC_KUMAFLOW_API ?? "";
@@ -251,6 +274,7 @@ export const api = {
     ),
   genres: () => http<{ genres: string[] }>("/api/library/genres"),
   moods: () => http<{ moods: { name: string; count: number }[] }>("/api/library/moods"),
+  countries: () => http<{ countries: { code: string; artists: number }[] }>("/api/library/countries"),
   libraryHealth: () =>
     http<{
       ok: boolean; total: number; low_bitrate: number; no_cover: number;
@@ -269,6 +293,18 @@ export const api = {
       `/api/library/artists${s ? `?${s}` : ""}`,
     );
   },
+  artistDetails: (name: string) =>
+    http<{
+      ok: boolean; name: string; in_library: boolean;
+      entry?: ArtistEntry; track_count: number;
+      stats: { tracks?: number; plays?: number; likes?: number; albums?: number; last_played?: string };
+      tracks: { track_id: string; title: string; album_name: string; genre: string; year?: number; plays: number; cover_art_id: string }[];
+      albums: { external_id: string; title: string; year?: number; genre: string; cover_art_id: string }[];
+      genres: { name: string; count: number }[];
+      bridge: BridgeArtistMeta | null;
+      similar: { name: string; track_count: number; from_bridge: boolean; bridge_synced_at?: string | null }[];
+      error?: string;
+    }>(`/api/library/artist?name=${encodeURIComponent(name)}`),
   similarArtists: (name: string, limit = 6) =>
     http<{ items: ArtistEntry[]; server_used: boolean }>(`/api/library/artists/similar?name=${encodeURIComponent(name)}&limit=${limit}`),
   seedTaste: (userId: string, body: { genres: string[]; artists: string[]; track_ids?: string[] }) =>
@@ -331,7 +367,11 @@ export const api = {
     http<{ items: { source: string; data: Record<string, unknown>; fetched_at?: string | null }[] }>(`/api/yandex/track/${track_id}`),
   aiPull: (p?: Record<string, unknown>) => http<{ ok: boolean; error?: string; model?: string }>(`/api/settings/ai/pull`, { method: "POST", body: JSON.stringify(p ?? {}) }),
   recommendByTrack: (id: string) => http<{ items: Track[] }>(`/api/analysis/recommend/by-track/${id}`),
-  coldStart: (n = 30) => http<{ tracks: string[]; items: Track[]; steps: { step: number; name: string; items: number }[] }>(`/api/analysis/cold-start?n=${n}`),
+  coldStart: (n = 30) => http<{
+    tracks: string[]; items: Track[];
+    steps: { step: number; name: string; items: number }[];
+    bridge_sources?: { artist_tags: number; track_moods: number };
+  }>(`/api/analysis/cold-start?n=${n}`),
 
   startLibraryScan: () => http<{ queued: boolean; run_id: string }>(`/api/scan/library`, { method: "POST" }),
   startAnalysis: (limit = 0, force = false) => http<{ queued: boolean; run_id: string }>(`/api/scan/analysis${limit || force ? `?limit=${limit}${force ? "&force=true" : ""}` : ""}`, { method: "POST" }),
@@ -451,6 +491,7 @@ export const api = {
       top_tracks: { track_id: string; title: string; artist_name?: string; score: number; like: boolean | null; plays: number; skips: number; replays: number; last_played?: string | null }[];
       mobile?: { synced_at?: string | null; counts?: Record<string, number>; genres_top?: [string, number][]; artists_top?: [string, number][] };
       likedSongs: string[]; dislikedSongs: string[]; bannedArtists: string[];
+      bannedArtistsDetailed?: { name: string; external_id?: string; reason?: string; created_at?: string | null }[];
       artistDislikeCounts: Record<string, number>;
       counts: { likes: number; dislikes: number; banned: number; events: number; plays: number };
     }>(`/api/users/${id}/profile`),
@@ -483,6 +524,8 @@ export const api = {
     http<{ ok: boolean }>(`/api/users/${userId}/ban-artist`, { method: "POST", body: JSON.stringify({ artist_name }) }),
   unbanArtist: (userId: string, artist_name: string) =>
     http<{ ok: boolean }>(`/api/users/${userId}/unban-artist`, { method: "POST", body: JSON.stringify({ artist_name }) }),
+  unbanAuto: (userId: string) =>
+    http<{ ok: boolean; removed: number; artists: string[] }>(`/api/users/${userId}/unban-auto`, { method: "POST" }),
   vaultStatus: (id: string) => http<{ stored: boolean; available: boolean; key_source?: string }>(`/api/users/${id}/vault`),
   vaultCheck: (id: string) =>
     http<{ stored: boolean; auth_ok: boolean | null; key_source?: string; error?: string }>(`/api/users/${id}/vault-check`),
@@ -765,6 +808,11 @@ export const api = {
     }),
   aiModels: () =>
     http<{ provider: string; configured_model: string; available: string[] }>(`/api/settings/ai/models`),
+  aiOpenCodeModels: (freeOnly = true, refresh = false) =>
+    http<{
+      ok: boolean; provider: string; free_only: boolean; total: number;
+      models: { id: string; name: string; free: boolean; context?: number | null; chat_url: string; description?: string }[];
+    }>(`/api/settings/ai/opencode-models?free_only=${freeOnly}&refresh=${refresh}`),
   getAi: () =>
     http<{
       saved: Record<string, string>;
@@ -790,6 +838,23 @@ export const api = {
     }),
   bridgeStatus: () =>
     http<{ enabled: boolean; url: string; reachable: boolean; error?: string }>(`/api/bridge/status`),
+  bridgeArtistMeta: (name: string) =>
+    http<{ ok: boolean; meta: BridgeArtistMeta | null }>(
+      `/api/bridge/artist-meta?name=${encodeURIComponent(name)}`,
+    ),
+  bridgeEnrichStats: () =>
+    http<{
+      enabled: boolean; total_meta: number; ttl_days: number;
+      tracks_meta?: number; albums_meta?: number;
+    }>(`/api/bridge/enrich/stats`),
+  bridgeEnrich: (body: { name?: string; limit?: number; kind?: "all" | "artist" | "track" | "album" }) =>
+    http<{
+      ok: boolean; fetched?: number; cached?: number; failed?: number;
+      total_meta?: number; error?: string;
+      meta?: BridgeArtistMeta | null;
+      tracks?: { fetched: number; cached: number; failed: number };
+      albums?: { fetched: number; cached: number; failed: number };
+    }>(`/api/bridge/enrich`, { method: "POST", body: JSON.stringify(body) }),
 
   getLibrarySync: () =>
     http<{ url: string; enabled: boolean; token_configured: boolean }>(`/api/library-sync/config`),

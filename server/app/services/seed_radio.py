@@ -318,6 +318,42 @@ def _similar_artist_names(db, artist_name: str, limit: int = 6) -> list[str]:
     return ranked[:limit]
 
 
+def _bridge_similar(db, artist_name: str, have: set[str], limit: int) -> list[str]:
+    """Похожие из метаданных моста — только как ДОБАВКА к локальным.
+
+    Условия: метаданные уже сохранены в artist_metadata (внешний API не
+    дёргаем), имя не дублирует локальных похожих и артист реально есть в
+    локальной библиотеке (иначе треков с него всё равно не будет).
+    """
+    if not limit or not artist_name:
+        return []
+    from app.db.models import Track
+    from app.services import bridge as bridge_svc
+    from app.services.artist_names import norm_name
+
+    row = bridge_svc.get_cached_meta(db, artist_name)
+    if row is None:
+        return []
+    meta = bridge_svc.meta_to_dict(row)
+    out: list[str] = []
+    for raw in meta.get("similar_artists") or []:
+        n = str(raw).strip()
+        key = norm_name(n)
+        if not key or key in have:
+            continue
+        # Избегаем запроса на каждое имя: один EXISTS через подзапрос с
+        # тем же сравнением, что и _artist_top_tracks (lower(trim)).
+        exists = db.query(Track.id).filter(
+            func.lower(func.trim(Track.artist_name)) == key).first()
+        if exists is None:
+            continue
+        have.add(key)
+        out.append(n)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _similar_2hop(db, hop1: list[str], seed_artist: str,
                   per: int = 2, max_hop1: int = 3) -> list[str]:
     """2-й хоп: похожие на похожих (FFDP → Slipknot → соседи Slipknot).
@@ -764,6 +800,26 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
                 seen.add(tid)
                 pool.append(tid)
 
+    # Мост: похожие из Last.fm — ТОЛЬко после локальных и только если
+    # артист есть в библиотеке. Не вытесняют локальных (идут в конец),
+    # 0 в тюнинге = старое поведение 1-в-1.
+    bridge_similar: list[str] = []
+    try:
+        from app.services.artist_names import norm_name as _nn
+
+        _n_bridge = _tuning_int(db, user_id, "radio_bridge_similar", 3, 0, 10)
+        if _n_bridge > 0:
+            _have = {_nn(artist_name)} | {_nn(a) for a in similar}
+            bridge_similar = _bridge_similar(db, artist_name, _have, _n_bridge)
+            for aname in bridge_similar:
+                for t in _artist_top_tracks(db, aname, limit=_n_per):
+                    tid = str(t.id)
+                    if tid not in seen:
+                        seen.add(tid)
+                        pool.append(tid)
+    except Exception:
+        bridge_similar = []
+
     # 2-й хоп: похожие на похожих. Раскрываем топ-3 хопа-1, с каждого до 2 имён,
     # треков с каждого — вдвое меньше, чем с хопа-1 (дальше от сида = тише).
     # 0 в любой ручке = выключено.
@@ -912,14 +968,15 @@ def artist_radio(db, user_id: str, artist_name: str, n: int = 30) -> dict:
         else:
             ordered = [_seed_first] + ordered
         ordered = ordered[:n]
-    _log_info("artist_radio: «{}» пул={} итог={} похожие={} хоп2={} srv={}",
+    _log_info("artist_radio: «{}» пул={} итог={} похожие={} мост={} хоп2={} srv={}",
               artist_name, len(pool), len(ordered), similar,
-              similar_2hop, server_used)
+              bridge_similar, similar_2hop, server_used)
     return {
         "tracks": ordered,
         "seed_ids": seed_ids,
         "similar_artists": similar,
         "similar_artists_2hop": similar_2hop,
+        "bridge_similar_artists": bridge_similar,
         "server_used": server_used,
         "label": artist_name,
     }

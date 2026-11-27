@@ -136,6 +136,23 @@ def ai_models():
     }
 
 
+@router.get("/ai/opencode-models")
+def ai_opencode_models(free_only: bool = True, refresh: bool = False):
+    """Каталог OpenCode Zen с разбором бесплатных (cost=0) моделей."""
+    from app.services import ai as _ai
+
+    if refresh:
+        _ai._opencode_catalog = None
+    models = _ai.opencode_models(free_only=free_only)
+    return {
+        "ok": True,
+        "provider": "OPENCODE",
+        "free_only": free_only,
+        "models": models,
+        "total": len(models),
+    }
+
+
 @router.get("/ai")
 def get_ai(db: Session = Depends(get_db)):
     """Настройки ИИ из БД (сохранены из веб-UI) + effective-итог и статус."""

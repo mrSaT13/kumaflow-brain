@@ -948,7 +948,8 @@ def mood_filter_passes(feat, genre: str | None, want: set[str],
                        target: dict[str, float] | None = None,
                        radius: float = MOOD_RADIUS, limits: tuple = (),
                        gvecs: dict[str, dict[str, float]] | None = None,
-                       genre_auto: dict[str, str] | None = None) -> bool:
+                       genre_auto: dict[str, str] | None = None,
+                       bridge_codes: set[str] | None = None) -> bool:
     """Проходит ли трек пилюлю настроения.
 
     feat — TrackFeatures трека или None (анализа нет).
@@ -973,6 +974,10 @@ def mood_filter_passes(feat, genre: str | None, want: set[str],
         return True
     if feat is None:
         if not want:
+            return True
+        # Мост: слабый фолбэк для треков без аудио-анализа. Только добавляет
+        # проход, никогда не исключает то, что прошло по жанру/ранее.
+        if bridge_codes and (bridge_codes & want):
             return True
         gm = _genre_mood(genre, genre_auto)
         if gm is None:
@@ -4047,13 +4052,25 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
         except Exception:
             _genre_auto = {}
 
+        # Настроения из моста — только для треков без аудио-анализа и только
+        # как дополнительный проход фильтра (adдитивно, 1 запрос на пул).
+        _bridge_moods: dict[str, list[str]] = {}
+        try:
+            if mood and cand:
+                from app.services.bridge import bridge_mood_map
+
+                _bridge_moods = bridge_mood_map(db, list(cand[:_pool_limit]))
+        except Exception:
+            _bridge_moods = {}
+
         def _passes(c: str) -> bool:
             f = fm.get(c)
             _preset = MOOD_PRESETS.get(mood) or {} if mood else {}
             return mood_filter_passes(
                 f, _gm2.get(c), _want, _mood_target, MOOD_RADIUS,
                 limits=(_preset, _hard_act), gvecs=_gvecs,
-                genre_auto=_genre_auto)
+                genre_auto=_genre_auto,
+                bridge_codes=set(_bridge_moods.get(c) or ()) if f is None else None)
 
         _before_mood = len(cand)
         _mood_backup = list(cand)
@@ -4078,6 +4095,21 @@ def wave_continue(db, user_id: str, queue: list[str] | None = None,
                                  mood, _act_code, _before_mood, len(cand))
             except Exception:
                 pass
+
+    # Пилюля страны (из метаданных артиста, подтянутых с моста): мягкий
+    # фильтр как mood — если треков с этой страной мало, откатываемся.
+    # Без синхронизированных метаданных карта пуста → поведение 1-в-1.
+    _country = str(settings.get('country') or '').strip().upper()
+    if _country and cand:
+        try:
+            from app.services.bridge import country_map
+
+            _cmap = country_map(db, list(cand[:_pool_limit]))
+            _kept = [c for c in cand if _cmap.get(c, "").upper() == _country]
+            if len(_kept) >= max(10, min(30, len(cand) // 3)):
+                cand = _kept
+        except Exception:
+            pass
 
     # Фильтр по языку (пилюли клиента «по языку»): ru / foreign / instrumental.
     # Язык берём из Lyrics.language (детект при скачивании текстов).

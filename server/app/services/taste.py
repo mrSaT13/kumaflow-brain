@@ -16,8 +16,11 @@
     Dislike  → artist -0.5, genre -0.3
     seek_back → +0.3/+0.2 ; abandon → -0.2/-0.1
   Правила:
-    3 скипа трека → автодизлайк (source=skip3)
-    3 дизлайка треков артиста → автобан артиста (reason=auto3)
+    3 скипа трека → автодизлайк (source=skip3): трек вылетает из кандидатов,
+        но артист не режется — скипаются часто волны «не под настроение»
+    3 ЯВНЫХ дизлайка треков артиста (rate/events/синк) → автобан (reason=auto3)
+    ручной разбан = надгробие: автобан и старые списки устройств его не
+        воскрешают; ручной бан надгробие снимает
     banned/disliked исключаются из cold-start (см. ml.cold_start_playlist)
 """
 from __future__ import annotations
@@ -309,6 +312,27 @@ def _write_tombstone(db, user_id: str, kind: str, key: str,
         pass
 
 
+def _clear_tombstones(db, user_id: str, kind: str,
+                      key: str | None = None, aux: str | None = None) -> None:
+    """Снять надгробие(я) того же вкуса: юзер вернул действие на место
+    (передизлайкал/перелайкал/забанил вручную). Иначе защита «не
+    воскрешать удалённое» навсегда заблокирует свежее действие и на
+    сервере, и на других устройствах.
+    """
+    vals = [str(v or "").strip() for v in (key, aux)]
+    vals = [v for v in vals if v]
+    if not vals:
+        return
+    try:
+        from app.db.models import TasteTombstone as _TT
+
+        _qp = db.query(_TT).filter(_TT.user_id == user_id, _TT.kind == str(kind))
+        _qp.filter(_TT.key.in_(vals) | _TT.aux.in_(vals)).delete(
+            synchronize_session=False)
+    except Exception:
+        pass
+
+
 def artist_dislike_count(db, user_id: str, artist_name: str) -> int:
     """Сколько дизлайков у треков артиста (порт artistDislikeCounts)."""
     if not artist_name:
@@ -321,15 +345,38 @@ def artist_dislike_count(db, user_id: str, artist_name: str) -> int:
     )
 
 
-def _maybe_autoban(db, user_id: str, artist_name: str | None, extra: int = 0) -> bool:
-    """Правило mobile: 3 дизлайка треков артиста = бан. Возвращает True если только что забанен.
+def _dislike_tombstones(db, user_id: str) -> tuple[set[str], set[str]]:
+    """Надгробия 'юзер снял дизлайк': (ключи=external_id, aux=track_id).
 
-    extra: дизлайки этого же пакета, ещё не видимые в committed (autoflush=False).
+    Плеер/мобила держат свои списки в локальном состоянии и гоняют их в синк
+    снова и снова; без проверки сервер заново создавал бы стёртый крестиком
+    дизлайк — на странице казалось, что крестик «не работает».
+    """
+    try:
+        from app.db.models import TasteTombstone as _TT
 
-    Защита от бана любимых: если у артиста есть лайки/плейлист-вес
-    (любимый артист с парой пропущенных треков) — автобан не стреляет.
-    Только явный ручной бан через API. Это чинит «любимые артисты
-    постоянно банятся».
+        _rows = db.query(_TT.key, _TT.aux).filter_by(
+            user_id=user_id, kind="dislike").all()
+        return (
+            {str(r.key or "").strip() for r in _rows if r.key},
+            {str(r.aux or "").strip() for r in _rows if r.aux},
+        )
+    except Exception:
+        return (set(), set())
+
+
+def _maybe_autoban(db, user_id: str, artist_name: str | None) -> bool:
+    """Правило: 3 ЯВНЫХ дизлайка треков артиста = бан. True если только что забанен.
+
+    Явные — юзер сам поставил дизлайк (rate/events/син профиля).
+    Авто-дизлайки skip3 (3 скипа трека) в бан не идут: скипается часто
+    целая волна, не попавшая в настроение, и скипнутыми треками вырезались
+    артисты целиком. С	auto-дизлайка трек вылетает из кандидатов,
+    но остаётся доступен для другого настроения.
+
+    Защита от бана любимых: если у артиста есть лайки (любимый артист с
+    парой дизлайков) — автобан не стреляет, только явный ручной бан
+    через API. Это чинит «любимые артисты постоянно банятся».
     """
     if not artist_name:
         return False
@@ -340,9 +387,37 @@ def _maybe_autoban(db, user_id: str, artist_name: str | None, extra: int = 0) ->
     )
     if exists:
         return False
-    if artist_dislike_count(db, user_id, artist_name) + extra >= 3:
+    # Ручной разбан — окончательный: надгробие ban ставится в unban_artist.
+    # Иначе синк с устройств (старый список у плеера) и автобан
+    # мгновенно воскресили бы то, что юзер только что разбанил.
+    try:
+        from app.db.models import TasteTombstone as _TT
+
+        _tombs = {
+            str(r.key or "").strip().lower()
+            for r in db.query(_TT.key).filter_by(
+                user_id=user_id, kind="ban").all()
+        }
+        if artist_name.strip().lower() in _tombs:
+            return False
+    except Exception:
+        pass
+    # Считаем ТОЛЬКО явные дизлайки (sources manual/mobile — юзер сам
+    # поставил 👎). Авто-дизлайки skip3 (3 скипа трека) в бан не идут:
+    # юзер часто скипает целую волну не под настроение («спокойная»
+    # крутит рок) — и так резались ни в чём не виноватые артисты.
+    # С	auto-дизлайка трек из кандидатов убирается сам, артист остаётся.
+    _disc_n = (
+        db.query(TrackDislike)
+        .join(Track, Track.id == TrackDislike.track_id)
+        .filter(TrackDislike.user_id == user_id,
+                Track.artist_name == artist_name,
+                TrackDislike.source != "skip3")
+        .count()
+    )
+    if _disc_n >= 3:
         # Любимый артист: есть лайки треков этого артиста — не баним автоматом.
-        # Иначе 3 пропущенных/незашедших трека банят весь топ (17 ♥ / 400+ plays).
+        # Иначе несколько дизлайков банят весь топ (17 ♥ / 400+ plays).
         try:
             _fav_n = (
                 db.query(Favorite)
@@ -354,13 +429,9 @@ def _maybe_autoban(db, user_id: str, artist_name: str | None, extra: int = 0) ->
         except Exception:
             _fav_n = 0
         if _fav_n:
-            try:
-                _dis_n = artist_dislike_count(db, user_id, artist_name) + extra
-            except Exception:
-                _dis_n = 3
             # Баним автоматом только если дизлайков явно больше, чем любви:
             # минимум 5 дизлайков и их больше, чем лайков. Иначе — нет.
-            if _dis_n < 5 or _dis_n <= _fav_n:
+            if _disc_n < 5 or _disc_n <= _fav_n:
                 return False
         # ID подтягиваем сразу (точный матч в волне), имя — как раньше.
         _aid = None
@@ -428,6 +499,9 @@ def record_rate(db, user_id: str, track_id: str, like: bool | None) -> dict:
                 user_id=user_id, track_id=track_id).delete():
             _write_tombstone(db, user_id, "like", _ext or track_id, track_id)
         _add_dislike(db, user_id, track_id, "manual")
+        # Юзер передизлайкал вручную → снимаем надгробие «дизлайк стёрт»,
+        # иначе синк и защита автобана считали бы его по-прежнему стёртым.
+        _clear_tombstones(db, user_id, "dislike", _ext or track_id, track_id)
         if _maybe_autoban(db, user_id, (t.artist_name or "").strip() or None):
             auto_banned = (t.artist_name or "").strip()
     else:
@@ -479,7 +553,8 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
     # и несработанное правило "3 скипа" внутри одного пакета)
     pend_skips: Counter = Counter()
     pend_dis: set[str] = set()
-    pend_artist_dis: Counter = Counter()
+    # Снятые(крестиком) дизлайки — надгробия: skip-правило их не возвращает.
+    _dis_tomb_aux, _ = _dislike_tombstones(db, user_id)
     for e in (events or [])[:max(1, limit)]:
         raw_tid = str(e.get("track_id") or "")
         action = str(e.get("action") or "")
@@ -499,7 +574,10 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
         # закрывал «показ» в метриках, отсюда «ЛАЙК С ВОЛНЫ 0%» при живых
         # лайках. Теперь — как rate: оценка + исход рекомендации.
         if action in ("like", "favorite"):
-            db.query(TrackDislike).filter_by(user_id=user_id, track_id=tid).delete()
+            if db.query(TrackDislike).filter_by(
+                    user_id=user_id, track_id=tid).delete():
+                _write_tombstone(db, user_id, "dislike",
+                                 str(_t.external_id or "") or tid, tid)
             if db.query(Favorite).filter_by(user_id=user_id, track_id=tid).first() is None:
                 db.add(Favorite(user_id=user_id, track_id=tid))
             update_taste_signals(db, user_id, _t, action, pos, _hour, _dow)
@@ -514,6 +592,13 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
             continue
         if action == "dislike":
             _add_dislike(db, user_id, tid, "mobile")
+            _clear_tombstones(db, user_id, "dislike",
+                              str(_t.external_id or "") or tid, tid)
+            # Явный дизлайк с плеера — единственный источник автобана
+            # из событий (скипы в бан не идут).
+            _an = (getattr(_t, "artist_name", "") or "").strip()
+            if _maybe_autoban(db, user_id, _an or None):
+                auto_bans.append(_an)
             update_taste_signals(db, user_id, _t, action, pos, _hour, _dow)
             try:
                 from app.services import rec_feedback as _rfb2
@@ -542,6 +627,10 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
             pass
         stored += 1
         if action == "skip":
+            # Надгробие dislike: юзер крестиком снял ранее созданный
+            # авто-дизлайк — скиповое правило не восстанавливает его.
+            if tid in _dis_tomb_aux:
+                continue
             n_skips = db.query(PlayEvent).filter_by(
                 user_id=user_id, track_id=tid, action="skip").count()
             n_skips += pend_skips[tid]  # pending этого пакета
@@ -551,14 +640,12 @@ def record_events(db, user_id: str, events: list[dict], limit: int = 500) -> dic
                 already = db.query(TrackDislike).filter_by(
                     user_id=user_id, track_id=tid).first() is not None
                 if not already:
+                    # Только авто-дизлайк трека: скип ≠ «артист не нравится»,
+                    # поэтому _maybe_autoban здесь НЕ вызываем (умный
+                    # автобан — только по явным дизлайкам).
                     _add_dislike(db, user_id, tid, "skip3")
                     pend_dis.add(tid)
                     auto_dislikes.append(tid)
-                    artist = _artist_of(db, tid)
-                    if artist:
-                        pend_artist_dis[artist] += 1
-                    if _maybe_autoban(db, user_id, artist, extra=pend_artist_dis.get(artist or "", 0)) and artist:
-                        auto_bans.append(artist)
     db.commit()
     return {"ok": True, "stored": stored, "skipped": skipped,
             "auto_dislikes": auto_dislikes, "auto_bans": auto_bans}
@@ -906,6 +993,15 @@ def user_profile(db, user_id: str, top_n: int = 50) -> dict[str, Any]:
         "likedSongs": liked_ids,
         "dislikedSongs": disliked_ids,
         "bannedArtists": bans,
+        "bannedArtistsDetailed": [
+            {"name": str(r.artist_name),
+             "external_id": str(r.artist_external_id or ""),
+             "reason": str(getattr(r, "reason", "") or ""),
+             "created_at": (r.created_at.isoformat() + "Z")
+                           if getattr(r, "created_at", None) else None}
+            for r in db.query(ArtistBan).filter_by(user_id=user_id)
+            .order_by(ArtistBan.created_at.desc()).all()
+        ],
         "artistDislikeCounts": artist_dislike_counts,
         "genres": genres,
         "artists": artists,
@@ -1052,6 +1148,7 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
     pend_fav: set[str] = set()
     pend_dis: set[str] = set()
     touched_artists: set[str] = set()
+    dis_tomb_aux, _ = _dislike_tombstones(db, user_id)
     for r in ratings:
         if not isinstance(r, dict):
             continue
@@ -1069,7 +1166,12 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
                 pend_fav.add(tid)
                 r_fav += 1
         elif like is False:
-            if tid not in pend_dis and db.query(_TD).filter_by(
+            # Юзер снимал дизлайк (крестик) → надгробие: устаревший
+            # список устройства дизлайк не воскрешает. Статы ниже всё
+            # равно примем — пропускаем только сам дизлайк.
+            if tid in dis_tomb_aux:
+                pass
+            elif tid not in pend_dis and db.query(_TD).filter_by(
                     user_id=user_id, track_id=tid).first() is None:
                 db.query(_Fav).filter_by(user_id=user_id, track_id=tid).delete()
                 pend_fav.discard(tid)
@@ -1113,6 +1215,9 @@ def sync_from_mobile(db, user_id: str, payload: dict) -> dict:
                 m_liked += 1
         for ext in (prof.get("dislikedSongs") or [])[:10000]:
             tid = ext_map.get(str(ext))
+            # Надгробие dislike: юзер снимал дизлайк — не воскрешаем.
+            if tid and tid in dis_tomb_aux:
+                continue
             if tid and tid not in pend_dis and db.query(_TD).filter_by(
                     user_id=user_id, track_id=tid).first() is None:
                 if db.query(_Fav).filter_by(
@@ -1393,9 +1498,15 @@ def sync_to_mobile(db, user_id: str, since: str | None = None) -> dict:
         return {"ok": False, "error": "not found"}
     now = datetime.utcnow()
     try:
+        # Плеер/мобила держат свои списки локально и гонят их в синк без
+        # курсора чистки: надгробия dislike/ban — единственная защита от
+        # воскрешения стёртого крестиком дизлайка и разбаненного артиста,
+        # поэтому живём год. Краткосрочный "like" (анлайк быстро
+        # подтверждается устройствами) чистим через месяц, как раньше.
         db.query(_TT).filter(
             _TT.user_id == user_id,
-            _TT.deleted_at < now - timedelta(days=30)).delete(
+            _TT.deleted_at < now - timedelta(days=30),
+            _TT.kind == "like").delete(
             synchronize_session=False)
         db.flush()
     except Exception:
@@ -1420,12 +1531,16 @@ def sync_to_mobile(db, user_id: str, since: str | None = None) -> dict:
     disliked = [id2ext[tid] for (tid,) in db.query(_TD.track_id).filter(_TD.user_id == user_id).all()
                 if str(tid) in id2ext]
     banned = [str(r.artist_name) for r in db.query(_AB).filter_by(user_id=user_id).all()]
-    # Детально для десктопа (подтяжка банов при старте): имена + Navidrome-ID.
+    # Детально для десктопа (подтяжка банов при старте): имена + Navidrome-ID
+    # + причина/дата (веб показывает значки «авто/вручную/с устройства»).
     # Поле bannedArtists выше не меняем — мобила его уже ест как строки.
     try:
         banned_detailed = [
             {"name": str(r.artist_name),
-             "external_id": str(r.artist_external_id or "")}
+             "external_id": str(r.artist_external_id or ""),
+             "reason": str(getattr(r, "reason", "") or ""),
+             "created_at": (r.created_at.isoformat() + "Z")
+                           if getattr(r, "created_at", None) else None}
             for r in db.query(_AB).filter_by(user_id=user_id).all()
         ]
     except Exception:

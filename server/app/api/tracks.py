@@ -4,11 +4,13 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db, models
 from app.core.auth import require_admin, require_brain_auth
 from app.db.models import ScanLog, ScanRun, Track, TrackFeatures, TrackCluster, Lyrics, TrackMetadataEnrich
+from app.services import bridge as bridge_svc
 from app.services.queue import enqueue
 from app.workers.tasks import analyze_single
 
@@ -52,6 +54,7 @@ def list_tracks(
     source: str | None = None,
     server_id: str | None = None,
     mood: str | None = None,
+    country: str | None = None,
     limit: int = Query(100, le=500),
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -77,6 +80,23 @@ def list_tracks(
         query = query.filter(Track.genre == genre)
     if artist:
         query = query.filter(Track.artist_name == artist)
+    if country:
+        # Страна живёт в метаданных артиста из моста. Фильтр аддитивный:
+        # без синхронизированных метаданных треки не исчезают (пусто).
+        from app.db.models import ArtistMetadata
+        from app.services.bridge import artist_key
+
+        want_country = country.strip().upper()
+        names = [
+            str(r.name) for r in db.query(ArtistMetadata).filter(
+                ArtistMetadata.country.isnot(None)).all()
+            if str(r.country or "").upper() == want_country
+        ]
+        lowered = [n.lower() for n in names]
+        if not names:
+            return {"items": [], "total": 0, "limit": limit, "offset": offset}
+        query = query.filter(
+            Track.artist_name.in_(names) | func.lower(Track.artist_name).in_(lowered))
     if mood:
         # Настроение из TrackFeatures.mood_labels. Сравнение — по
         # нормализованным меткам (strip + lower) в Python, а не JSON-LIKE:
@@ -197,6 +217,12 @@ def get_track(track_id: str, db: Session = Depends(get_db)):
             else None
         ),
         "metadata": {row.source: row.data for row in enrich},
+        # Аддитивно: метаданные артиста из моста, если уже синхронизированы.
+        "artist_metadata": (
+            bridge_svc.meta_to_dict(_arow)
+            if (_arow := bridge_svc.get_cached_meta(db, t.artist_name)) is not None
+            else None
+        ),
     }
 
 

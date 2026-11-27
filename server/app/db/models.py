@@ -188,6 +188,34 @@ class TrackMetadataEnrich(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ArtistMetadata(Base):
+    """Метаданные артиста из KumaFlow Bridge (MusicBrainz + Last.fm).
+
+    Аддитивный источник: не заменяет локальные жанры/поведение, а лежит
+    рядом и подмешивается только там, где локального сигнала мало.
+    Ключ — каноническое имя (library_sync.canonical_key), чтобы «AC/DC»
+    и «ac dc» не создавали две строки. Старые/неполные ответы моста
+    tolerated: все поля опциональны, источник и время синха обязательны.
+    """
+    __tablename__ = "artist_metadata"
+
+    name_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="bridge")
+    mbid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    country: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    artist_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    tags: Mapped[Optional[list]] = mapped_column(JSONCol(), nullable=True)
+    mood_tags: Mapped[Optional[list]] = mapped_column(JSONCol(), nullable=True)
+    similar_artists: Mapped[Optional[list]] = mapped_column(JSONCol(), nullable=True)
+    bio_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    lastfm_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    cover_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class Playlist(Base):
     __tablename__ = "playlists"
 

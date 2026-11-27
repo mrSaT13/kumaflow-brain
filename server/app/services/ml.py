@@ -315,12 +315,17 @@ def _load_cluster_map(db) -> dict[str, int]:
 
 
 def _step1_signal(rows, feat_map: dict, hist_cnt: dict | None = None,
-                  fav_set: set | None = None) -> dict[str, float]:
+                  fav_set: set | None = None,
+                  bridge_tags: dict[str, list[str]] | None = None) -> dict[str, float]:
     """Собирает веса по artist/genre/mood с учётом прослушиваний, избранного, оценок, давности.
 
     Чистая функция от лёгких строк (без SQL внутри — один проход по библиотеке).
     hist_cnt/fav_set: per-user персонализация через PlayHistory/Favorite,
     иначе глобально по play_count/starred (как раньше).
+    bridge_tags: канон-ключ артиста → теги из моста. АДДИТИВНЫЙ сигнал:
+    теги добавляют маленький вес только к жанрам, которые реально есть в
+    библиотеке (иначе ключ всё равно не совпал бы в step2), и только если
+    метаданные артиста уже сохранены. Без моста поведение 1-в-1.
     Порт: mobile ml_store.seedTaste + MLService 0.6 floor.
     """
     weights: dict[str, float] = {}
@@ -328,6 +333,23 @@ def _step1_signal(rows, feat_map: dict, hist_cnt: dict | None = None,
     per_user = bool(hist_cnt or fav_set)
     hist_cnt = hist_cnt or {}
     fav_set = fav_set or set()
+    bridge_tags = bridge_tags or {}
+    # Канонический жанр → реальные написания жанра в библиотеке: step2
+    # сравнивает f"genre::{t.genre}" точной строкой, поэтому писать вес
+    # под канон напрямую бессмысленно.
+    genre_variants: dict[str, set[str]] = {}
+    if bridge_tags:
+        try:
+            from app.services.genre_canon import canon_genre
+
+            _canon = canon_genre
+        except Exception:
+            _canon = lambda s: str(s or "").strip().lower()  # noqa: E731
+        for _t in rows:
+            if _t.genre:
+                genre_variants.setdefault(
+                    str(_canon(str(_t.genre)) or "").strip().lower(), set()
+                ).add(str(_t.genre))
     for t in rows:
         tid = str(t.id)
         base = 0.0
@@ -361,6 +383,20 @@ def _step1_signal(rows, feat_map: dict, hist_cnt: dict | None = None,
         if t.artist_name:
             key = f"artist::{t.artist_name}"
             weights[key] = weights.get(key, 0.0) + base
+            # Теги моста: только реально существующие в библиотеке жанры
+            # и только топ-2 тега артиста, вес меньше локального жанра.
+            if bridge_tags and genre_variants:
+                try:
+                    from app.services.library_sync import canonical_key as _ck
+
+                    _tags = bridge_tags.get(_ck(t.artist_name)) or []
+                    for _raw in _tags[:2]:
+                        _cg = str(_canon(str(_raw)) or "").strip().lower()
+                        for _gv in genre_variants.get(_cg, ()):
+                            _gkey = f"genre::{_gv}"
+                            weights[_gkey] = weights.get(_gkey, 0.0) + base * 0.06
+                except Exception:
+                    pass
         if t.genre:
             key = f"genre::{t.genre}"
             weights[key] = weights.get(key, 0.0) + base * 0.85 + 0.7
@@ -394,11 +430,22 @@ def _novelty_factor(last_played, now: datetime | None = None) -> float:
     return 0.25 + 0.75 * min(days / 30.0, 1.0)
 
 
+def _norm_mood_code(value: str | None) -> str:
+    """Привести пилюлю к каноническому коду (или оставить как есть)."""
+    try:
+        from app.services.wave import norm_mood
+
+        return norm_mood(value) or str(value or "").strip().lower()
+    except Exception:
+        return str(value or "").strip().lower()
+
+
 def _step2_candidates(rows, signal: dict[str, float],
                       feat_map: dict, cluster_map: dict[str, int],
                       novelty_map: dict[str, Any] | None = None,
                       seed_vec=None, seed_cluster: int | None = None,
-                      mood_filter: str | None = None) -> list[tuple]:
+                      mood_filter: str | None = None,
+                      bridge_moods: dict[str, list[str]] | None = None) -> list[tuple]:
     """Расширяем кандидатов: точные совпадения + кластер-соседи + sonic-близость к топ-сигналам + fallback.
 
     Чистая функция от лёгких строк (без SQL внутри).
@@ -441,7 +488,11 @@ def _step2_candidates(rows, signal: dict[str, float],
         f = feat_map.get(tid)
         if mood_filter:
             moods = {str(m).lower() for m in (f.mood_labels or [])} if f else set()
-            if mood_filter.lower() not in moods:
+            # Мост — аддитивный фолбэк только для треков без аудио-лейблов:
+            # сверяем канонический код пилюли с кодами из Last.fm-тегов.
+            _bm = set(bridge_moods.get(tid) or ()) if (bridge_moods and not moods) else set()
+            if mood_filter.lower() not in moods and not (
+                _bm and _bm & {_norm_mood_code(mood_filter)}):
                 continue
         score = 0.0
         w = 0.0
@@ -710,10 +761,30 @@ def cold_start_playlist(server_id: str, n: int = 30, user_id: str | None = None,
             if f is not None:
                 seed_vec = _feature_vector(None, f)  # type: ignore[arg-type]
             seed_cluster = cluster_map.get(str(seed_track_id))
-        signal = _step1_signal(rows, feat_map, hist_cnt, fav_set)
+        # Теги артистов из моста (уже сохранённые в БД) — только как добавка.
+        bridge_tags: dict[str, list[str]] = {}
+        try:
+            from app.db.models import ArtistMetadata
+
+            for _k, _tags in db.query(ArtistMetadata.name_key, ArtistMetadata.tags).all():
+                if _tags:
+                    bridge_tags[str(_k)] = [str(x) for x in _tags]
+        except Exception:
+            bridge_tags = {}
+        signal = _step1_signal(rows, feat_map, hist_cnt, fav_set, bridge_tags)
+        # Настроения из моста для cold-start: только треки без аудио-лейблов.
+        bridge_moods: dict[str, list[str]] = {}
+        try:
+            if mood:
+                from app.services.bridge import bridge_mood_map
+
+                bridge_moods = bridge_mood_map(db, [str(t.id) for t in rows])
+        except Exception:
+            bridge_moods = {}
         candidates = _step2_candidates(rows, signal, feat_map, cluster_map,
                                        novelty_map=novelty_map, seed_vec=seed_vec,
-                                       seed_cluster=seed_cluster, mood_filter=mood)
+                                       seed_cluster=seed_cluster, mood_filter=mood,
+                                       bridge_moods=bridge_moods)
         items: list[tuple] = []
         for t, s in candidates:
             tid = str(t.id)
@@ -738,6 +809,11 @@ def cold_start_playlist(server_id: str, n: int = 30, user_id: str | None = None,
             for t in tracks
         ],
         "signal": signal,
+        # Аддитивная прозрачность: что подмешано из моста (старые поля не трогаем).
+        "bridge_sources": {
+            "artist_tags": len(bridge_tags),
+            "track_moods": len(bridge_moods),
+        },
         "genre_distribution": dict(genre_dist),
         "artist_distribution": dict(artist_dist.most_common(6)),
         "excluded_disliked": excluded_dis,

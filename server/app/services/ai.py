@@ -43,6 +43,10 @@ def is_configured() -> bool:
         return bool(e.get("gemini_api_key"))
     if p == "MISTRAL":
         return bool(e.get("mistral_api_key"))
+    if p == "OPENCODE":
+        # Ключ может быть не нужен для списка моделей; для чата он передаётся,
+        # если задан. Достаточно базового URL и выбранной модели.
+        return bool(e.get("opencode_server_url") and (e.get("model") or e.get("opencode_model")))
     return False
 
 
@@ -95,6 +99,16 @@ def chat(
             "https://api.mistral.ai/v1/chat/completions",
             e.get("mistral_api_key") or "",
             model or e.get("model") or "mistral-small-latest",
+            messages,
+            temperature,
+            max_tokens,
+        )
+    if provider == "OPENCODE":
+        # OpenCode Zen: каталог /models, чат — OpenAI-совместимый endpoint.
+        return _openai_compatible(
+            e.get("opencode_chat_url") or "https://opencode.ai/inference/openai/v1/chat/completions",
+            e.get("opencode_api_key") or "",
+            model or e.get("model") or "mimo-v2.6-flash-free",
             messages,
             temperature,
             max_tokens,
@@ -176,6 +190,76 @@ def _ollama_local(
     return (data.get("response") or "").strip()
 
 
+OPENCODE_MODELS_URL = "https://opencode.ai/zen/v1"
+OPENCODE_CHAT_URL = "https://opencode.ai/inference/openai/v1/chat/completions"
+_opencode_catalog: tuple[float, list[dict]] | None = None
+OPENCODE_CATALOG_TTL = 600  # сек: каталог_model меняется редко
+
+
+def _price(value) -> float:
+    """OpenCode Zen отдаёт цену числом или строкой, иногда вложенным dict."""
+    if isinstance(value, dict):
+        value = value.get("price")
+    try:
+        return float(value if value is not None else 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_free_model(m: dict) -> bool:
+    mid = str(m.get("id") or "").lower()
+    if "free" in mid:
+        return True
+    text = ((m.get("cost") or {}).get("text") or {})
+    return _price(text.get("input")) == 0 and _price(text.get("output")) == 0
+
+
+def opencode_models(free_only: bool = True) -> list[dict]:
+    """Каталог OpenCode Zen с пометкой Free. Ошибки/нет сети — пусто (не падаем).
+
+    Формат элемента: {id, name, free, context, chat_url, description}.
+    """
+    global _opencode_catalog
+    import time
+
+    e = _eff()
+    base = (e.get("opencode_server_url") or OPENCODE_MODELS_URL).rstrip("/")
+    now = time.time()
+    if _opencode_catalog and now - _opencode_catalog[0] < OPENCODE_CATALOG_TTL:
+        models = _opencode_catalog[1]
+    else:
+        try:
+            headers = {}
+            if e.get("opencode_api_key"):
+                headers["authorization"] = f"Bearer {e['opencode_api_key']}"
+            r = httpx.get(f"{base}/models", headers=headers, timeout=20)
+            r.raise_for_status()
+            raw = (r.json() or {}).get("data") or []
+            models = []
+            for m in raw:
+                if not isinstance(m, dict) or not m.get("id"):
+                    continue
+                api_info = m.get("api") or {}
+                cc = api_info.get("chat-completions") or {}
+                chat_url = str(cc.get("base_url") or "").rstrip("/")
+                if chat_url and not chat_url.endswith("/chat/completions"):
+                    chat_url += "/chat/completions"
+                limit = m.get("limit") or {}
+                models.append({
+                    "id": str(m["id"]),
+                    "name": str(m.get("name") or m["id"]),
+                    "free": _is_free_model(m),
+                    "context": limit.get("context"),
+                    "chat_url": chat_url,
+                    "description": str(m.get("description") or "")[:300],
+                })
+            _opencode_catalog = (now, models)
+        except Exception as exc:  # noqa: BLE001 — AI опционален
+            logger.warning("opencode models fetch failed: {}", exc)
+            return []
+    return [m for m in models if m["free"]] if free_only else models
+
+
 def available_models() -> list[str]:
     e = _eff()
     provider = (e.get("provider") or "NONE").upper()
@@ -242,4 +326,7 @@ def available_models() -> list[str]:
                         out.append(mid)
         except httpx.HTTPError as exc:
             logger.warning("openai models fetch failed: {}", exc)
+    elif provider == "OPENCODE":
+        # По просьбе UX: по умолчанию показываем только Free-модели.
+        out = [m["id"] for m in opencode_models(free_only=True)]
     return out

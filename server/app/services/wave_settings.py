@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-KEYS = ("mood", "activity", "characteristic", "language")
+KEYS = ("mood", "activity", "characteristic", "language", "country")
 _MAX_LEN = 64
 
 

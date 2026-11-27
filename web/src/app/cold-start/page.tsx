@@ -278,13 +278,26 @@ export default function ColdStartPage() {
           </div>
           {expanded && (
             <Card className="mb-4">
-              <div className="flex items-center gap-3 mb-3">
+              <div className="flex items-center gap-3 mb-3 flex-wrap">
                 <span className="text-sm font-semibold">Похожие на «{expanded}»</span>
                 {similarServer[expanded] ? (
                   <span className="kuma-pill">с сервера</span>
                 ) : (
                   <span className="kuma-pill">локально</span>
                 )}
+                {(() => {
+                  const a = artistsData?.items.find((x) => x.name === expanded);
+                  if (!a?.bridge_synced_at) return null;
+                  return (
+                    <span
+                      className="kuma-pill inline-flex items-center gap-1"
+                      title={`Теги артиста синхронизированы с мостом ${a.bridge_synced_at.slice(0, 10)} · ${a.bridge_tags?.join(", ") || "без тегов"}`}
+                    >
+                      <Sparkles className="w-3 h-3" /> мост: {(a.bridge_tags ?? []).slice(0, 3).join(", ") || "тегов нет"}
+                    </span>
+                  );
+                })()}
+                <a href={`/artists/${encodeURIComponent(expanded)}`} className="kuma-pill hover:text-text">страница артиста ↗</a>
                 <button className="kuma-pill hover:text-text ml-auto" onClick={() => setExpanded(null)}>
                   ✕ скрыть
                 </button>

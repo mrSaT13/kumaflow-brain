@@ -43,3 +43,5 @@ SESSION_CONTINUE_*.md
 SESSION-*.md
 docs/SESSION-*.md
 docs/api-reference.md
+# одноразовые ТЗ/заметки для ИИ — локальные, в репу не едут
+ЗАДАЧА-ДЛЯ-ИИ-*.md

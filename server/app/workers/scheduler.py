@@ -168,6 +168,12 @@ def _tick_once() -> None:
                         _up.check_and_notify(db)
                     except Exception:
                         pass
+                elif kind == "bridge_enrich":
+                    # Мост — внешние API с лимитом 1 req/s, поэтому в очередь
+                    # и пачками. Внутри задачи проверяется enabled/url.
+                    from app.services.bridge import bridge_enrich_job
+
+                    enqueue_light(bridge_enrich_job, limit=25, job_timeout=1800)
                 elif kind == "query_aliases":
                     # Самообучение «спасателя запроса»: мозг сам разбирает
                     # промахи («Эминем» → «Eminem») и учится на поведении юзера.

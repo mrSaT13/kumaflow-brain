@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 MediaServerType = Literal["navidrome", "jellyfin", "emby", "lyrion", "none"]
-AiProvider = Literal["NONE", "OLLAMA", "OLLAMA_CLOUD", "OPENAI", "GEMINI", "MISTRAL"]
+AiProvider = Literal["NONE", "OLLAMA", "OLLAMA_CLOUD", "OPENAI", "GEMINI", "MISTRAL", "OPENCODE"]
 
 
 class Settings(BaseSettings):
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "KumaFlow Brain"
-    app_version: str = "0.3.44"
+    app_version: str = "0.3.46"
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
     # Часовой пояс «домашнего» времени: границы суток для daily-плейлистов,
@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     ollama_cloud_model: str = "llama3.1"
     gemini_api_key: str = ""
     mistral_api_key: str = ""
+    # OpenCode Zen: каталог моделей и OpenAI-совместимый чат-эндпоинт.
+    # Бесплатные модели определяем по price=0 в /models (см. services.ai).
+    opencode_server_url: str = "https://opencode.ai/zen/v1"
+    opencode_chat_url: str = "https://opencode.ai/inference/openai/v1/chat/completions"
+    opencode_api_key: str = ""
 
     clap_enabled: bool = False
     # Аудио-эмбеддинги CPU ONNX (DCLAP-audio / MusiCNN) — opt-in для динозавров.
@@ -151,6 +156,7 @@ class Settings(BaseSettings):
         "ollama_cloud_api_key",
         "gemini_api_key",
         "mistral_api_key",
+        "opencode_api_key",
         "yandex_music_token",
         "jellyfin_token",
         "emby_token",

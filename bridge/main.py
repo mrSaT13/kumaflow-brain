@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import RedirectResponse
 
 APP_VERSION = "0.1.0"
 
@@ -157,6 +158,7 @@ async def artist(name: str = Query(..., min_length=1, max_length=256)) -> dict[s
         "country": mb.get("country", ""),
         "type": mb.get("type", ""),
         "tags": lfm["tags"],
+        "mood_tags": [t for t in lfm["tags"] if t.strip().lower() in MOOD_WORDS],
         "similar_artists": lfm["similar"],
         "bio_summary": lfm["bio"],
         "lastfm_url": lfm["url"],
@@ -197,3 +199,129 @@ async def release(
     }
     _set_cache(key, result)
     return {"cached": False, **result}
+
+
+# --- дополнительные эндпоинты (как на VPS-патче + новые для треков/альбомов) ---
+
+MOOD_WORDS = {
+    "melancholic", "sad", "happy", "energetic", "calm", "aggressive", "chill",
+    "dreamy", "dark", "uplifting", "romantic", "party", "summer", "winter",
+    "acoustic", "electronic", "mellow", "moody", "introspective",
+    "euphoric", "relaxing", "sentimental", "bright",
+}
+
+
+def _normalize_lfm_entity(payload: dict[str, Any]) -> dict[str, Any]:
+    """Привести ответ track.getInfo/album.getInfo к единому виду."""
+    ent = payload.get("track") or payload.get("album") or {}
+    if not isinstance(ent, dict):
+        ent = {}
+    tags = ent.get("tags", {}).get("tag", []) if isinstance(ent.get("tags"), dict) else []
+    if isinstance(tags, dict):
+        tags = [tags]
+    tag_names = [str(t.get("name", "")) for t in tags if isinstance(t, dict) and t.get("name")]
+    similar = ent.get("similar", {}).get("track", []) if isinstance(ent.get("similar"), dict) else []
+    if isinstance(similar, dict):
+        similar = [similar]
+    sim_names = [
+        {"name": str(t.get("name", "")),
+         "artist": str((t.get("artist") or {}).get("name", ""))
+         if isinstance(t.get("artist"), dict) else str(t.get("artist") or "")}
+        for t in similar if isinstance(t, dict) and t.get("name")
+    ]
+    wiki = ent.get("wiki") or ent.get("bio") or {}
+    artist_val = ent.get("artist") or ""
+    return {
+        "name": str(ent.get("name", "")),
+        "artist": str(artist_val.get("name", "")) if isinstance(artist_val, dict) else str(artist_val),
+        "mbid": str(ent.get("mbid", "")),
+        "tags": tag_names,
+        "mood_tags": [t for t in tag_names if t.strip().lower() in MOOD_WORDS],
+        "similar": sim_names[:30],
+        "summary": str(wiki.get("summary", "")) if isinstance(wiki, dict) else "",
+        "url": str(ent.get("url", "")),
+    }
+
+
+async def _lfm_entity_info(method: str, **params: str) -> dict[str, Any]:
+    """Универсальный Last.fm-запрос (track.getInfo / album.getInfo)."""
+    if not LASTFM_API_KEY:
+        return {"tags": [], "mood_tags": [], "similar": [], "summary": "", "url": ""}
+    params.update({"method": method, "api_key": LASTFM_API_KEY,
+                   "format": "json", "autocorrect": "1"})
+    await _throttle("lfm")
+    async with _client() as c:
+        r = await c.get(LFM_API, params=params)
+        r.raise_for_status()
+        return _normalize_lfm_entity(r.json())
+
+
+@app.get("/api/bridge/cover")
+async def cover(mbid: str = Query(..., min_length=1), size: int = Query(500, ge=100, le=1000)):
+    """Обложка из Cover Art Archive по MusicBrainz release-group MBID."""
+    return RedirectResponse(
+        url=f"https://coverartarchive.org/release-group/{mbid}/front-{size}",
+        status_code=302,
+    )
+
+
+@app.get("/api/bridge/mood")
+async def mood(name: str = Query(..., min_length=1, max_length=256)):
+    """Настроение артиста: фильтр тегов Last.fm по словарю MOOD_WORDS."""
+    lfm = await _lfm_artist_info(name.strip())
+    return {
+        "artist": name,
+        "mood_tags": [t for t in lfm["tags"] if t.strip().lower() in MOOD_WORDS],
+        "all_tags": lfm["tags"],
+        "bio_summary": lfm["bio"],
+    }
+
+
+@app.get("/api/bridge/tags")
+async def tags(name: str = Query(..., min_length=1, max_length=256)):
+    """Все теги артиста + похожие + био (без MusicBrainz)."""
+    return await _lfm_artist_info(name.strip())
+
+
+@app.get("/api/bridge/track")
+async def track(
+    artist: str = Query(..., min_length=1, max_length=256),
+    title: str = Query(..., min_length=1, max_length=256),
+):
+    """Теги/настроение/похожие трека из Last.fm (аддитивный источник)."""
+    key = f"track:{artist.strip().lower()}:{title.strip().lower()}"
+    hit = _get_cache(key)
+    if hit is not None:
+        return {"cached": True, **hit}
+    try:
+        info = await _lfm_entity_info("track.getInfo", artist=artist.strip(), track=title.strip())
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Last.fm unavailable: {e}")
+    if not info.get("name"):
+        raise HTTPException(status_code=404, detail="track not found")
+    _set_cache(key, info)
+    return {"cached": False, **info}
+
+
+@app.get("/api/bridge/album")
+async def album(
+    album_name: str = Query(..., min_length=1, max_length=256, alias="album"),
+    artist: str = Query(..., min_length=1, max_length=256),
+):
+    """Альбом: теги Last.fm + MBID + ссылка на обложку."""
+    key = f"album:{artist.strip().lower()}:{album_name.strip().lower()}"
+    hit = _get_cache(key)
+    if hit is not None:
+        return {"cached": True, **hit}
+    try:
+        info = await _lfm_entity_info("album.getInfo", artist=artist.strip(), album=album_name.strip())
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Last.fm unavailable: {e}")
+    if not info.get("name"):
+        raise HTTPException(status_code=404, detail="album not found")
+    info["cover_url"] = (
+        f"https://coverartarchive.org/release-group/{info['mbid']}/front-500"
+        if info.get("mbid") else ""
+    )
+    _set_cache(key, info)
+    return {"cached": False, **info}

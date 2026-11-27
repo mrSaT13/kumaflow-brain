@@ -102,6 +102,7 @@ const COMP_LABELS: { key: keyof WaveComp; label: string }[] = [
 export default function WavePage() {
   const { users, userId, setUserId, isMine } = useCurrentUser();
   const [mood, setMood] = useState("");
+  const [country, setCountry] = useState("");
   const [queue, setQueue] = useState<WaveTrack[]>([]);
   const [playingIdx, setPlayingIdx] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -195,6 +196,7 @@ export default function WavePage() {
     lastLocalEdit.current = 0; // смена плеера — разрешаем свежий слепок сразу
   }
   const moodOptions = useMemo(() => (profile?.moods ?? []).map((m) => m.name), [profile]);
+  const { data: countriesData } = useSWR("/api/library/countries", () => api.countries(), { refreshInterval: 60000 });
   // Общие пилюли волны: выбрал на мобильном — веб подхватит (и наоборот).
   // Поллинг 30с: сброс на другом устройстве станет виден без перезагрузки.
   const { data: sharedSettings, mutate: mutateShared } = useSWR(
@@ -212,6 +214,27 @@ export default function WavePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sharedSettings]);
+  const countryTouched = useRef(false);
+  useEffect(() => { countryTouched.current = false; }, [userId]);
+  useEffect(() => {
+    if (!countryTouched.current && sharedSettings && !country) {
+      const c = sharedSettings.settings?.country ?? "";
+      if (c) setCountry(c);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sharedSettings]);
+  async function changeCountry(v: string) {
+    countryTouched.current = true;
+    setCountry(v);
+    setPhoneMirror(false);
+    if (!userId) return;
+    try {
+      const r = await api.saveWaveSettings(userId, { country: v });
+      mutateShared(r, false);
+    } catch (e: unknown) {
+      toast(fmtErr(e), "err");
+    }
+  }
   async function changeMood(v: string) {
     moodTouched.current = true;
     setMood(v);
@@ -287,7 +310,7 @@ export default function WavePage() {
         queue: q,
         current_track_id: q.length > 0 ? q[q.length - 1] : undefined,
         count: 10,
-        settings: mood ? { mood } : {},
+        settings: { ...(mood ? { mood } : {}), ...(country ? { country } : {}) },
         recent_events: events,
       });
       const tracks = (r.tracks ?? []) as WaveTrack[];
@@ -349,7 +372,7 @@ export default function WavePage() {
           queue: [],
           current_track_id: tid,
           count: 10,
-          settings: mood ? { mood } : {},
+          settings: { ...(mood ? { mood } : {}), ...(country ? { country } : {}) },
           recent_events: [{ track_id: tid, action: "play" }],
         });
         const tracks = (r.tracks ?? []) as WaveTrack[];
@@ -490,7 +513,7 @@ export default function WavePage() {
                   queue: snapQueue.map((t) => t.track_id),
                   current_track_id: extId,
                   count: 10,
-                  settings: mood ? { mood } : {},
+                  settings: { ...(mood ? { mood } : {}), ...(country ? { country } : {}) },
                   recent_events: [...drainEvents(), { track_id: extId, action: "play" }],
                 });
                 if (stop) return;
@@ -544,6 +567,17 @@ export default function WavePage() {
               <option value="">Настроение: авто</option>
               {moodOptions.map((m) => (
                 <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+            <select
+              className="kuma-input kuma-input-inline w-40"
+              value={country}
+              onChange={(e) => void changeCountry(e.target.value)}
+              title="Страна артиста (из моста): слушать только своё. Пусто — без ограничения"
+            >
+              <option value="">Страна: любая</option>
+              {(countriesData?.countries ?? []).map((c) => (
+                <option key={c.code} value={c.code}>{c.code} · {c.artists}</option>
               ))}
             </select>
               <Button onClick={() => more(queue.length === 0)} disabled={busy || !userId}>

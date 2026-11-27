@@ -176,6 +176,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # 0 = выключено, поведение 1в1 как раньше.
         "radio_second_hop_artists": 3,
         "radio_second_hop": 2,
+        # мост: похожие из Last.fm как ДОБАВКА после локальных (0 = выключить).
+        "radio_bridge_similar": 3,
         # векторный добор: соседи сидов по звуку (тембр + 9-D + CLAP),
         # а не только по имени жанра. 0 = выключено.
         "radio_vector": 60,
@@ -223,6 +225,7 @@ for _k, _lo, _hi in (
         ("radio_similar", 1, 20), ("radio_per_similar", 1, 100),
         ("radio_server", 0, 100), ("radio_cluster_pool", 0, 2000),
         ("radio_second_hop_artists", 0, 10), ("radio_second_hop", 0, 10),
+        ("radio_bridge_similar", 0, 10),
         ("radio_vector", 0, 500), ("mmr_lambda", 0.0, 1.0)):
     _g2 = ("repeats" if _k in ("fatigue_days", "artist_cap")
            else "character" if _k == "likes_threshold"

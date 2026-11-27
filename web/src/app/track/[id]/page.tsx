@@ -4,7 +4,7 @@ import useSWR from "swr";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
-import { FileText, Sparkles } from "lucide-react";
+import { ExternalLink, FileText, Sparkles } from "lucide-react";
 import { Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import { api, type Track } from "@/lib/api";
 import { useIsAdmin } from "@/lib/useIsAdmin";
@@ -15,6 +15,10 @@ export default function TrackPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
   const { data, error, isLoading, mutate } = useSWR(["track", id], () => api.getTrack(id));
+  const bridgeTrack = data?.metadata?.bridge_track as {
+    mood_tags?: string[]; mood_codes?: string[]; tags?: string[];
+    synced_at?: string; stale?: boolean; source?: string;
+  } | undefined;
   const { data: recs } = useSWR(data ? ["rec", id] : null, () => api.recommendByTrack(id));
   const [busy, setBusy] = useState<"sonic" | "lyrics" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -123,6 +127,52 @@ export default function TrackPage() {
             <Row k="Оценка" v={data.rating} />
             <Row k="Кластер" v={data.cluster ? `#${data.cluster.id} (${data.cluster.algorithm})` : "—"} />
           </dl>
+          {data.artist_name && (
+            <a
+              href={`/artists/${encodeURIComponent(data.artist_name)}`}
+              className="kuma-pill inline-flex items-center gap-1 mt-3 hover:text-text"
+            >
+              Страница артиста <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
+
+          {data.artist_metadata && (
+            <div className="mt-4 pt-3 border-t border-border">
+              <div className="text-[11px] text-muted flex items-center gap-1 flex-wrap">
+                <Sparkles className="w-3 h-3" />
+                <span>Теги артиста · синхронизировано с мостом</span>
+                {data.artist_metadata.synced_at && (
+                  <span className="tabular-nums">({data.artist_metadata.synced_at.slice(0, 10)})</span>
+                )}
+                {data.artist_metadata.stale && (
+                  <span title="Последняя синхронизация не удалась — показаны прошлые данные">⚠ outdated</span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {(data.artist_metadata.tags ?? []).length ? (
+                  data.artist_metadata.tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="kuma-pill !text-[11px]"
+                      title={`${data.artist_metadata?.source ?? "bridge"} · ${data.artist_metadata?.mbid || "MusicBrainz ID неизвестен"}`}
+                    >
+                      {tag}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-xs text-muted">Тегов пока нет — запустите синхронизацию с мостом в Настройках.</span>
+                )}
+              </div>
+              {!!data.artist_metadata.bio_summary && (
+                <p className="text-xs text-muted mt-2 line-clamp-3">{data.artist_metadata.bio_summary}</p>
+              )}
+              {!!data.artist_metadata.similar_artists?.length && (
+                <div className="text-[11px] text-muted mt-2">
+                  Похожие (Last.fm): {data.artist_metadata.similar_artists.slice(0, 6).join(", ")}
+                </div>
+              )}
+            </div>
+          )}
         </Card>
 
         <Card className="lg:col-span-2">
@@ -168,6 +218,33 @@ export default function TrackPage() {
           ) : (
             <EmptyState message="Настроение появится после AI-анализа текста." />
           )}
+          {bridgeTrack && (bridgeTrack.mood_tags?.length || bridgeTrack.tags?.length) ? (
+            <div className="mt-3 pt-3 border-t border-border">
+              <div className="text-[11px] text-muted flex items-center gap-1 flex-wrap">
+                <Sparkles className="w-3 h-3" />
+                <span>Настроение по тегам Last.fm · синхронизировано с мостом</span>
+                {bridgeTrack.synced_at && <span className="tabular-nums">({bridgeTrack.synced_at.slice(0, 10)})</span>}
+                {bridgeTrack.stale && <span title="Последняя синхронизация не удалась">⚠ outdated</span>}
+              </div>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {(bridgeTrack.mood_tags ?? []).map((m) => {
+                  const look = moodLook(m);
+                  const MIcon = look.icon;
+                  return (
+                    <span key={m} className="kuma-pill !text-[11px]" title={`${bridgeTrack.source ?? "bridge"} · ${(bridgeTrack.mood_codes ?? []).join(", ")}`}>
+                      <MIcon className="w-3 h-3" /> {m}
+                    </span>
+                  );
+                })}
+                {!bridgeTrack.mood_tags?.length && (bridgeTrack.tags ?? []).slice(0, 6).map((t) => (
+                  <span key={t} className="kuma-pill !text-[11px]" title="Тег Last.fm (не является пилюлей настроения)">{t}</span>
+                ))}
+              </div>
+              <div className="text-[10px] text-muted mt-1">
+                Аудио-анализ имеет приоритет; мост используется только для треков без анализа.
+              </div>
+            </div>
+          ) : null}
         </Card>
 
         <Card className="lg:col-span-2">

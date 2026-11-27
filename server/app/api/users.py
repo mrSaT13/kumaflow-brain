@@ -469,6 +469,14 @@ def ban_artist(user_id: str, payload: BanIn, db: Session = Depends(get_db)):
             name = aid
     if not name:
         raise HTTPException(400, "artist_name required")
+    # Ручной бан снимает надгробие ban (от старого разбана): правило
+    # «3 дизлайка → автобан» снова применимо к этому артисту впредь.
+    try:
+        from app.services import taste as _taste
+
+        _taste._clear_tombstones(db, str(u.id), "ban", name, aid)
+    except Exception:
+        pass
     row = db.query(_AB).filter_by(user_id=u.id, artist_name=name[:512]).first()
     if row is None:
         db.add(_AB(user_id=u.id, artist_name=name[:512],
@@ -522,6 +530,38 @@ def unban_artist(user_id: str, payload: BanIn, db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
     return {"ok": True}
+
+
+@router.post("/{user_id}/unban-auto")
+def unban_auto_bans(user_id: str, db: Session = Depends(get_db)):
+    """Массовый разбан авто-банов (reason='auto3': 3 дизлайка треков артиста).
+
+    Ручные (manual) и пришедшие с устройств (mobile/desktop) баним не
+    трогаем. Каждому артисту ставится надгробие ban — автобан не сработает
+    на нём снова (_maybe_autoban уважает надгробия), а старый список
+    плеера не воскресит бан при следующем синке.
+    """
+    from app.db.models import ArtistBan as _AB
+    from app.services import taste as _taste
+
+    u = _require_user(db, user_id)
+    removed: list[str] = []
+    try:
+        rows = (db.query(_AB)
+                .filter(_AB.user_id == u.id, _AB.reason == "auto3")
+                .all())
+        for r in rows:
+            _taste._write_tombstone(
+                db, str(u.id), "ban",
+                str(r.artist_name or ""),
+                str(r.artist_external_id or ""))
+            removed.append(str(r.artist_name or ""))
+            db.delete(r)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(500, "unban-auto failed")
+    return {"ok": True, "removed": len(removed), "artists": removed}
 
 
 @router.get("/{user_id}/profile")

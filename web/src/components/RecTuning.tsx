@@ -182,6 +182,7 @@ const GROUPS: { id: string; title: string; desc: string; fields: F[] }[] = [
       { key: "radio_server", label: "Радио: серверный добор", kind: "int" },
       { key: "radio_second_hop_artists", label: "Радио: раскрыть хоп-1", hint: "сколько похожих раскрывать во 2-й хоп", kind: "int" },
       { key: "radio_second_hop", label: "Радио: 2-й хоп с каждого", hint: "похожие на похожих", kind: "int" },
+      { key: "radio_bridge_similar", label: "Радио: похожие из моста", hint: "добавка после локальных, 0 = как раньше; нужны синхронизированные метаданные", kind: "int" },
       { key: "radio_vector", label: "Радио: соседей по звуку", hint: "добор по тембру и 9-D вектору", kind: "int" },
       { key: "mmr_lambda", label: "MMR: торг за разнообразие", hint: "0 выкл, выше — непохожее выигрывает у сильного дубля", kind: "float" },
       { key: "radio_cluster_pool", label: "Радио: соседей сида в пул", hint: "стиль держится после очереди радио", kind: "int" },

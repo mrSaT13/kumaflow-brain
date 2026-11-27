@@ -168,6 +168,14 @@ def list_genres(source: str | None = None, db: Session = Depends(get_db)):
     return {"genres": sorted([r[0] for r in rows if r[0]])}
 
 
+@router.get("/countries")
+def list_countries(db: Session = Depends(get_db)):
+    """Страны артистов из метаданных моста — для фильтра «только своё»."""
+    from app.services.bridge import countries_catalog
+
+    return {"countries": countries_catalog(db)}
+
+
 _moods_cache: dict = {"at": 0.0, "moods": []}
 
 
@@ -285,7 +293,13 @@ def _artist_cover_map(db: Session, names: list[str]) -> dict[str, str]:
 
 
 def _artist_entries(db: Session, names: list[str]) -> list[dict]:
-    """Собрать карточки артистов: счётчики, топ-жанры, обложка."""
+    """Собрать карточки артистов: счётчики, топ-жанры, обложка.
+
+    Поля bridge_* — аддитивные: только если метаданные уже сохранены
+    (внешний API тут не дёргаем). UI помечает их как «синхронизировано».
+    """
+    from app.services import bridge as bridge_svc
+
     if not names:
         return []
     counts = dict(
@@ -304,18 +318,115 @@ def _artist_entries(db: Session, names: list[str]) -> list[dict]:
     for aname, genre, cnt in genre_rows:
         top_genres.setdefault(aname or "", []).append((genre, cnt))
     covers = _artist_cover_map(db, names)
+    bmeta = bridge_svc.cached_meta_map(db, names)
     out = []
     for n in names:
         gs = sorted(top_genres.get(n, []), key=lambda kv: kv[1], reverse=True)
+        m = bmeta.get(bridge_svc.artist_key(n)) or {}
         out.append(
             {
                 "name": n,
                 "track_count": counts.get(n, 0),
                 "top_genres": [g for g, _ in gs[:3]],
                 "cover_track_id": covers.get(n),
+                "bridge_tags": m.get("tags") or [],
+                "bridge_bio": m.get("bio_summary") or "",
+                "bridge_similar": m.get("similar_artists") or [],
+                "bridge_synced_at": m.get("synced_at"),
             }
         )
     return out
+
+
+@router.get("/artist")
+def artist_details(name: str, db: Session = Depends(get_db)):
+    """Всё об артисте на одной странице: библиотека + метаданные моста.
+
+    Аддитивно: метаданные моста не заменяют локальные жанры/статистику,
+    а лежат рядом с пометкой источника и даты синхронизации.
+    """
+    from app.services import bridge as bridge_svc
+    from app.services.artist_names import norm_name
+
+    want = norm_name(name)
+    if not want:
+        return {"ok": False, "error": "empty name"}
+    cmp_col = func.lower(func.trim(Track.artist_name))
+    base = db.query(Track).filter(cmp_col == want)
+    total = base.count()
+    if not total:
+        # Нет в библиотеке — всё равно отдаём метаданные моста, если есть.
+        m = bridge_svc.cached_meta_map(db, [name]).get(bridge_svc.artist_key(name))
+        return {"ok": True, "name": name, "in_library": False, "track_count": 0,
+                "tracks": [], "albums": [], "genres": [], "stats": {},
+                "bridge": m, "similar": []}
+
+    display = str(base.first().artist_name or name)
+    stats = {
+        "tracks": total,
+        "plays": int(db.query(func.coalesce(func.sum(Track.play_count), 0))
+                     .filter(cmp_col == want).scalar() or 0),
+        "likes": int(db.query(func.count(models.Favorite.track_id))
+                     .join(Track, Track.id == models.Favorite.track_id)
+                     .filter(cmp_col == want).scalar() or 0),
+        "albums": int(db.query(func.count(func.distinct(Track.album_name)))
+                      .filter(cmp_col == want).scalar() or 0),
+        "last_played": max([str(r[0]) for r in db.query(Track.last_played_at)
+                            .filter(cmp_col == want, Track.last_played_at.isnot(None))
+                            .all() if r[0]], default=""),
+    }
+    tracks = [
+        {"track_id": str(t.id), "title": str(t.title), "album_name": str(t.album_name or ""),
+         "genre": str(t.genre or ""), "year": t.year, "plays": int(t.play_count or 0),
+         "cover_art_id": str(t.cover_art_id or "")}
+        for t in base.order_by(Track.play_count.desc().nullslast()).limit(200).all()
+    ]
+    albums = [
+        {"external_id": str(a.external_id), "title": str(a.title),
+         "year": a.year, "genre": str(a.genre or ""),
+         "cover_art_id": str(a.cover_art_id or "")}
+        for a in (db.query(Album)
+                  .filter(func.lower(func.trim(Album.artist_name)) == want)
+                  .order_by(Album.year.desc().nullslast()).limit(100).all())
+    ]
+    genres = [
+        {"name": str(g), "count": int(c)}
+        for g, c in (db.query(Track.genre, func.count(Track.id))
+                     .filter(cmp_col == want, Track.genre.isnot(None))
+                     .group_by(Track.genre)
+                     .order_by(func.count(Track.id).desc()).limit(20).all())
+    ]
+    m = bridge_svc.cached_meta_map(db, [display]).get(bridge_svc.artist_key(display))
+    # Похожие: локальные + из моста, с пометкой источника и наличия в библиотеке.
+    similar: list[dict] = []
+    try:
+        from app.services.seed_radio import _similar_artist_names as _sim
+
+        local_similar = list(_sim(db, display, limit=12) or [])
+    except Exception:
+        local_similar = []
+    bridge_similar = list((m or {}).get("similar_artists") or [])[:12]
+    seen: set[str] = set()
+    for n in local_similar + bridge_similar:
+        key = bridge_svc.artist_key(n)
+        if not key or key == bridge_svc.artist_key(display) or key in seen:
+            continue
+        seen.add(key)
+        in_lib = db.query(func.count(Track.id)).filter(
+            func.lower(func.trim(Track.artist_name)) == norm_name(n)).scalar() or 0
+        similar.append({
+            "name": str(n),
+            "track_count": int(in_lib),
+            "from_bridge": n in bridge_similar and n not in local_similar,
+            "bridge_synced_at": (m or {}).get("synced_at"),
+        })
+    return {
+        "ok": True, "name": display, "in_library": True,
+        "entry": (_artist_entries(db, [display]) or [{}])[0],
+        "track_count": total, "stats": stats, "tracks": tracks,
+        "albums": albums, "genres": genres, "bridge": m,
+        "similar": similar[:20],
+    }
 
 
 @router.get("/artists")

@@ -4,7 +4,7 @@ import Link from "next/link";
 import useSWR from "swr";
 import { useParams } from "next/navigation";
 import { useState } from "react";
-import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Ban, KeyRound, Users } from "lucide-react";
+import { Heart, Play, RefreshCw, ThumbsDown, ThumbsUp, Bot, Hand, Smartphone, KeyRound, Users } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import UserDevices from "@/components/UserDevices";
 import MyTokens from "@/components/MyTokens";
@@ -106,6 +106,7 @@ export default function UserProfilePage() {
   const { data: me } = useSWR(["whoami"], () => api.whoami());
   const isMine = !!me?.owner_user_id && me.owner_user_id === id;
   const [busy, setBusy] = useState(false);
+  const [disLimit, setDisLimit] = useState(20);
   const [waveMood, setWaveMood] = useState("");
   const toast = useToast();
   const [pwdOpen, setPwdOpen] = useState(false);
@@ -167,6 +168,18 @@ export default function UserProfilePage() {
   if (!data?.ok) return <EmptyState message="Пользователь не найден." />;
 
   const genres = data.genres ?? [];
+  // Детальный список банов (причина/дата) с фолбэком на старый формат.
+  type BanEntry = { name: string; external_id?: string; reason?: string; created_at?: string | null };
+  const bans: BanEntry[] = (data.bannedArtistsDetailed?.length
+    ? data.bannedArtistsDetailed
+    : data.bannedArtists.map((n) => ({ name: n })));
+  const bansAuto = bans.filter((b) => b.reason === "auto3");
+  const banReasonText = (reason?: string) =>
+    reason === "auto3" ? "авто: 3 явных дизлайка треков артиста"
+      : reason === "manual" ? "вручную"
+      : "с устройства (синк)";
+  const banTitle = (b: BanEntry) =>
+    `${b.name} — ${banReasonText(b.reason)}${b.created_at ? `, ${b.created_at.slice(0, 10)}` : ""}`;
   const positives = genres.filter((g) => g.weight > 0 && g.name !== "—");
   const unknownCount = genres.filter((g) => g.name === "—").reduce((s, g) => s + g.likes + g.plays, 0);
   const sumW = positives.reduce((s, g) => s + g.weight, 0) || 1;
@@ -406,22 +419,58 @@ export default function UserProfilePage() {
               <div className="text-sm text-muted">Нет дизлайков. <Heart className="w-3 h-3 inline" /></div>
             ) : (
               <div className="flex flex-wrap gap-2">
-                {data.top_tracks.filter((t) => t.like === false).slice(0, 20).map((t) => (
-                  <span key={t.track_id} className="kuma-pill">
-                    {t.artist_name ? `${t.artist_name} — ` : ""}{t.title}
-                    <button className="hover:text-text ml-1" title="Снять дизлайк" onClick={() => act(() => api.rateTrack(id, t.track_id, null))} disabled={busy}>✕</button>
-                  </span>
-                ))}
+                {(() => {
+                  const dislikedTracks = data.top_tracks.filter((t) => t.like === false);
+                  const shown = dislikedTracks.slice(0, disLimit);
+                  return (
+                    <>
+                      {shown.map((t) => (
+                        <span key={t.track_id} className="kuma-pill">
+                          {t.artist_name ? `${t.artist_name} — ` : ""}{t.title}
+                          <button className="hover:text-text ml-1" title="Снять дизлайк" onClick={() => act(() => api.rateTrack(id, t.track_id, null))} disabled={busy}>✕</button>
+                        </span>
+                      ))}
+                      {dislikedTracks.length > disLimit && (
+                        <button className="kuma-pill text-muted hover:text-text" onClick={() => setDisLimit(disLimit >= 200 ? 1000 : disLimit * 5)} disabled={busy}>
+                          Показать ещё (осталось ≥ {dislikedTracks.length - disLimit})
+                        </button>
+                      )}
+                      {dislikedTracks.length < data.dislikedSongs.length && (
+                        <span className="kuma-pill text-muted" title="Полный список в топе треков; здесь показаны самые скоринговые">
+                          итого снятых: {data.dislikedSongs.length}
+                        </span>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             )}
             {data.bannedArtists.length > 0 && (
               <div className="mt-3">
-                <div className="text-xs text-muted mb-2">Забаненные артисты:</div>
+                <div className="text-xs text-muted mb-2 flex items-center gap-2 flex-wrap">
+                  <span>Забаненные артисты:</span>
+                  {(bansAuto.length > 0) && (
+                    <button
+                      className="kuma-pill hover:text-text"
+                      title={`Массовый разбан авто-банов (причина: 3 явных дизлайка треков артиста). Ручные и с устройств не трогаются.`}
+                      onClick={() => act(() => api.unbanAuto(id), `Разбанено авто-банов: ${bansAuto.length}`)}
+                      disabled={busy}
+                    >
+                      <Bot className="w-3 h-3" /> Разбанить авто ({bansAuto.length})
+                    </button>
+                  )}
+                </div>
                 <div className="flex flex-wrap gap-2">
-                  {data.bannedArtists.map((b) => (
-                    <span key={b} className="kuma-pill">
-                      <Ban className="w-3 h-3" /> {b}
-                      <button className="hover:text-text ml-1" title="Разбанить" onClick={() => act(() => api.unbanArtist(id, b))} disabled={busy}>✕</button>
+                  {bans.map((b) => (
+                    <span key={b.name} className="kuma-pill" title={banTitle(b)}>
+                      {b.reason === "auto3" ? <Bot className="w-3 h-3" />
+                        : b.reason === "manual" ? <Hand className="w-3 h-3" />
+                        : <Smartphone className="w-3 h-3" />}
+                      {b.name}
+                      {b.created_at && (
+                        <span className="text-muted tabular-nums text-[10px]">{b.created_at.slice(0, 10)}</span>
+                      )}
+                      <button className="hover:text-text ml-1" title={banTitle(b)} onClick={() => act(() => api.unbanArtist(id, b.name))} disabled={busy}>✕</button>
                     </span>
                   ))}
                 </div>

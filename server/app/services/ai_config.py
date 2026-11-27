@@ -22,6 +22,9 @@ _DEFAULTS: dict[str, Any] = {
     "ollama_cloud_api_key": "",
     "gemini_api_key": "",
     "mistral_api_key": "",
+    "opencode_server_url": "",
+    "opencode_chat_url": "",
+    "opencode_api_key": "",
 }
 
 
@@ -65,6 +68,9 @@ def effective_ai() -> dict[str, Any]:
         "ollama_cloud_model": s.ollama_cloud_model or "",
         "gemini_api_key": s.gemini_api_key or "",
         "mistral_api_key": s.mistral_api_key or "",
+        "opencode_server_url": s.opencode_server_url or "",
+        "opencode_chat_url": s.opencode_chat_url or "",
+        "opencode_api_key": s.opencode_api_key or "",
     }
     try:
         from app.db.database import session_scope
@@ -79,7 +85,8 @@ def effective_ai() -> dict[str, Any]:
             eff["ollama_model"] = saved["model"]
             eff["ollama_cloud_model"] = saved["model"]
         for k in ("openai_api_key", "openai_server_url", "ollama_server_url",
-                  "ollama_cloud_api_key", "gemini_api_key", "mistral_api_key"):
+                  "ollama_cloud_api_key", "gemini_api_key", "mistral_api_key",
+                  "opencode_server_url", "opencode_chat_url", "opencode_api_key"):
             if saved.get(k):
                 eff[k] = saved[k]
         if not eff["model"]:

@@ -2,7 +2,7 @@
 
 import useSWR from "swr";
 import { useEffect, useState } from "react";
-import { Check, Sparkles, Wifi } from "lucide-react";
+import { Check, RefreshCw, Sparkles, Wifi } from "lucide-react";
 import { Badge, Button, Card, Input, PageHeader, Section } from "@/components/ui";
 import Automation from "@/components/Automation";
 import About from "@/components/About";
@@ -98,6 +98,7 @@ export default function SettingsPage() {
   const { data, mutate } = useSWR("/api/settings", () => api.settings());
   const { data: media, mutate: mutateMedia } = useSWR("/api/settings/media-server", () => api.getMediaServer());
   const { data: bridge, mutate: mutateBridge } = useSWR("/api/settings/bridge", () => api.getBridge());
+  const { data: bridgeStats, mutate: mutateBridgeStats } = useSWR("bridge-enrich-stats", () => api.bridgeEnrichStats());
   const { data: syncCfg, mutate: mutateSync } = useSWR("/api/library-sync/config", () => api.getLibrarySync());
   // Диагностика крона: «работает ли планировщик». Раньше ответ на этот вопрос
   // приходилось искать в логах docker — здесь он сразу на странице.
@@ -130,6 +131,10 @@ export default function SettingsPage() {
   const [ollamaCloudKey, setOllamaCloudKey] = useState("");
   const [geminiKey, setGeminiKey] = useState("");
   const [mistralKey, setMistralKey] = useState("");
+  const [opencodeUrl, setOpencodeUrl] = useState("https://opencode.ai/zen/v1");
+  const [opencodeKey, setOpencodeKey] = useState("");
+  const [opencodeChatUrl, setOpencodeChatUrl] = useState("https://opencode.ai/inference/openai/v1/chat/completions");
+  const [opencodeFree, setOpencodeFree] = useState<{ id: string; name: string; free: boolean; context?: number | null; description?: string }[]>([]);
   const [aiBusy, setAiBusy] = useState(false);
   const [modelsBusy, setModelsBusy] = useState(false);
   const [aiPrompt, setAiPrompt] = useState("Скажи ok одним словом");
@@ -142,6 +147,9 @@ export default function SettingsPage() {
   const [bridgeEnabled, setBridgeEnabled] = useState(false);
   const [bridgeResult, setBridgeResult] = useState<string | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [enrichBusy, setEnrichBusy] = useState(false);
+  const [enrichLimit, setEnrichLimit] = useState(25);
+  const [enrichKind, setEnrichKind] = useState<"all" | "artist" | "track" | "album">("all");
   const [syncUrl, setSyncUrl] = useState("");
   const [syncToken, setSyncToken] = useState("");
   const [syncEnabled, setSyncEnabled] = useState(false);
@@ -181,6 +189,9 @@ export default function SettingsPage() {
     if (s.ollama_cloud_api_key) setOllamaCloudKey(s.ollama_cloud_api_key);
     if (s.gemini_api_key) setGeminiKey(s.gemini_api_key);
     if (s.mistral_api_key) setMistralKey(s.mistral_api_key);
+    if (s.opencode_server_url) setOpencodeUrl(s.opencode_server_url);
+    if (s.opencode_api_key) setOpencodeKey(s.opencode_api_key);
+    if (s.opencode_chat_url) setOpencodeChatUrl(s.opencode_chat_url);
   }, [aiCfg]);
 
   async function saveMedia() {
@@ -226,6 +237,9 @@ export default function SettingsPage() {
         ollama_cloud_api_key: ollamaCloudKey.trim(),
         gemini_api_key: geminiKey.trim(),
         mistral_api_key: mistralKey.trim(),
+        opencode_server_url: opencodeUrl.trim() || "https://opencode.ai/zen/v1",
+        opencode_chat_url: opencodeChatUrl.trim() || "https://opencode.ai/inference/openai/v1/chat/completions",
+        opencode_api_key: opencodeKey.trim(),
       });
       if (!r.ok) { toast(r.error ?? "Ошибка сохранения", "err"); return; }
       await Promise.all([mutate(), mutateAi()]);
@@ -240,9 +254,16 @@ export default function SettingsPage() {
   async function loadModels() {
     setModelsBusy(true);
     try {
-      const r = await api.aiModels();
-      setAiModels(r.available ?? []);
-      if (!r.available?.length) toast("Список моделей пуст — проверьте ключ/URL и сохраните настройки (для OLLAMA_CLOUD нужен токен с ollama.com/settings)", "info");
+      if (aiProvider === "OPENCODE") {
+        const r = await api.aiOpenCodeModels(true, false);
+        setOpencodeFree(r.models ?? []);
+        setAiModels((r.models ?? []).map((m) => m.id));
+        if (!r.models?.length) toast("Free-модели не найдены — проверьте URL каталога OpenCode Zen", "info");
+      } else {
+        const r = await api.aiModels();
+        setAiModels(r.available ?? []);
+        if (!r.available?.length) toast("Список моделей пуст — проверьте ключ/URL и сохраните настройки (для OLLAMA_CLOUD нужен токен с ollama.com/settings)", "info");
+      }
     } catch (e: unknown) {
       toast(fmtErr(e), "err");
     } finally {
@@ -309,6 +330,29 @@ export default function SettingsPage() {
       setBridgeResult(`✗ Ошибка: ${String(e)}`);
     } finally {
       setBridgeBusy(false);
+    }
+  }
+
+  async function runEnrich() {
+    setEnrichBusy(true);
+    setBridgeResult(null);
+    try {
+      const r = await api.bridgeEnrich({ limit: enrichLimit, kind: enrichKind });
+      if (r.ok) {
+        const parts = [
+          `артисты: +${r.fetched ?? 0} / кэш ${r.cached ?? 0} / ошибки ${r.failed ?? 0}`,
+          `треки: +${r.tracks?.fetched ?? 0} / кэш ${r.tracks?.cached ?? 0}`,
+          `альбомы: +${r.albums?.fetched ?? 0} / кэш ${r.albums?.cached ?? 0}`,
+        ];
+        setBridgeResult(`✓ ${parts.join(" · ")}`);
+        void mutateBridgeStats();
+      } else {
+        setBridgeResult(`✗ Синхронизация: ${r.error ?? "неизвестная ошибка"}`);
+      }
+    } catch (e: unknown) {
+      setBridgeResult(`✗ Ошибка: ${String(e)}`);
+    } finally {
+      setEnrichBusy(false);
     }
   }
 
@@ -446,6 +490,7 @@ export default function SettingsPage() {
                 <option value="OPENAI">OpenAI-совместимый</option>
                 <option value="GEMINI">Google Gemini</option>
                 <option value="MISTRAL">Mistral</option>
+                <option value="OPENCODE">OpenCode Zen (Free)</option>
               </select>
             </label>
             <div className="block">
@@ -477,9 +522,10 @@ export default function SettingsPage() {
                   <div className="text-[11px] text-muted mb-1">Быстрый выбор из списка:</div>
                   <select className="kuma-input w-full" value={aiModel} onChange={(e) => setAiModel(e.target.value)}>
                     <option value="">— выбрать из загруженных —</option>
-                    {aiModels.map((m) => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
+                    {aiModels.map((m) => {
+                      const free = opencodeFree.find((x) => x.id === m)?.free;
+                      return <option key={m} value={m}>{free ? "FREE · " : ""}{m}</option>;
+                    })}
                   </select>
                 </div>
               )}
@@ -501,6 +547,23 @@ export default function SettingsPage() {
             )}
             {aiProvider === "MISTRAL" && (
               <Field label="Mistral API key" value={mistralKey} onChange={setMistralKey} type="password" placeholder="…" />
+            )}
+            {aiProvider === "OPENCODE" && (
+              <>
+                <Field label="Каталог моделей" value={opencodeUrl} onChange={setOpencodeUrl} placeholder="https://opencode.ai/zen/v1" />
+                <Field label="Chat URL" value={opencodeChatUrl} onChange={setOpencodeChatUrl} placeholder="https://opencode.ai/inference/openai/v1/chat/completions" />
+                <Field label="API-ключ (опционально)" value={opencodeKey} onChange={setOpencodeKey} type="password" placeholder="если нужен для инференса" />
+                {!!opencodeFree.length && (
+                  <div className="text-[11px] text-muted mt-1 flex flex-wrap gap-1">
+                    <span className="font-semibold">Free ({opencodeFree.length}):</span>
+                    {opencodeFree.slice(0, 12).map((m) => (
+                      <button key={m.id} className="kuma-pill hover:text-text" onClick={() => setAiModel(m.id)} title={m.description}>
+                        {m.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
           <div className="mt-4 flex gap-2 flex-wrap">
@@ -719,6 +782,47 @@ export default function SettingsPage() {
             <Button variant="ghost" onClick={testBridge} disabled={bridgeBusy}>
               <Wifi className="w-4 h-4" /> {bridgeBusy ? "Проверяю…" : "Проверить мост"}
             </Button>
+          </div>
+          <div className="mt-4 pt-3 border-t border-border">
+            <div className="text-xs text-muted mb-2">
+              Синхронизировано: артистов <b className="text-text">{bridgeStats?.total_meta ?? 0}</b>
+              {" · "}треков <b className="text-text">{bridgeStats?.tracks_meta ?? 0}</b>
+              {" · "}альбомов <b className="text-text">{bridgeStats?.albums_meta ?? 0}</b>
+              {bridgeStats?.ttl_days ? ` · обновление раз в ${bridgeStats.ttl_days} дн. (и кроном)` : ""}
+              <span className="block mt-1">
+                Теги/похожие подмешиваются в радио и cold-start как добавка; на странице трека они помечены как «синхронизировано с мостом».
+              </span>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <label className="text-xs text-muted flex items-center gap-1">
+                что
+                <select
+                  className="kuma-input !w-auto !py-1"
+                  value={enrichKind}
+                  onChange={(e) => setEnrichKind(e.target.value as typeof enrichKind)}
+                  disabled={enrichBusy}
+                >
+                  <option value="all">всё</option>
+                  <option value="artist">артисты</option>
+                  <option value="track">треки</option>
+                  <option value="album">альбомы</option>
+                </select>
+              </label>
+              <label className="text-xs text-muted flex items-center gap-1">
+                за раз
+                <select
+                  className="kuma-input !w-auto !py-1"
+                  value={enrichLimit}
+                  onChange={(e) => setEnrichLimit(Number(e.target.value))}
+                  disabled={enrichBusy}
+                >
+                  {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <Button variant="ghost" onClick={runEnrich} disabled={enrichBusy || !bridge?.enabled}>
+                <RefreshCw className="w-4 h-4" /> {enrichBusy ? "Синхронизирую…" : "Синхронизировать метаданные"}
+              </Button>
+            </div>
           </div>
           {bridgeResult && (
             <div className={`mt-3 text-sm p-3 rounded-lg border ${bridgeResult.startsWith("✓") ? "border-emerald-300 text-emerald-700 bg-emerald-50 dark:bg-emerald-950" : "border-rose-300 text-rose-700 bg-rose-50 dark:bg-rose-950"}`}>

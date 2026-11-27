@@ -37,6 +37,7 @@ export default function LibraryPage() {
   const [qDebounced, setQDebounced] = useState("");
   const [genre, setGenre] = useState<string>("");
   const [mood, setMood] = useState<string>("");
+  const [country, setCountry] = useState<string>("");
   const [source, setSource] = useState<string>("");
   const [page, setPage] = useState(0);
 
@@ -50,7 +51,7 @@ export default function LibraryPage() {
 
   useEffect(() => {
     setPage(0);
-  }, [genre, mood, source]);
+  }, [genre, mood, country, source]);
 
   const offset = page * PAGE_SIZE;
 
@@ -60,12 +61,13 @@ export default function LibraryPage() {
   const isRunning = current?.current?.status === "running" || current?.current?.status === "queued";
 
   const { data, isLoading, mutate } = useSWR(
-    ["tracks", qDebounced, genre, mood, source, page],
+    ["tracks", qDebounced, genre, mood, country, source, page],
     () =>
       api.listTracks({
         q: qDebounced || undefined,
         genre: genre || undefined,
         mood: mood || undefined,
+        country: country || undefined,
         source: source || undefined,
         limit: PAGE_SIZE,
         offset,
@@ -84,6 +86,7 @@ export default function LibraryPage() {
   // Список настроений обновляется сам: TTL-кэш 120с на бэке + поллинг тут —
   // новые настроения после скана появятся без перезагрузки страницы.
   const { data: moodsData } = useSWR("/api/library/moods", () => api.moods(), { refreshInterval: 60000 });
+  const { data: countriesData } = useSWR("/api/library/countries", () => api.countries(), { refreshInterval: 60000 });
   const { data: media } = useSWR("/api/settings/media-server", () => api.getMediaServer());
   // Счётчики обзора — единственное, что меняется при сканировании. Раньше
   // оба висели без интервала: прогресс шёл, а «Треков: N» стоял на месте.
@@ -97,13 +100,14 @@ export default function LibraryPage() {
 
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const hasFilter = Boolean(qDebounced || genre || mood || source);
+  const hasFilter = Boolean(qDebounced || genre || mood || country || source);
 
   function resetFilters() {
     setQ("");
     setQDebounced("");
     setGenre("");
     setMood("");
+    setCountry("");
     setSource("");
     setPage(0);
   }
@@ -187,6 +191,19 @@ export default function LibraryPage() {
               {(moodsData?.moods ?? []).map((m) => (
                 <option key={m.name} value={m.name}>
                   {m.name} · {m.count}
+                </option>
+              ))}
+            </select>
+            <select
+              className="kuma-input kuma-input-inline w-40"
+              value={country}
+              onChange={(e) => setCountry(e.target.value)}
+              title="Страна артиста из метаданных моста (нужна синхронизация)"
+            >
+              <option value="">Все страны</option>
+              {(countriesData?.countries ?? []).map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.code} · {c.artists} арт.
                 </option>
               ))}
             </select>
