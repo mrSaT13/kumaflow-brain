@@ -75,7 +75,7 @@ export default function ChartsPage() {
                 title={a.url}
               >
                 <span className="text-xs text-muted tabular-nums w-6">{i + 1}</span>
-                {a.image_url ? (
+                {a.image_url && !a.image_url.includes("2a96cbd8b46e442fc41c2b86b821562f") ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={a.image_url} alt="" className="w-10 h-10 rounded object-cover" loading="lazy" />
                 ) : (

@@ -22,6 +22,19 @@ def _norm_url(u: str | None) -> str:
     return u
 
 
+# Last.fm отдаёт свой «нет картинки» как обычный URL с этим хэшем — он
+# перекрывал реальную локальную обложку артиста на странице.
+_LFM_NO_IMAGE = "2a96cbd8b46e442fc41c2b86b821562f"
+
+
+def clean_image_url(url: Any) -> str:
+    """Пусто для отсутствия/плацехолдера Last.fm, иначе исходный URL."""
+    s = str(url or "").strip()
+    if not s or _LFM_NO_IMAGE in s.lower():
+        return ""
+    return s
+
+
 def _int(value: Any) -> int | None:
     """Last.fm отдаёт счётчики строками ('8531521'); пусто/мусор → None."""
     if value is None or value == "":
@@ -149,7 +162,7 @@ def meta_to_dict(row) -> dict[str, Any]:
         "cover_url": str(row.cover_url or ""),
         "listeners": int(row.listeners or 0),
         "playcount": int(row.playcount or 0),
-        "image_url": str(row.image_url or ""),
+        "image_url": clean_image_url(row.image_url),
         "mood": {
             "valence": row.mood_valence,
             "energy": row.mood_energy,
@@ -259,7 +272,7 @@ def enrich_artist(db: Session, name: str, force: bool = False) -> dict[str, Any]
         # Live-счётчики и муд из моста (значения могут отсутствовать — None).
         row.listeners = _int(data.get("listeners"))
         row.playcount = _int(data.get("playcount"))
-        row.image_url = str(data.get("image_url") or "") or None
+        row.image_url = clean_image_url(data.get("image_url")) or None
         _mood = data.get("mood") or {}
         if not isinstance(_mood, dict):
             _mood = {}
@@ -505,7 +518,7 @@ def enrich_track(db: Session, track, force: bool = False) -> dict[str, Any] | No
         "url": str(data.get("url") or ""),
         "listeners": _int(data.get("listeners")),
         "playcount": _int(data.get("playcount")),
-        "image_url": str(data.get("image_url") or "") or None,
+        "image_url": clean_image_url(data.get("image_url")) or None,
         "mood": data.get("mood") if isinstance(data.get("mood"), dict) else {},
     }
     return _save_enrich(db, tid, TRACK_SRC, payload, True)
@@ -547,7 +560,7 @@ def enrich_album(db: Session, album, representative_track_id: str,
         "url": str(data.get("url") or ""),
         "listeners": _int(data.get("listeners")),
         "playcount": _int(data.get("playcount")),
-        "image_url": str(data.get("image_url") or "") or None,
+        "image_url": clean_image_url(data.get("image_url")) or None,
         "mood": data.get("mood") if isinstance(data.get("mood"), dict) else {},
     }
     return _save_enrich(db, tid, ALBUM_SRC, payload, True)

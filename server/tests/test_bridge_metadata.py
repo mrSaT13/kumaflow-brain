@@ -94,6 +94,18 @@ def test_enrich_caches_bridge_response_and_never_calls_twice(monkeypatch):
     assert db.query(models.ArtistMetadata).count() == 1
 
 
+def test_lastfm_no_image_placeholder_is_not_exposed():
+    db = SessionLocal()
+    row = models.ArtistMetadata(
+        name_key=bridge_svc.artist_key("No Cover"), name="No Cover",
+        image_url="https://lastfm-img.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png",
+    )
+    db.add(row)
+    db.commit()
+    assert bridge_svc.clean_image_url(row.image_url) == ""
+    assert bridge_svc.meta_to_dict(row)["image_url"] == ""
+
+
 def test_enrich_is_noop_when_bridge_disabled(monkeypatch):
     db = SessionLocal()
 

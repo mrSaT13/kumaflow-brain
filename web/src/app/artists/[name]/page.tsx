@@ -3,7 +3,7 @@
 import Link from "next/link";
 import useSWR from "swr";
 import { useParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, ExternalLink, RefreshCw, Sparkles } from "lucide-react";
 import { Badge, Button, Card, EmptyState, PageHeader, Section, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -24,6 +24,7 @@ export default function ArtistPage() {
   const { isAdmin } = useIsAdmin();
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [coverTry, setCoverTry] = useState(0);
 
   async function refresh() {
     setBusy(true);
@@ -43,7 +44,12 @@ export default function ArtistPage() {
   if (error || !data?.ok) return <EmptyState message="Артист не найден." />;
 
   const b = data.bridge;
-  const cover = b?.image_url || b?.cover_url || (data.entry?.cover_track_id ? api.trackCoverUrl(data.entry.cover_track_id, 400) : "");
+  const localCover = data.entry?.cover_track_id ? api.trackCoverUrl(data.entry.cover_track_id, 400) : "";
+  // Картинку Last.fm (image_url) сознательно НЕ используем: это часто
+  // серый плейсхолдер «нет фото». Локальная обложка из библиотеки точнее.
+  const coverSources = [b?.cover_url, localCover].filter(Boolean) as string[];
+  const cover = coverSources[Math.min(coverTry, coverSources.length - 1)] ?? "";
+  useEffect(() => setCoverTry(0), [name, b?.synced_at]);
   const stats = data.stats ?? {};
 
   return (
@@ -68,7 +74,7 @@ export default function ArtistPage() {
                 src={cover}
                 alt={`Обложка ${data.name}`}
                 className="w-48 h-48 rounded-2xl object-cover border border-border"
-                onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+                onError={() => setCoverTry((v) => Math.min(v + 1, coverSources.length - 1))}
               />
             ) : (
               <div className="w-48 h-48 rounded-2xl border border-dashed border-border flex items-center justify-center text-muted text-sm">
